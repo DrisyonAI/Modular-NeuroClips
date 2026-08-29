@@ -1,6 +1,6 @@
 # Modular-NeuroClips
 
-A modular, low-VRAM AI video generation engine and orchestrator engineered for VPS environments. `Modular-NeuroClips` automates the end-to-end production of long-form, multi-scene videos and educational course modules from text prompts or structured curriculum spreadsheets.
+A modular, low-VRAM AI video generation engine and orchestrator engineered for VPS environments. `Modular-NeuroClips` automates the end-to-end production of multi-scene videos and educational course modules from text prompts or structured curriculum spreadsheets.
 
 The pipeline integrates **Ollama (Llama 3)** for structured scene breakdown, **Stable Diffusion** for keyframe synthesis, **CogVideoX** for image-to-video diffusion, **Edge-TTS** for zero-VRAM voiceover synthesis, and **FFmpeg** for video-audio assembly—all monitored in real time via a lightweight telemetry dashboard.
 
@@ -8,8 +8,8 @@ The pipeline integrates **Ollama (Llama 3)** for structured scene breakdown, **S
 
 ## Features
 
-* **Sequential VRAM Offloading:** Automatically loads and unloads models between text generation, image diffusion, and video animation stages to run within 8GB–12GB VRAM limits.
-* **Fast Standard-Definition (SD/480p) Preset:** Optimized render profiles ($576\times320$) reduce inference steps and memory bottlenecks.
+* **Sequential VRAM Offloading:** Automatically loads and unloads models between text generation, image diffusion, and video animation stages to run reliably within 8GB–12GB VRAM limits.
+* **Fast Standard-Definition (SD/480p) Preset:** Optimized render profiles ($576\times320$) reduce inference steps and eliminate memory bottlenecks.
 * **Zero-VRAM Voice Synthesis:** Integrated `edge-tts` engine generates studio-quality voiceovers without competing for GPU memory.
 * **Curriculum & Spreadsheet Ingestion:** Batch-processes multi-module curriculum files (`.xlsx`) into structured video lessons.
 * **Fault-Tolerant Error Recovery:** Automatic exponential backoff, resolution step-down, and retries for failed or OOM diffusion frames.
@@ -146,22 +146,22 @@ DASHBOARD_PORT=8000
 
 ---
 
-## Usage
+## VPS Quick-Start & Usage
 
 ### 1. Launch the Telemetry Dashboard
 
-Run the dashboard server in the background to monitor GPU metrics and job progress:
+Run the dashboard in a persistent background process or `tmux` session:
 
 ```bash
-uvicorn src.dashboard:app --host 0.0.0.0 --port 8000 &
+tmux new -s dashboard
+source venv/bin/activate
+uvicorn src.dashboard:app --host 0.0.0.0 --port 8000
 
 ```
 
-Access the dashboard at `http://<your-vps-ip>:8000`.
+*Detach with `Ctrl + B`, then `D`. Access the live UI at `http://<YOUR_VPS_IP>:8000`.*
 
 ### 2. Generate Video from a Text Prompt
-
-Run the main orchestrator CLI:
 
 ```bash
 python main.py --topic "Autonomous AI agents managing financial transactions and real-time fraud detection" --scenes 3
@@ -176,14 +176,14 @@ Outputs will be saved in `./render_output/`:
 
 ### 3. Batch Generate Videos from Curriculum Spreadsheet
 
-To ingest a structured multi-lesson Excel workbook (e.g., course syllabi or lesson scripts):
+Place your curriculum spreadsheet (e.g., `Nipuna_AI_Agents_in_FinTech_15_Hour_Course-updated-v3.xlsx`) in the root directory and run:
 
 ```bash
 python src/curriculum_engine.py
 
 ```
 
-This parses narration scripts, synthesizes voiceovers via `edge-tts`, generates keyframes and motion clips, and syncs audio-video lengths per lesson automatically.
+This parses narration scripts, synthesizes zero-VRAM voiceovers via `edge-tts`, generates keyframes and motion clips, and exports compiled video lessons into `./curriculum_output/`.
 
 ---
 
@@ -195,7 +195,7 @@ This parses narration scripts, synthesizes voiceovers via `edge-tts`, generates 
 | **Diffusion Steps (T2I / I2V)** | 20 / 20 steps | 30 / 35 steps |
 | **Peak VRAM Usage** | ~6.5 GB – 8.5 GB | ~16 GB – 22 GB |
 | **Generation Time / Scene** | ~35 – 60 seconds | ~2.5 – 4.0 minutes |
-| **Recommended GPU** | RTX 3060 / 4060 / T4 | RTX 3090 / 4090 / A5000 / L4 |
+| **Recommended GPU** | RTX 3060 / 4060 / T4 / L4 | RTX 3090 / 4090 / A5000 / A100 |
 
 ---
 
