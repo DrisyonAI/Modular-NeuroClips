@@ -1,415 +1,281 @@
-# Modular-NeuroClips
-
-A modular, low-VRAM AI video generation engine and orchestrator engineered for VPS environments. `Modular-NeuroClips` automates the end-to-end production of multi-scene videos and educational course modules from text prompts or structured curriculum spreadsheets.
-
-The pipeline integrates **Ollama (Llama 3)** for structured scene breakdown, **Stable Diffusion** for keyframe synthesis, **CogVideoX** for image-to-video diffusion, **Edge-TTS** for zero-VRAM voiceover synthesis, and **FFmpeg** for video-audio assembly—all monitored in real time via a lightweight telemetry dashboard.
+# ⚡ Modular-NeuroClips Studio (v2.6)
+> **Autonomous AI Video, Courseware, & Multi-Modal LMS Producer**  
+> *Transforming instructional text, spreadsheets, and concepts into broadcast-grade video courses with neural voiceovers, dynamic speaker avatars, and 1-click SCORM 1.2 packaging.*
 
 ---
 
-## Features
-
-* **Sequential VRAM Offloading:** Automatically loads and unloads models between text generation, image diffusion, and video animation stages to run reliably within 8GB–12GB VRAM limits.
-* **Fast Standard-Definition (SD/480p) Preset:** Optimized render profiles ($576\times320$) reduce inference steps and eliminate memory bottlenecks.
-* **Zero-VRAM Voice Synthesis:** Integrated `edge-tts` engine generates studio-quality voiceovers without competing for GPU memory.
-* **Curriculum & Spreadsheet Ingestion:** Batch-processes multi-module curriculum files (`.xlsx`) into structured video lessons.
-* **Fault-Tolerant Error Recovery:** Automatic exponential backoff, resolution step-down, and retries for failed or OOM diffusion frames.
-* **Real-Time Telemetry Dashboard:** Live SSE-powered web interface tracking GPU VRAM allocation, GPU core load, step latency, and rendering status.
+## 📑 Table of Contents
+1. [Executive Summary & Value Proposition](#1-executive-summary--value-proposition)
+2. [Business Requirements Document (BRD)](#2-business-requirements-document-brd)
+3. [Functional Requirements Document (FRD)](#3-functional-requirements-document-frd)
+4. [High-Level Design (HLD)](#4-high-level-design-hld)
+5. [Low-Level Design (LLD) & API Specifications](#5-low-level-design-lld--api-specifications)
+6. [Multi-Language Dubbing & Regional Speech Suite](#6-multi-language-dubbing--regional-speech-suite)
+7. [Remotion React & FFmpeg Multi-Layer Compositing](#7-remotion-react--ffmpeg-multi-layer-compositing)
+8. [Deployment & Production Setup Guide](#8-deployment--production-setup-guide)
 
 ---
 
-## System Architecture
+## 1. Executive Summary & Value Proposition
 
+**Modular-NeuroClips** is an AI video generation workbench and automated curriculum authoring platform. It bridges the gap between deep learning generative models (Llama 3, Stable Diffusion v1.5, CogVideoX-2B-I2V, Edge-TTS, Remotion React, FFmpeg) and corporate Learning & Development (L&D) teams, instructional designers, and content creators.
+
+### Core Value Drivers:
+- ⏱️ **Cost & Time Compression**: Reduces traditional video course production costs from **$10,000+ / 4 weeks** down to **seconds per module** with zero cloud API credit drain.
+- 🎭 **Character & Persona Continuity**: Maintains persistent presenter appearance, attire, and lighting across multi-scene screenplays.
+- 🌐 **Global Accessibility**: Instant regional dubbing into **Telugu, Tamil, Hindi, Spanish, French, German, Japanese, and English** with localized `.srt` subtitles.
+- 📦 **LMS Interoperability**: 1-click generation of standardized **SCORM 1.2 / 2004** packages ready for Moodle, Canvas, Blackboard, or SCORM Cloud.
+
+---
+
+## 2. Business Requirements Document (BRD)
+
+### 2.1 Market Context & Industry Pain Points
+Corporate training, compliance onboarding, and higher-education course development face three bottlenecks:
+1. **High Production Overhead**: Filming studio sessions with live actors, audio technicians, and video editors is expensive and difficult to iterate when policies change.
+2. **Inconsistent Quality & Visual Drift**: AI video tools often produce jarring character mutations between consecutive scenes.
+3. **LMS Incompatibility**: Raw video files require manual packaging, XML manifest authoring, and subtitle synchronization for LMS deployment.
+
+### 2.2 Target Personas
+- **Enterprise L&D Directors**: Need automated multi-hour compliance and onboarding video production.
+- **FinTech & Banking Educators**: Require visual accuracy for financial workflows, transaction diagrams, and regulatory topics.
+- **Instructional Designers**: Require visual storyboard preview/editing before committing to full video rendering.
+
+### 2.3 Success Metrics & ROI
+- **Production Throughput**: >100 micro-lessons generated per VPS per day.
+- **VRAM Resilience**: Zero CUDA Out-Of-Memory (OOM) failures during continuous batch synthesis.
+- **LMS Compliance**: 100% pass rate on ADL SCORM 1.2 conformance tests.
+
+---
+
+## 3. Functional Requirements Document (FRD)
+
+### 3.1 7-Milestone Generative Pipeline
 ```
-                       [ Prompt / Curriculum Excel ]
-                                     │
-                                     ▼
-                     [ LangChain + Ollama (Llama 3) ]
-                     • Structured Scene Breakdowns
-                     • Style Anchoring & Camera Prompts
-                                     │
-                                     ▼
-    ┌────────────────────────────────┴────────────────────────────────┐
-    ▼                                                                 ▼
-[ Edge-TTS (CPU/Network) ]                           [ Sequential Diffusion Engine ]
-• Zero-VRAM Audio Gen                                1. Stable Diffusion (Keyframe)
-• MP3 Voiceover Tracks                               2. VRAM Cache Cleanup & Unload
-                                                     3. CogVideoX-I2V (Motion Clip)
-                                                     4. Dynamic Resizing on OOM
-    │                                                                 │
-    └────────────────────────────────┬────────────────────────────────┘
-                                     ▼
-                         [ FFmpeg Video Compiler ]
-                         • Loops / Trims Video to Audio
-                         • Standardizes 480p H.264 Video
-                         • Compiles Final Production
-                                     ▲
-                                     │
-                   [ FastAPI Telemetry Dashboard (SSE) ]
-                   • Live VRAM & GPU Metrics (pynvml)
-                   • Pipeline Step & Latency Tracking
+[1. Init] ➔ [2. Script] ➔ [3. Keyframes] ➔ [4. Motion] ➔ [5. Voiceover] ➔ [6. Stitch] ➔ [7. Ready]
+```
+1. **Milestone 1 (Init)**: Pipeline parameter validation, VRAM allocation, and workspace cache initialization.
+2. **Milestone 2 (Scripting)**: Llama 3 / Heuristic Director prompt distillation, scene timing breakdown, and continuity anchor injection.
+3. **Milestone 3 (Keyframes)**: High-resolution visual synthesis (Local SD 1.5 or Cloud Pollinations Flux/Turbo).
+4. **Milestone 4 (Motion)**: Neural motion diffusion (CogVideoX-2B) or algorithmic subpixel Ken Burns zoompan.
+5. **Milestone 5 (Voiceover)**: Zero-VRAM Edge-TTS neural speech synthesis with SSML speech rate modulation.
+6. **Milestone 6 (Stitch)**: Dual-engine compilation (Remotion React or FFmpeg) with audio multiplexing and burned-in open captions.
+7. **Milestone 7 (Ready)**: Artifact registration, SRT subtitle generation, SCORM packaging, and Media Vault indexing.
 
+### 3.2 Feature Matrix
+- **Resolution Profiles**: `16:9 HD (1280x720)`, `16:9 SD (576x320)`, `16:9 FHD (1920x1080)`, `9:16 Vertical (720x1280)`, `1:1 Square (720x720)`.
+- **Speaker Avatar Studio**: Picture-in-Picture floating glass cards, split-screen, full anchor, or custom photo portrait uploads (`POST /api/v1/avatar/upload`).
+- **Interactive Storyboard Editor**: Instant draft preview (`POST /api/v1/storyboard/preview`) and custom render (`POST /api/v1/generate/from-storyboard`).
+- **Persistent Instructor Profiles**: Save and load avatar, voice, pacing, and continuity presets (`identities/*.json`).
+- **Auto-Clean & Session Isolation**: Toggle to auto-wipe temporary caches and filter the Media Vault by active session.
+
+---
+
+## 4. High-Level Design (HLD)
+
+### 4.1 System Architecture Diagram
+
+```mermaid
+flowchart TD
+    Client([Web Browser / SPA Client]) <-->|REST APIs & SSE Stream| Gateway[FastAPI Gateway / Dashboard]
+    
+    subgraph Core Orchestration
+        Gateway --> JobManager[Job Tracker & Milestone Engine]
+        Gateway --> Telemetry[PyNVML & Hardware Monitor]
+        JobManager --> LLMDirector[Llama 3 / Heuristic Script Orchestrator]
+    end
+
+    subgraph Generative Synthesis Engine
+        LLMDirector --> PromptDistill[Visual Prompt Distiller & Continuity Anchor]
+        PromptDistill --> KeyframeGen{Keyframe Router}
+        KeyframeGen -->|CUDA Active| SDLocal[Stable Diffusion v1.5]
+        KeyframeGen -->|Cloud Fallback| Pollinations[Pollinations Flux / SDXL 1280x720]
+        
+        KeyframeGen --> MotionRouter{Motion Router}
+        MotionRouter -->|CUDA Active| CogVideo[CogVideoX-2B-I2V]
+        MotionRouter -->|CPU / Fast| KenBurns[FFmpeg Subpixel Zoompan]
+    end
+
+    subgraph Audio & Subtitle Engine
+        LLMDirector --> EdgeTTS[Edge-TTS Neural Speech Synthesizer]
+        LLMDirector --> SRTGen[SRT / VTT Subtitle Generator]
+    end
+
+    subgraph Multi-Layer Compositor
+        SDLocal & Pollinations & CogVideo & KenBurns --> Compositor{Engine Switcher}
+        EdgeTTS & SRTGen --> Compositor
+        Compositor -->|React Motion| Remotion[Remotion React Engine]
+        Compositor -->|Fast Multiplex| FFmpegPipe[FFmpeg PiP Overlay Compiler]
+    end
+
+    Compositor --> MediaVault[(Media Vault / render_output/)]
+    MediaVault --> SCORMPack[SCORM 1.2 / 2004 Zip Packager]
 ```
 
 ---
 
-## Directory Structure
+## 5. Low-Level Design (LLD) & API Specifications
 
-```
-Modular-NeuroClips/
-├── .env.example
-├── .gitignore
-├── README.md
-├── requirements.txt
-├── main.py
-└── src/
-    ├── __init__.py
-    ├── config.py             # Environment configuration & resolution profiles
-    ├── orchestrator.py       # LangChain + Ollama structured scene builder
-    ├── pipeline.py           # VRAM-safe SD & CogVideoX generation engine
-    ├── compiler.py           # FFmpeg clip concatenator and audio merger
-    ├── curriculum_engine.py  # Batch processing engine for Excel course files
-    └── dashboard.py          # FastAPI + SSE real-time telemetry dashboard
+### 5.1 Core Data Models (Pydantic v2)
 
+```python
+class VideoScene(BaseModel):
+    scene_id: int
+    visual_prompt: str
+    motion_prompt: str
+    narration: Optional[str] = ""
+    duration_seconds: int = 4
+
+class VideoScript(BaseModel):
+    title: str
+    art_style_preset: str
+    avatar_anchor: Optional[str] = ""
+    scenes: List[VideoScene]
+
+class GenerationRequest(BaseModel):
+    topic: str
+    scenes: int = 3
+    art_style: str = "Cinematic 35mm (Volumetric Lighting)"
+    resolution: str = "16:9_hd"
+    language: str = "en-US"
+    voice: str = "en-IN-NeerjaNeural"
+    speech_rate: float = 1.0
+    compiler_engine: str = "ffmpeg"
+    avatar_persona: str = "maya_fintech"
+    avatar_layout: str = "pip_bottom_right"
+    burn_subtitles: bool = True
+    auto_clean: bool = False
 ```
+
+### 5.2 Key REST Endpoints
+
+| Endpoint | Method | Description |
+| :--- | :---: | :--- |
+| `GET /` | `GET` | Serves reactive Single Page Web UI Portal |
+| `GET /api/v1/telemetry/stream` | `GET` | SSE real-time stream of GPU, CPU, and milestone progress |
+| `POST /api/v1/generate` | `POST` | Triggers tracked end-to-end video production job |
+| `POST /api/v1/storyboard/preview` | `POST` | Generates interactive scene cards without rendering |
+| `POST /api/v1/generate/from-storyboard` | `POST` | Renders video directly from user-customized storyboard |
+| `POST /api/v1/tts/preview` | `POST` | Generates 3-second voice preview sample |
+| `POST /api/v1/avatar/upload` | `POST` | Uploads custom instructor photo portrait |
+| `POST /api/v1/identity/save` | `POST` | Saves persistent instructor identity profile |
+| `GET /api/v1/identity/list` | `GET` | Lists all saved instructor identity profiles |
+| `GET /api/v1/gallery` | `GET` | Lists production videos, audio tracks, and subtitles |
+| `POST /api/v1/gallery/clear` | `POST` | Wipes temporary render cache |
+| `DELETE /api/v1/gallery/{filename}` | `DELETE` | Deletes a specific production video |
+| `POST /api/v1/scorm/export/{filename}`| `POST` | Builds SCORM 1.2 zip archive for LMS import |
+| `POST /api/v1/jobs/restart` | `POST` | Emergency pipeline reset & VRAM cleanup |
 
 ---
 
-## Prerequisites
+## 6. Multi-Language Dubbing & Regional Speech Suite
 
-* **OS:** Ubuntu 22.04+ / Debian 12 (or any modern Linux VPS)
-* **GPU:** NVIDIA GPU with $\ge$ 8GB VRAM (CUDA 12.1+ recommended)
-* **System Packages:** Python 3.10+, FFmpeg, and Ollama
+Modular-NeuroClips provides native regional speech synthesis and auto-translation across 8 languages:
+
+| Locale | Language | Default Voice | Alternate Voice |
+| :--- | :--- | :--- | :--- |
+| `en-US` | English (US) | `en-US-GuyNeural` (Male) | `en-US-AriaNeural` / `en-IN-NeerjaNeural` |
+| `te-IN` | Telugu (India) | `te-IN-MohanNeural` (Male) | `te-IN-ShrutiNeural` (Female) |
+| `ta-IN` | Tamil (India) | `ta-IN-PallaviNeural` (Female) | `ta-IN-ValluvarNeural` (Male) |
+| `hi-IN` | Hindi (India) | `hi-IN-MadhurNeural` (Male) | `hi-IN-SwaraNeural` (Female) |
+| `es-ES` | Spanish (Castilian)| `es-ES-AlvaroNeural` (Male) | `es-ES-ElviraNeural` (Female) |
+| `fr-FR` | French (Standard) | `fr-FR-HenriNeural` (Male) | `fr-FR-DeniseNeural` (Female) |
+| `de-DE` | German (Standard) | `de-DE-ConradNeural` (Male) | `de-DE-KatjaNeural` (Female) |
+| `ja-JP` | Japanese (Tokyo) | `ja-JP-KeitaNeural` (Male) | `ja-JP-NanamiNeural` (Female) |
 
 ---
 
-## Installation & Setup
+## 7. Remotion React & FFmpeg Multi-Layer Compositing
 
-### 1. Clone the Repository
+### 7.1 Remotion Programmatic Architecture
+The `remotion/` bundle implements video composition:
+- `Root.tsx`: Composition registry with dynamic duration and resolution calculations.
+- `MainVideo.tsx`: Sequence coordinator managing scene order, opening title cards, and subtitle timing.
+- `Scene.tsx`: Implements camera motion physics (`zoom-in`, `zoom-out`, `pan-right`, `pan-left`) with floating presenter cards and breathing animations.
+- `TitleCard.tsx`: Glassmorphic opening title card with spring-physics typography.
+- `Subtitles.tsx`: Responsive subtitle sequence overlays.
+- `AudioVisualizer.tsx`: Frequency waveform bars in the lower-right quadrant.
 
+### 7.2 FFmpeg Multi-Input Complex Filter Graph
+When running in fast preview mode, FFmpeg composites video, avatar portrait, audio, and open captions:
 ```bash
+ffmpeg -y \
+  -f concat -safe 0 -i concat_list.txt \
+  -stream_loop -1 -i audio.mp3 \
+  -loop 1 -i avatar.png \
+  -filter_complex "\
+    [0:v]scale=1280:720[bg]; \
+    [2:v]scale=220:220,format=yuva420p[avatar]; \
+    [bg][avatar]overlay=W-w-36:H-h-36:shortest=1[v_av]; \
+    [v_av]subtitles='subtitles.srt':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00090D16,BorderStyle=3,MarginV=36'[v_out]" \
+  -map "[v_out]" -map 1:a:0 \
+  -c:v libx264 -c:a aac -b:a 192k -ar 44100 -ac 2 -shortest -pix_fmt yuv420p -movflags +faststart \
+  final_production.mp4
+```
+
+---
+
+## 8. Deployment & Production Setup Guide
+
+### 8.1 Local Workstation / Developer Setup
+```bash
+# 1. Clone repository
 git clone https://github.com/DrisyonAI/Modular-NeuroClips.git
 cd Modular-NeuroClips
 
-```
+# 2. Create and activate virtual environment
+python -m venv venv
+venv\Scripts\activate  # Windows
+# source venv/bin/activate  # Linux/macOS
 
-### 2. Set Up Virtual Environment
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
+# 3. Install dependencies
 pip install -r requirements.txt
 
+# 4. Launch web application
+python app.py
 ```
+Open **`http://localhost:8000`** in your browser.
 
-### 3. Install System Dependencies & Ollama
-
+### 8.2 Remotion CLI Dependencies (Optional for React Engine)
 ```bash
-# Install FFmpeg
-sudo apt-get update && sudo apt-get install -y ffmpeg
-
-# Install Ollama & download Llama 3
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3
-
+cd remotion
+npm install
+npm run build
 ```
 
-### 4. Configure Environment Variables
+### 8.3 Production Nginx / Reverse Proxy Configuration
+For hosting on custom domain (e.g. `mnc.mytestbed.tech`):
 
-Copy `.env.example` to `.env` and configure your settings:
-
-```bash
-cp .env.example .env
-
-```
-
-Default `.env` configuration for standard definition:
-
-```env
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3
-OUTPUT_DIR=./render_output
-DEVICE=cuda
-
-# Low-VRAM Standard-Definition Models
-T2I_MODEL=runwayml/stable-diffusion-v1-5
-I2V_MODEL=THUDM/CogVideoX-2b-I2V
-
-# Frame Dimensions (Must be divisible by 16)
-RENDER_WIDTH=576
-RENDER_HEIGHT=320
-
-DASHBOARD_HOST=0.0.0.0
-DASHBOARD_PORT=8000
-
-```
-
----
-
-## VPS Quick-Start & Usage
-
-### 1. Launch the Telemetry Dashboard
-
-Run the dashboard in a persistent background process or `tmux` session:
-
-```bash
-tmux new -s dashboard
-source venv/bin/activate
-uvicorn src.dashboard:app --host 0.0.0.0 --port 8000
-
-```
-
-*Detach with `Ctrl + B`, then `D`. Access the live UI at `http://<YOUR_VPS_IP>:8000`.*
-
-### 2. Generate Video from a Text Prompt
-
-```bash
-python main.py --topic "Autonomous AI agents managing financial transactions and real-time fraud detection" --scenes 3
-
-```
-
-Outputs will be saved in `./render_output/`:
-
-* `scene_X_keyframe.png`: Generated initial frames.
-* `scene_X_clip.mp4`: Animated scene segments.
-* `final_production_sd.mp4`: Concatenated final video.
-
-### 3. Batch Generate Videos from Curriculum Spreadsheet
-
-Place your curriculum spreadsheet (e.g., `Nipuna_AI_Agents_in_FinTech_15_Hour_Course-updated-v3.xlsx`) in the root directory and run:
-
-```bash
-python src/curriculum_engine.py
-
-```
-
-This parses narration scripts, synthesizes zero-VRAM voiceovers via `edge-tts`, generates keyframes and motion clips, and exports compiled video lessons into `./curriculum_output/`.
-
----
-SCORM Cloud Deployment Pipeline (n8n)Automate packaging lesson files (index.html, imsmanifest.xml, and media assets) into SCORM-compliant .zip bundles and deploying them directly to SCORM Cloud.Setup InstructionsOpen your n8n workspace.Navigate to Workflows $\rightarrow$ Import from JSON (or press Ctrl + V / Cmd + V on the canvas).Paste the workflow JSON below.In the Set Course Configuration node, update:courseId: Identifier for the course module (e.g., FinTech_Agent_Module_1).folderPath: Absolute path to the course asset folder.zipOutputPath: Destination path for the .zip archive.scormAppId: Your SCORM Cloud Application ID.scormSecretKey: Your SCORM Cloud Secret Key.Execute the workflow to package and deploy.JSON{
-  "name": "SCORM Cloud - Package and Deploy Pipeline",
-  "nodes": [
-    {
-      "parameters": {},
-      "id": "90e0c034-7546-4e56-b188-75179ee49b25",
-      "name": "When clicking ‘Test workflow’",
-      "type": "n8n-nodes-base.manualTrigger",
-      "typeVersion": 1,
-      "position": [
-        220,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "courseId",
-              "value": "NovaAI_Module_2"
-            },
-            {
-              "name": "folderPath",
-              "value": "C:\\tt-ai-stack\\01_projects\\active\\bov\\02_curriculum_tracks\\financials\\module_2"
-            },
-            {
-              "name": "zipOutputPath",
-              "value": "C:\\tt-ai-stack\\01_projects\\active\\bov\\02_curriculum_tracks\\financials\\module_2\\module_2_scorm12.zip"
-            },
-            {
-              "name": "scormAppId",
-              "value": "YOUR_SCORM_CLOUD_APP_ID"
-            },
-            {
-              "name": "scormSecretKey",
-              "value": "YOUR_SCORM_CLOUD_SECRET_KEY"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "id": "a671cf47-0e6d-4952-b80c-7b470daecae6",
-      "name": "Set Course Configuration",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 2,
-      "position": [
-        440,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "command": "=powershell.exe -Command \"Compress-Archive -Path '{{ $json.folderPath }}\\imsmanifest.xml', '{{ $json.folderPath }}\\index.html', '{{ $json.folderPath }}\\assets' -DestinationPath '{{ $json.zipOutputPath }}' -Force\""
-      },
-      "id": "e0b8cb55-6d04-4b5c-a5b6-68b209e51ea7",
-      "name": "Package SCORM ZIP",
-      "type": "n8n-nodes-base.executeCommand",
-      "typeVersion": 1,
-      "position": [
-        660,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "fileSelector": "={{ $('Set Course Configuration').item.json.zipOutputPath }}",
-        "options": {}
-      },
-      "id": "18f972b9-e137-4d92-9111-e77ad45e7f1e",
-      "name": "Read ZIP from Disk",
-      "type": "n8n-nodes-base.readWriteFile",
-      "typeVersion": 1,
-      "position": [
-        880,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "=https://cloud.scorm.com/api/v2/courses/importJobs/upload?courseId={{ $('Set Course Configuration').item.json.courseId }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Basic {{ Buffer.from($('Set Course Configuration').item.json.scormAppId + ':' + $('Set Course Configuration').item.json.scormSecretKey).toString('base64') }}"
-            }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "multipart-form-data",
-        "bodyParameters": {
-          "parameters": [
-            {
-              "parameterType": "formBinaryData",
-              "name": "file",
-              "inputDataFieldName": "data"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "id": "cc074e2d-327c-47bc-ae51-40e9f1cf98f0",
-      "name": "Upload to SCORM Cloud API v2",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1100,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "amount": 5,
-        "unit": "seconds"
-      },
-      "id": "b1b7ce3a-3d23-41bb-b054-d83ee6ae1a44",
-      "name": "Wait for Processing",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [
-        1320,
-        300
-      ],
-      "webhookId": "9b122709-3221-4ebc-a81d-6512ce24ff88"
-    },
-    {
-      "parameters": {
-        "method": "GET",
-        "url": "=https://cloud.scorm.com/api/v2/courses/importJobs/{{ $('Upload to SCORM Cloud API v2').item.json.result }}",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Basic {{ Buffer.from($('Set Course Configuration').item.json.scormAppId + ':' + $('Set Course Configuration').item.json.scormSecretKey).toString('base64') }}"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "id": "422e1327-0cbe-4fc4-bbdc-e875db0c6ff2",
-      "name": "Check Import Job Status",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1540,
-        300
-      ]
-    }
-  ],
-  "connections": {
-    "When clicking ‘Test workflow’": {
-      "main": [
-        [
-          {
-            "node": "Set Course Configuration",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Set Course Configuration": {
-      "main": [
-        [
-          {
-            "node": "Package SCORM ZIP",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Package SCORM ZIP": {
-      "main": [
-        [
-          {
-            "node": "Read ZIP from Disk",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read ZIP from Disk": {
-      "main": [
-        [
-          {
-            "node": "Upload to SCORM Cloud API v2",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Upload to SCORM Cloud API v2": {
-      "main": [
-        [
-          {
-            "node": "Wait for Processing",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Wait for Processing": {
-      "main": [
-        [
-          {
-            "node": "Check Import Job Status",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    }
-  },
-  "active": false,
-  "settings": {
-    "executionOrder": "v1"
-  }
+```nginx
+server {
+    listen 80;
+    server_name mnc.mytestbed.tech;
+    return 301 https://$host$request_uri;
 }
-Hardware & Performance BenchmarksSpecificationStandard Definition (SD / 480p)High Definition (HD / 720p)Keyframe Resolution$576 \times 320$$1024 \times 576$Diffusion Steps (T2I / I2V)20 / 20 steps30 / 35 stepsPeak VRAM Usage~6.5 GB – 8.5 GB~16 GB – 22 GBGeneration Time / Scene~35 – 60 seconds~2.5 – 4.0 minutesRecommended GPURTX 3060 / 4060 / T4 / L4RTX 3090 / 4090 / A5000 / A100TroubleshootingCUDA Out of Memory (OOM): Ensure RENDER_WIDTH and RENDER_HEIGHT are set to 576 and 320 in .env. pipeline.py will also automatically step down resolution and clear the CUDA cache on memory errors.Ollama Connection Refused: Ensure the Ollama daemon is running with ollama serve or systemctl status ollama.SCORM Cloud Upload Fails (401 Unauthorized): Verify that scormAppId and scormSecretKey in the Set Course Configuration node are valid credentials generated from SCORM Cloud App Management.FFmpeg Concat Errors: Check that relative file paths inside ./render_output/concat_list.txt exist and are accessible.LicenseThis project is licensed under the Apache 2.0 License.
+
+server {
+    listen 443 ssl http2;
+    server_name mnc.mytestbed.tech;
+
+    ssl_certificate /etc/letsencrypt/live/mnc.mytestbed.tech/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mnc.mytestbed.tech/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE Telemetry Streaming Support
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 86400s;
+    }
+}
+```
+
+---
+
+## 📄 License
+This project is licensed under the Apache 2.0 License.
