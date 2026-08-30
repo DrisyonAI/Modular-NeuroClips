@@ -45,6 +45,33 @@ LANGUAGE_PROFILES = {
             {"id": "en-IN-NeerjaNeural", "name": "Neerja (Female - Indian Accent)"}
         ]
     },
+    "te-IN": {
+        "name": "Telugu (India)",
+        "flag": "🇮🇳",
+        "default_voice": "te-IN-MohanNeural",
+        "voices": [
+            {"id": "te-IN-MohanNeural", "name": "Mohan (Male - Deep Narrator)"},
+            {"id": "te-IN-ShrutiNeural", "name": "Shruti (Female - Clear Instructional)"}
+        ]
+    },
+    "ta-IN": {
+        "name": "Tamil (India)",
+        "flag": "🇮🇳",
+        "default_voice": "ta-IN-PallaviNeural",
+        "voices": [
+            {"id": "ta-IN-PallaviNeural", "name": "Pallavi (Female - Clear Presenter)"},
+            {"id": "ta-IN-ValluvarNeural", "name": "Valluvar (Male - Professional)"}
+        ]
+    },
+    "hi-IN": {
+        "name": "Hindi (India)",
+        "flag": "🇮🇳",
+        "default_voice": "hi-IN-MadhurNeural",
+        "voices": [
+            {"id": "hi-IN-MadhurNeural", "name": "Madhur (Male - Deep Narrator)"},
+            {"id": "hi-IN-SwaraNeural", "name": "Swara (Female - Clear)"}
+        ]
+    },
     "es-ES": {
         "name": "Spanish (Castilian)",
         "flag": "🇪🇸",
@@ -70,15 +97,6 @@ LANGUAGE_PROFILES = {
         "voices": [
             {"id": "de-DE-ConradNeural", "name": "Conrad (Male - Professional)"},
             {"id": "de-DE-KatjaNeural", "name": "Katja (Female - Presenter)"}
-        ]
-    },
-    "hi-IN": {
-        "name": "Hindi (India)",
-        "flag": "🇮🇳",
-        "default_voice": "hi-IN-MadhurNeural",
-        "voices": [
-            {"id": "hi-IN-MadhurNeural", "name": "Madhur (Male - Deep Narrator)"},
-            {"id": "hi-IN-SwaraNeural", "name": "Swara (Female - Clear)"}
         ]
     },
     "ja-JP": {
