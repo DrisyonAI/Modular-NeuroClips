@@ -19,7 +19,7 @@ def generate_srt_subtitles(scenes: List[Dict[str, Any]], output_srt_path: Path) 
     current_time = 0.0
 
     for idx, scene in enumerate(scenes, start=1):
-        duration = float(scene.get("duration_seconds", 4.0))
+        duration = float(scene.get("duration_seconds", 5.0))
         narration = scene.get("narration", "").strip()
         if not narration:
             narration = scene.get("visual_prompt", "").strip()[:80]
@@ -47,7 +47,7 @@ def compile_final_video(
     engine: str = "ffmpeg",
     avatar_image_path: Optional[str] = None,
     avatar_layout: str = "pip_bottom_right",
-    burn_subtitles: bool = False,
+    burn_subtitles: bool = True,
     srt_path: Optional[str] = None,
     remotion_metadata: Optional[Dict[str, Any]] = None
 ) -> str:
@@ -93,7 +93,7 @@ def compile_final_video(
         if has_srt:
             escaped_srt = str(Path(srt_path).resolve()).replace("\\", "/").replace(":", "\\:")
             filter_parts.append(
-                f"{last_v}subtitles='{escaped_srt}':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00090D16,BorderStyle=3,MarginV=36,Fontname=Arial,Bold=1'[v_sub]"
+                f"{last_v}subtitles='{escaped_srt}':force_style='FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00090D16,BorderStyle=3,MarginV=36,Fontname=Arial,Bold=1'[v_sub]"
             )
             last_v = "[v_sub]"
 
