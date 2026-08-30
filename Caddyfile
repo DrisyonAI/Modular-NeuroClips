@@ -1,0 +1,22 @@
+# Caddy Reverse Proxy Configuration for mnc.mytestbed.tech
+# Place in /etc/caddy/Caddyfile or append to your Caddy config:
+
+mnc.mytestbed.tech {
+    # Automatic HTTPS with Let's Encrypt
+    encode gzip zstd
+
+    # Real-time SSE Stream without buffering
+    @sse {
+        path /api/v1/telemetry/stream
+    }
+    handle @sse {
+        reverse_proxy 127.0.0.1:8000 {
+            flush_interval -1
+        }
+    }
+
+    # Main Application
+    handle {
+        reverse_proxy 127.0.0.1:8000
+    }
+}

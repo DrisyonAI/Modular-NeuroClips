@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  modular-neuroclips:
+    build: .
+    container_name: modular-neuroclips-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DASHBOARD_HOST=0.0.0.0
+      - DASHBOARD_PORT=8000
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes:
+      - ./render_output:/app/render_output
+      - ./curriculum_output:/app/curriculum_output
+      - ./exports:/app/exports
