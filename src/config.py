@@ -16,6 +16,9 @@ CURRICULUM_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "./exports"))
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+IDENTITIES_DIR = Path("./identities")
+IDENTITIES_DIR.mkdir(parents=True, exist_ok=True)
+
 DEVICE = os.getenv("DEVICE", "cuda")
 T2I_MODEL = os.getenv("T2I_MODEL", "runwayml/stable-diffusion-v1-5")
 I2V_MODEL = os.getenv("I2V_MODEL", "THUDM/CogVideoX-2b-I2V")
@@ -30,6 +33,64 @@ RESOLUTION_PROFILES = {
 
 RENDER_WIDTH = 1280
 RENDER_HEIGHT = 720
+
+LANGUAGE_PROFILES = {
+    "en-US": {
+        "name": "English (US)",
+        "flag": "🇺🇸",
+        "default_voice": "en-US-GuyNeural",
+        "voices": [
+            {"id": "en-US-GuyNeural", "name": "Guy (Male - Professional)"},
+            {"id": "en-US-AriaNeural", "name": "Aria (Female - Clear)"},
+            {"id": "en-IN-NeerjaNeural", "name": "Neerja (Female - Indian Accent)"}
+        ]
+    },
+    "es-ES": {
+        "name": "Spanish (Castilian)",
+        "flag": "🇪🇸",
+        "default_voice": "es-ES-AlvaroNeural",
+        "voices": [
+            {"id": "es-ES-AlvaroNeural", "name": "Álvaro (Male - Executive)"},
+            {"id": "es-ES-ElviraNeural", "name": "Elvira (Female - Instructional)"}
+        ]
+    },
+    "fr-FR": {
+        "name": "French (Standard)",
+        "flag": "🇫🇷",
+        "default_voice": "fr-FR-HenriNeural",
+        "voices": [
+            {"id": "fr-FR-HenriNeural", "name": "Henri (Male - Clear Accent)"},
+            {"id": "fr-FR-DeniseNeural", "name": "Denise (Female - Educational)"}
+        ]
+    },
+    "de-DE": {
+        "name": "German (Standard)",
+        "flag": "🇩🇪",
+        "default_voice": "de-DE-ConradNeural",
+        "voices": [
+            {"id": "de-DE-ConradNeural", "name": "Conrad (Male - Professional)"},
+            {"id": "de-DE-KatjaNeural", "name": "Katja (Female - Presenter)"}
+        ]
+    },
+    "hi-IN": {
+        "name": "Hindi (India)",
+        "flag": "🇮🇳",
+        "default_voice": "hi-IN-MadhurNeural",
+        "voices": [
+            {"id": "hi-IN-MadhurNeural", "name": "Madhur (Male - Deep Narrator)"},
+            {"id": "hi-IN-SwaraNeural", "name": "Swara (Female - Clear)"}
+        ]
+    },
+    "ja-JP": {
+        "name": "Japanese (Tokyo)",
+        "flag": "🇯🇵",
+        "default_voice": "ja-JP-KeitaNeural",
+        "voices": [
+            {"id": "ja-JP-KeitaNeural", "name": "Keita (Male - Standard)"},
+            {"id": "ja-JP-NanamiNeural", "name": "Nanami (Female - Presenter)"}
+        ]
+    }
+}
 
 AVATAR_PROFILES = [
     {
