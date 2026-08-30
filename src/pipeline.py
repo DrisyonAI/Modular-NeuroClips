@@ -6,7 +6,7 @@ import urllib.parse
 import random
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from src.config import OUTPUT_DIR, DEVICE, T2I_MODEL, I2V_MODEL, RESOLUTION_PROFILES
+from src.config import OUTPUT_DIR, DEVICE, T2I_MODEL, I2V_MODEL
 
 try:
     import torch
@@ -41,8 +41,8 @@ class MediaGenerationEngine:
         self.dtype = (torch.float16 if self.device == "cuda" else torch.float32) if TORCH_AVAILABLE else None
 
     def _fetch_cloud_ai_image(self, prompt: str, image_path: Path, width: int = 1280, height: int = 720) -> bool:
-        """Fetches fresh high-quality real AI generated keyframe from cloud endpoints (Pollinations.ai Flux/Turbo)."""
-        clean_prompt = prompt.strip()[:400]
+        """Fetches real AI synthesized image matching the prompt from Pollinations Flux/Turbo API."""
+        clean_prompt = prompt.strip()[:350]
         encoded_prompt = urllib.parse.quote(clean_prompt)
         seed_val = random.randint(10000, 999999)
         
@@ -60,25 +60,26 @@ class MediaGenerationEngine:
                         "Accept": "image/webp,image/apng,image/*,*/*;q=0.8"
                     }
                 )
-                with urllib.request.urlopen(req, timeout=20) as response:
+                with urllib.request.urlopen(req, timeout=25) as response:
                     if response.status == 200:
                         content = response.read()
-                        if len(content) > 2000:
+                        if len(content) > 3000:
                             with open(image_path, "wb") as f:
                                 f.write(content)
-                            print(f"[Cloud AI Keyframe] Fresh AI image generated ({width}x{height}) for: '{prompt[:45]}...'")
+                            print(f"[Cloud AI Image] Generated ({width}x{height}) for visual prompt: '{clean_prompt[:50]}...'")
                             return True
             except Exception as e:
-                print(f"[Cloud AI Warning] Endpoint failed: {e}")
+                print(f"[Cloud AI Notice] Endpoint retry: {e}")
                 time.sleep(0.5)
         return False
 
     def generate_image_keyframe(self, prompt: str, scene_id: int, job_id: str = "fresh", width: int = 1280, height: int = 720, force_refresh: bool = True, max_retries: int = 3) -> str:
-        """Generates keyframe image matching user prompt. Never reuses stale cache when force_refresh=True."""
+        """Generates keyframe image strictly matching the prompt and scene context."""
         image_path = self.output_dir / f"scene_{scene_id}_{job_id}_keyframe.png"
         if not force_refresh and image_path.exists() and image_path.stat().st_size > 1000:
             return str(image_path)
 
+        # 1. Try local Stable Diffusion GPU
         if DIFFUSERS_AVAILABLE and TORCH_AVAILABLE and torch.cuda.is_available():
             for attempt in range(1, max_retries + 1):
                 pipe = None
@@ -115,9 +116,11 @@ class MediaGenerationEngine:
                         del pipe
                     VRAMGuard.cleanup()
 
+        # 2. Try High-Quality Cloud AI Synthesis (Pollinations Flux / SDXL)
         if self._fetch_cloud_ai_image(prompt, image_path, width=width, height=height):
             return str(image_path)
 
+        # 3. Procedural Fallback Card
         img = Image.new("RGB", (width, height), color=(15, 23, 42))
         draw = ImageDraw.Draw(img)
         
