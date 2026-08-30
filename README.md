@@ -8,11 +8,12 @@
 1. [Executive Summary & Value Proposition](#1-executive-summary--value-proposition)
 2. [Business Requirements Document (BRD)](#2-business-requirements-document-brd)
 3. [Functional Requirements Document (FRD)](#3-functional-requirements-document-frd)
-4. [High-Level Design (HLD)](#4-high-level-design-hld)
-5. [Low-Level Design (LLD) & API Specifications](#5-low-level-design-lld--api-specifications)
-6. [Multi-Language Dubbing & Regional Speech Suite](#6-multi-language-dubbing--regional-speech-suite)
-7. [Remotion React & FFmpeg Multi-Layer Compositing](#7-remotion-react--ffmpeg-multi-layer-compositing)
-8. [Deployment & Production Setup Guide](#8-deployment--production-setup-guide)
+4. [High-Level Design (HLD) & Architecture](#4-high-level-design-hld--architecture)
+5. [System Sequence & UML Diagrams](#5-system-sequence--uml-diagrams)
+6. [Low-Level Design (LLD) & API Specifications](#6-low-level-design-lld--api-specifications)
+7. [Multi-Language Dubbing & Regional Speech Suite](#7-multi-language-dubbing--regional-speech-suite)
+8. [Remotion React & FFmpeg Multi-Layer Compositing](#8-remotion-react--ffmpeg-multi-layer-compositing)
+9. [Deployment & Production Setup Guide](#9-deployment--production-setup-guide)
 
 ---
 
@@ -71,7 +72,7 @@ Corporate training, compliance onboarding, and higher-education course developme
 
 ---
 
-## 4. High-Level Design (HLD)
+## 4. High-Level Design (HLD) & Architecture
 
 ### 4.1 System Architecture Diagram
 
@@ -114,9 +115,150 @@ flowchart TD
 
 ---
 
-## 5. Low-Level Design (LLD) & API Specifications
+## 5. System Sequence & UML Diagrams
 
-### 5.1 Core Data Models (Pydantic v2)
+### 5.1 End-to-End Production Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Creator as Course Creator / L&D Lead
+    participant UI as Studio Web UI Portal
+    participant API as FastAPI Orchestrator (/api/v1)
+    participant LLM as Llama 3 Director & Distiller
+    participant Visual as Keyframe & Motion Engine
+    participant Audio as Edge-TTS & Dubbing Engine
+    participant Compiler as Remotion / FFmpeg Compositor
+    participant Vault as Media Vault & SCORM Packager
+
+    Creator->>UI: Submit Course Script, Language, Avatar Persona
+    UI->>API: POST /api/v1/generate (topic, scenes, avatar, voice)
+    API-->>UI: 202 Accepted (job_id: "8f9a2b", initial milestone: "init")
+
+    loop Realtime Milestone Telemetry (every 800ms)
+        API-->>UI: SSE Stream (/api/v1/telemetry/stream) -> GPU VRAM, %, Milestones
+        UI->>Creator: Update 7-Milestone Visual Stepper & Live Logs
+    end
+
+    Note over API,LLM: Milestone 1 & 2: Scripting & Continuity
+    API->>LLM: generate_script(topic, scene_count, avatar_anchor)
+    LLM-->>API: VideoScript (title, visual_prompts, narrations)
+
+    Note over API,Visual: Milestone 3 & 4: Keyframe Synthesis & Motion
+    loop For Each Scene (1 to N)
+        API->>Visual: generate_image_keyframe(prompt, scene_id, job_id)
+        Visual-->>API: scene_N_keyframe.png (1280x720)
+        API->>Visual: generate_video_clip(keyframe_path, motion_prompt)
+        Visual-->>API: scene_N_clip.mp4 (Smooth Ken Burns / CogVideoX)
+    end
+
+    Note over API,Audio: Milestone 5: Voiceover & Subtitles
+    API->>Audio: generate_voiceover_audio_sync(script_text, voice, speech_rate)
+    Audio-->>API: audio_8f9a2b.mp3 (Guaranteed Flush)
+    API->>Audio: generate_srt_subtitles(scenes, output_srt_path)
+    Audio-->>API: subtitles_8f9a2b.srt
+
+    Note over API,Compiler: Milestone 6: Multi-Layer Compositing
+    API->>Compiler: compile_final_video(clips, audio, avatar, srt, engine)
+    Compiler-->>API: prod_8f9a2b.mp4 (H.264 + AAC 192k + PiP Avatar + Subtitles)
+
+    Note over API,Vault: Milestone 7: Ready & SCORM Packaging
+    API->>Vault: Register video in Vault, generate SCORM 1.2 zip bundle
+    API-->>UI: Status "Complete" (output_path, srt_url, download_url)
+    UI->>Creator: Render Dual Video/Audio Player & SCORM Download Card
+```
+
+### 5.2 Interactive Storyboard & Custom Scene Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Creator as Instructional Designer
+    participant UI as Studio Web UI Portal
+    participant API as FastAPI Server
+    participant LLM as Llama 3 Director Engine
+    participant Synth as Generative Pipeline Engine
+
+    Creator->>UI: Click "🎬 Storyboard Preview"
+    UI->>API: POST /api/v1/storyboard/preview (topic, scenes, avatar)
+    API->>LLM: generate_script(topic, scene_count, avatar_anchor)
+    LLM-->>API: VideoScript draft (scenes JSON)
+    API-->>UI: 200 OK (scenes array with visual/motion prompts)
+    UI->>Creator: Open Interactive Storyboard Modal
+
+    Note over Creator,UI: Creator edits prompts, durations & adds/removes scenes
+    Creator->>UI: Click "🚀 Render Video from Storyboard"
+    UI->>API: POST /api/v1/generate/from-storyboard (custom scenes JSON)
+    API->>Synth: Execute custom scene synthesis (keyframes -> audio -> stitch)
+    Synth-->>API: final_video.mp4 + subtitles.srt
+    API-->>UI: 200 OK (Production Ready in Media Vault)
+```
+
+### 5.3 UML Class Diagram (Domain Architecture)
+
+```mermaid
+classDiagram
+    class VideoScene {
+        +int scene_id
+        +string visual_prompt
+        +string motion_prompt
+        +string narration
+        +int duration_seconds
+    }
+
+    class VideoScript {
+        +string title
+        +string art_style_preset
+        +string avatar_anchor
+        +List~VideoScene~ scenes
+    }
+
+    class GenerationRequest {
+        +string topic
+        +int scenes
+        +string art_style
+        +string resolution
+        +string language
+        +string voice
+        +float speech_rate
+        +string compiler_engine
+        +string avatar_persona
+        +string avatar_layout
+        +bool burn_subtitles
+        +bool auto_clean
+    }
+
+    class ScriptOrchestrator {
+        +string model_name
+        +string base_url
+        +get_avatar_anchor(avatar_id) string
+        +distill_visual_prompt(text, max_words) string
+        +generate_script(topic, scene_count, art_style, avatar_persona) VideoScript
+    }
+
+    class MediaGenerationEngine {
+        +Path output_dir
+        +string device
+        +generate_image_keyframe(prompt, scene_id, job_id, width, height) string
+        +generate_video_clip(image_path, motion_prompt, scene_id, job_id, width, height) string
+    }
+
+    class VideoCompiler {
+        +generate_srt_subtitles(scenes, output_srt_path) string
+        +compile_final_video(clips, output_filename, audio_path, engine, avatar_path, avatar_layout, burn_subtitles, srt_path) string
+    }
+
+    VideoScript "1" *-- "many" VideoScene : contains
+    ScriptOrchestrator ..> VideoScript : produces
+    GenerationRequest ..> ScriptOrchestrator : triggers
+    MediaGenerationEngine ..> VideoCompiler : provides clips & keyframes
+```
+
+---
+
+## 6. Low-Level Design (LLD) & API Specifications
+
+### 6.1 Core Data Models (Pydantic v2)
 
 ```python
 class VideoScene(BaseModel):
@@ -147,7 +289,7 @@ class GenerationRequest(BaseModel):
     auto_clean: bool = False
 ```
 
-### 5.2 Key REST Endpoints
+### 6.2 Key REST Endpoints
 
 | Endpoint | Method | Description |
 | :--- | :---: | :--- |
@@ -168,7 +310,7 @@ class GenerationRequest(BaseModel):
 
 ---
 
-## 6. Multi-Language Dubbing & Regional Speech Suite
+## 7. Multi-Language Dubbing & Regional Speech Suite
 
 Modular-NeuroClips provides native regional speech synthesis and auto-translation across 8 languages:
 
@@ -185,9 +327,9 @@ Modular-NeuroClips provides native regional speech synthesis and auto-translatio
 
 ---
 
-## 7. Remotion React & FFmpeg Multi-Layer Compositing
+## 8. Remotion React & FFmpeg Multi-Layer Compositing
 
-### 7.1 Remotion Programmatic Architecture
+### 8.1 Remotion Programmatic Architecture
 The `remotion/` bundle implements video composition:
 - `Root.tsx`: Composition registry with dynamic duration and resolution calculations.
 - `MainVideo.tsx`: Sequence coordinator managing scene order, opening title cards, and subtitle timing.
@@ -196,7 +338,7 @@ The `remotion/` bundle implements video composition:
 - `Subtitles.tsx`: Responsive subtitle sequence overlays.
 - `AudioVisualizer.tsx`: Frequency waveform bars in the lower-right quadrant.
 
-### 7.2 FFmpeg Multi-Input Complex Filter Graph
+### 8.2 FFmpeg Multi-Input Complex Filter Graph
 When running in fast preview mode, FFmpeg composites video, avatar portrait, audio, and open captions:
 ```bash
 ffmpeg -y \
@@ -215,9 +357,9 @@ ffmpeg -y \
 
 ---
 
-## 8. Deployment & Production Setup Guide
+## 9. Deployment & Production Setup Guide
 
-### 8.1 Local Workstation / Developer Setup
+### 9.1 Local Workstation / Developer Setup
 ```bash
 # 1. Clone repository
 git clone https://github.com/DrisyonAI/Modular-NeuroClips.git
@@ -236,14 +378,14 @@ python app.py
 ```
 Open **`http://localhost:8000`** in your browser.
 
-### 8.2 Remotion CLI Dependencies (Optional for React Engine)
+### 9.2 Remotion CLI Dependencies (Optional for React Engine)
 ```bash
 cd remotion
 npm install
 npm run build
 ```
 
-### 8.3 Production Nginx / Reverse Proxy Configuration
+### 9.3 Production Nginx / Reverse Proxy Configuration
 For hosting on custom domain (e.g. `mnc.mytestbed.tech`):
 
 ```nginx
