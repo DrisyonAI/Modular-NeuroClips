@@ -4,7 +4,7 @@ import urllib.request
 import urllib.error
 from typing import List, Optional
 from pydantic import BaseModel, Field
-from src.config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from src.config import OLLAMA_BASE_URL, OLLAMA_MODEL, AVATAR_PROFILES
 
 class VideoScene(BaseModel):
     scene_id: int = Field(description="Sequential index starting from 1")
@@ -16,12 +16,21 @@ class VideoScene(BaseModel):
 class VideoScript(BaseModel):
     title: str = Field(description="Title of the video production")
     art_style_preset: str = Field(description="Consistent style anchor")
+    avatar_anchor: Optional[str] = Field(default="", description="Character & persona continuity anchor")
     scenes: List[VideoScene] = Field(description="Ordered list of visual scenes")
 
 class ScriptOrchestrator:
     def __init__(self, model_name: str = OLLAMA_MODEL, base_url: str = OLLAMA_BASE_URL):
         self.model_name = model_name
         self.base_url = base_url.rstrip("/")
+
+    @staticmethod
+    def get_avatar_anchor(avatar_id: str) -> str:
+        """Retrieves visual consistency anchor tokens for character continuity."""
+        for av in AVATAR_PROFILES:
+            if av["id"] == avatar_id:
+                return av.get("continuity_anchor", "")
+        return ""
 
     @staticmethod
     def distill_visual_prompt(text: str, max_words: int = 35) -> str:
@@ -36,8 +45,16 @@ class ScriptOrchestrator:
             
         return cleaned if cleaned else text[:120]
 
-    def generate_script(self, topic: str, scene_count: int = 3, art_style: str = "Cinematic 35mm") -> VideoScript:
-        """Generates structured multi-scene script via Ollama REST API or intelligent heuristic director."""
+    def generate_script(
+        self,
+        topic: str,
+        scene_count: int = 3,
+        art_style: str = "Cinematic 35mm",
+        avatar_persona: str = "maya_fintech"
+    ) -> VideoScript:
+        """Generates structured multi-scene script with Character Continuity Anchors."""
+        avatar_anchor = self.get_avatar_anchor(avatar_persona)
+
         try:
             from langchain_community.chat_models import ChatOllama
             from langchain_core.prompts import ChatPromptTemplate
@@ -48,9 +65,9 @@ class ScriptOrchestrator:
             prompt = ChatPromptTemplate.from_messages([
                 ("system", "You are an expert film director and AI video prompter. "
                            "Break down video concepts or long scripts into concise, vivid visual prompts per scene (under 30 words per visual prompt). "
-                           "Ensure lighting styles, colors, and subjects stay visually cohesive.\n"
+                           "Maintain strict visual continuity: lighting styles, colors, and the recurring presenter.\n"
                            "{format_instructions}"),
-                ("user", "Create a video script for topic: {topic}. Target duration: {scene_count} scenes. Art style: {art_style}")
+                ("user", f"Create a video script for topic: {topic}. Target duration: {scene_count} scenes. Art style: {art_style}. Character Anchor: {avatar_anchor}")
             ])
             chain = prompt | llm | parser
             raw_output = chain.invoke({
@@ -59,24 +76,27 @@ class ScriptOrchestrator:
                 "art_style": art_style,
                 "format_instructions": parser.get_format_instructions()
             })
-            return VideoScript(**raw_output)
+            res = VideoScript(**raw_output)
+            res.avatar_anchor = avatar_anchor
+            return res
         except Exception:
             pass
 
         try:
             req_url = f"{self.base_url}/api/generate"
             prompt_text = f"""
-            You are an expert film director. Break down this concept/script into {scene_count} distinct visual scenes.
-            CRITICAL: 'visual_prompt' must be a concise (15-30 words) description of visual subjects, setting, lighting, and textures (NOT the spoken paragraph).
+            You are an expert film director. Break down this concept into {scene_count} distinct visual scenes.
+            Character Continuity Anchor: {avatar_anchor}
             
             Output ONLY valid JSON matching this schema:
             {{
               "title": "Short Title",
               "art_style_preset": "{art_style}",
+              "avatar_anchor": "{avatar_anchor}",
               "scenes": [
                  {{
                    "scene_id": 1,
-                   "visual_prompt": "Concise visual scene description",
+                   "visual_prompt": "Concise visual scene description with {avatar_anchor}",
                    "motion_prompt": "Cinematic camera movement",
                    "narration": "Short spoken sentence",
                    "duration_seconds": 4
@@ -91,7 +111,9 @@ class ScriptOrchestrator:
             with urllib.request.urlopen(req, timeout=10) as response:
                 res_data = json.loads(response.read().decode("utf-8"))
                 parsed = json.loads(res_data.get("response", "{}"))
-                return VideoScript(**parsed)
+                res = VideoScript(**parsed)
+                res.avatar_anchor = avatar_anchor
+                return res
         except Exception:
             pass
 
@@ -109,19 +131,19 @@ class ScriptOrchestrator:
         ]
 
         stage_descriptors = [
-            "establishing visual concept, digital infrastructure",
-            "detailed algorithmic process flow, glowing data stream",
-            "interactive decision dashboard, analytics visualization",
-            "successful execution outcome, secure verified transaction network"
+            "establishing concept and digital infrastructure",
+            "detailed algorithmic process flow and data stream",
+            "interactive decision dashboard and analytics visualization",
+            "successful execution outcome and verified network"
         ]
 
         scenes = []
         for i in range(scene_count):
             sentence_focus = sentences[i] if i < len(sentences) else sentences[i % len(sentences)]
-            distilled_prompt = self.distill_visual_prompt(sentence_focus, max_words=25)
+            distilled_prompt = self.distill_visual_prompt(sentence_focus, max_words=20)
             stage_desc = stage_descriptors[i % len(stage_descriptors)]
 
-            visual_prompt = f"{distilled_prompt}, {stage_desc}, ultra-detailed cinematic composition"
+            visual_prompt = f"{avatar_anchor}, {distilled_prompt}, {stage_desc}, ultra-detailed cinematic composition"
             
             scenes.append(VideoScene(
                 scene_id=i + 1,
@@ -135,5 +157,6 @@ class ScriptOrchestrator:
         return VideoScript(
             title=f"{clean_title.strip()}",
             art_style_preset=art_style,
+            avatar_anchor=avatar_anchor,
             scenes=scenes
         )
