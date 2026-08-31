@@ -8,10 +8,13 @@ from src.config import OLLAMA_BASE_URL, OLLAMA_MODEL, AVATAR_PROFILES
 
 class VideoScene(BaseModel):
     scene_id: int = Field(description="Sequential index starting from 1")
-    visual_prompt: str = Field(description="Detailed text-to-image prompt with style and character consistency.")
-    motion_prompt: str = Field(description="Action and camera movement prompt for video generation.")
+    visual_prompt: str = Field(default="", description="Detailed text-to-image prompt with style and character consistency.")
+    motion_prompt: str = Field(default="Slow subtle cinematic camera motion", description="Action and camera movement prompt for video generation.")
     narration: Optional[str] = Field(default="", description="Spoken narration for this scene")
     duration_seconds: int = Field(default=5, description="Target duration of the scene in seconds.")
+    video_source_type: str = Field(default="ai_generated", description="'ai_generated' or 'uploaded_video'")
+    video_source_url: Optional[str] = Field(default="", description="Relative or absolute path to user uploaded MP4 video clip.")
+    keep_original_audio: bool = Field(default=False, description="Whether to preserve the clip's original audio track instead of AI voiceover.")
 
 class VideoScript(BaseModel):
     title: str = Field(description="Title of the video production")

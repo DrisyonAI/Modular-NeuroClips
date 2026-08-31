@@ -225,3 +225,66 @@ class MediaGenerationEngine:
                 with open(image_path, "rb") as f_in, open(clip_path, "wb") as f_out:
                     f_out.write(f_in.read())
                 return str(clip_path)
+
+    def extract_video_thumbnail(self, video_path: str, thumbnail_path: Path, width: int = 1280, height: int = 720) -> str:
+        """Extracts a frame from an existing video to serve as keyframe preview."""
+        try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", "00:00:00.5",
+                "-i", str(video_path),
+                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
+                "-vframes", "1",
+                str(thumbnail_path)
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return str(thumbnail_path)
+        except Exception:
+            img = Image.new("RGB", (width, height), color=(15, 23, 42))
+            img.save(thumbnail_path)
+            return str(thumbnail_path)
+
+    def prepare_existing_video_clip(
+        self,
+        input_video_path: str,
+        scene_id: int,
+        job_id: str = "fresh",
+        target_duration: float = 5.0,
+        width: int = 1280,
+        height: int = 720
+    ) -> str:
+        """
+        Normalizes an uploaded video clip to the studio's exact resolution, aspect ratio,
+        and frame rate so it concatenates seamlessly with AI scenes.
+        """
+        clip_path = self.output_dir / f"scene_{scene_id}_{job_id}_clip.mp4"
+        in_p = Path(input_video_path)
+        if not in_p.exists():
+            from src.config import ASSETS_DIR
+            alt_p = ASSETS_DIR / in_p.name
+            if alt_p.exists():
+                in_p = alt_p
+
+        try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-stream_loop", "-1",
+                "-i", str(in_p.resolve()),
+                "-t", str(target_duration),
+                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                "-an",
+                str(clip_path)
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return str(clip_path)
+        except Exception as e:
+            print(f"[Video Normalization Warning] ({e}). Performing simple copy fallback.")
+            if in_p.exists():
+                with open(in_p, "rb") as f_src, open(clip_path, "wb") as f_dst:
+                    f_dst.write(f_src.read())
+            return str(clip_path)
+

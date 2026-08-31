@@ -16,6 +16,9 @@ CURRICULUM_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "./exports"))
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+ASSETS_DIR = Path(os.getenv("ASSETS_DIR", "./assets_library"))
+ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+
 IDENTITIES_DIR = Path("./identities")
 IDENTITIES_DIR.mkdir(parents=True, exist_ok=True)
 
