@@ -195,6 +195,7 @@ scorm_zip = manager.export_master_scORM_package()
 
 ## 10. Deployment & Production Setup Guide
 
+<<<<<<< HEAD
 ```bash
 # 1. Clone & Setup
 git clone https://github.com/DrisyonAI/Modular-NeuroClips.git
@@ -205,10 +206,175 @@ pip install -r requirements.txt
 
 # 3. Run Studio Web Portal
 python app.py
+=======
+### 9.1 Environment Configuration (`.env`)
+
+Copy the provided example environment template and configure it according to your server type:
+```bash
+cp .env.example .env
 ```
-Open **`http://localhost:8000`** in your browser.
+
+| Key | Default | Description |
+| :--- | :--- | :--- |
+| `DEVICE` | `cpu` (or `cuda`) | Execution device (`cpu` for standard VPS; `cuda` for dedicated GPU instances) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Endpoint for local or remote Ollama LLM service |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Ollama model tag for script generation |
+| `RENDER_WIDTH` | `1280` | Default video canvas width in pixels |
+| `RENDER_HEIGHT` | `720` | Default video canvas height in pixels |
+| `OUTPUT_DIR` | `./render_output` | Directory for rendered videos, audio, and subtitle files |
+| `DASHBOARD_HOST` | `0.0.0.0` | Binding host address for the FastAPI studio |
+| `DASHBOARD_PORT` | `8000` | Binding port for the studio web portal |
+
+---
+
+### 9.2 Step-by-Step Installation (Linux VPS)
+
+#### Step 1: Install System Prerequisites
+```bash
+sudo apt update && sudo apt install -y \
+    ffmpeg \
+    fonts-dejavu-core \
+    fonts-liberation \
+    curl \
+    git \
+    build-essential \
+    python3-pip \
+    python3-venv
+```
+
+#### Step 2: Install Node.js (For Remotion React Engine)
+```bash
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+#### Step 3: (Optional) Install & Start Ollama for Local LLM Scripting
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.1:8b
+```
+
+#### Step 4: Clone Repository & Setup Python Virtual Environment
+```bash
+git clone https://github.com/DrisyonAI/Modular-NeuroClips.git
+cd Modular-NeuroClips
+
+python3 -m venv venv
+source venv/bin/activate
+```
+
+**For Standard CPU VPS (Fast Lightweight Install):**
+```bash
+# Install lightweight CPU-only PyTorch build (saves ~2GB download)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-cpu.txt
+```
+
+**For Dedicated GPU Server (CUDA Enabled):**
+```bash
+pip install -r requirements.txt
+```
+
+#### Step 5: Install Remotion Dependencies
+```bash
+cd remotion
+npm install
+cd ..
+```
+
+---
+
+### 9.3 Running the Studio
+
+#### Development / Quick Run:
+```bash
+python app.py
+```
+Open **`http://<SERVER_IP>:8000`** in your browser.
+
+#### Production Background Service (Systemd):
+Create a systemd unit file at `/etc/systemd/system/modular-neuroclips.service`:
+```ini
+[Unit]
+Description=Modular-NeuroClips AI Studio
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Modular-NeuroClips
+ExecStart=/home/ubuntu/Modular-NeuroClips/venv/bin/python app.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+Enable and start the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable modular-neuroclips
+sudo systemctl start modular-neuroclips
+sudo systemctl status modular-neuroclips
+```
+
+---
+
+### 9.4 Docker & Docker Compose Deployment
+
+You can alternatively run the entire platform in a container:
+```bash
+# Build and start the studio container
+docker compose up -d --build
+
+# View real-time logs
+docker compose logs -f
+```
+
+---
+
+### 9.5 Nginx Reverse Proxy with SSL & SSE Streaming
+
+For hosting on a custom domain (e.g. `mnc.mytestbed.tech`):
+
+```nginx
+server {
+    listen 80;
+    server_name mnc.mytestbed.tech;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name mnc.mytestbed.tech;
+
+    ssl_certificate /etc/letsencrypt/live/mnc.mytestbed.tech/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mnc.mytestbed.tech/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Disable buffering for real-time Server-Sent Events (SSE) telemetry
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 86400s;
+    }
+}
+```
+
+Obtain free SSL certificate via Certbot:
+```bash
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d mnc.mytestbed.tech
+```
 
 ---
 
 ## 📄 License
 This project is licensed under the Apache 2.0 License.
+
