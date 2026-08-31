@@ -1279,7 +1279,7 @@ async def health_check():
 # -------------------------------------------------------------
 # Web UI Portal Interface with SCORM & Visual Storyboard
 # -------------------------------------------------------------
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def serve_dashboard():
     return r"""
 <!DOCTYPE html>
