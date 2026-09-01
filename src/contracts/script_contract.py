@@ -3,7 +3,10 @@ Script Contract defining multi-scene educational structure and directorial cues.
 """
 from typing import List, Optional
 from pydantic import BaseModel, Field
-from src.contracts.persona import RegionLocaleEnum
+try:
+    from .persona import RegionLocaleEnum
+except ImportError:
+    from src.contracts.persona import RegionLocaleEnum
 
 
 class ScriptScene(BaseModel):

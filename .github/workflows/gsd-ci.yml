@@ -10,6 +10,8 @@ jobs:
   verify:
     name: Verify Multi-Agent Contracts & Quiz Engine
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
 
     steps:
       - name: Checkout Code
