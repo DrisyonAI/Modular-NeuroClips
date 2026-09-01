@@ -5,8 +5,14 @@ import urllib.request
 import urllib.parse
 import random
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
 from src.config import OUTPUT_DIR, DEVICE, T2I_MODEL, I2V_MODEL
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    Image = ImageDraw = ImageFont = None
+    PIL_AVAILABLE = False
 
 try:
     import torch
