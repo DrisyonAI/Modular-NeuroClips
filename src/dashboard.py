@@ -21,6 +21,7 @@ from src.orchestrator import ScriptOrchestrator, VideoScript, VideoScene
 from src.pipeline import MediaGenerationEngine, VRAMGuard
 from src.compiler import compile_final_video, generate_srt_subtitles
 from src.quiz_engine import QuizEngine
+from src.scorm_packager import SCORMPackager, SCORMPackageRequest, SCORMModuleModel, SCORMLessonModel
 
 quiz_engine = QuizEngine()
 
