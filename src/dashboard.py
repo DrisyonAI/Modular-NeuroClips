@@ -1515,13 +1515,15 @@ async def serve_dashboard():
                                     </label>
                                     <input type="file" id="avatar-file-input" class="hidden" accept="image/*" onchange="uploadAvatar(this)">
                                 </div>
-                                <select id="avatar-persona-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                    <option value="maya_fintech">Maya (Senior FinTech Lead)</option>
+                                <select id="avatar-persona-select" onchange="onPersonaSelectChange(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="maya_fintech" selected>Maya (Senior FinTech Lead)</option>
                                     <option value="alex_ai">Alex (Enterprise AI Architect)</option>
                                     <option value="elena_compliance">Elena (Risk & Governance Director)</option>
                                     <option value="david_trainer">David (Global LMS Instructor)</option>
+                                    <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
                                     <option value="custom_upload">Custom Uploaded Portrait</option>
                                 </select>
+                                <span id="persona-meta-badge" class="text-[10px] text-brand-glow font-mono block mt-1">🇮🇳 South Asian | en-IN (Neerja) | FinTech</span>
                             </div>
 
                             <div>
@@ -2385,6 +2387,37 @@ async def serve_dashboard():
             const slider = document.getElementById('scene-slider');
             slider.value = count;
             document.getElementById('scene-val').innerText = count + ' Scenes';
+        }
+
+        const PERSONA_CATALOG_JS = {
+            "maya_fintech": { voice: "en-IN-NeerjaNeural", eleven_voice: "21m00Tcm4TlvDq8ikWAM", pitch: "+1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Neerja) | FinTech" },
+            "alex_ai": { voice: "en-US-GuyNeural", eleven_voice: "pNInz6obpgDQGcFmaJgB", pitch: "-2Hz", speed: 1.0, badge: "🇺🇸 Caucasian | en-US (Guy) | AI Architect" },
+            "elena_compliance": { voice: "en-US-AriaNeural", eleven_voice: "EXAVITQu4vr4xnSDxMaL", pitch: "+0Hz", speed: 0.95, badge: "🇪🇸 Latina | en-US (Aria) | Governance" },
+            "david_trainer": { voice: "en-US-ChristopherNeural", eleven_voice: "TxGEqnHWrfWFTfGW9XjX", pitch: "+0Hz", speed: 1.0, badge: "🇺🇸 Global LMS | en-US (Christopher)" },
+            "rajesh_cloud": { voice: "en-IN-PrabhatNeural", eleven_voice: "ErXwobaYiN019PkySvjV", pitch: "-1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Prabhat) | Cloud" }
+        };
+
+        function onPersonaSelectChange(val) {
+            const meta = PERSONA_CATALOG_JS[val];
+            if (meta) {
+                if (document.getElementById('voice-select')) {
+                    document.getElementById('voice-select').value = meta.voice;
+                }
+                if (document.getElementById('elevenlabs-voice-id')) {
+                    document.getElementById('elevenlabs-voice-id').value = meta.eleven_voice;
+                }
+                if (document.getElementById('speed-slider')) {
+                    document.getElementById('speed-slider').value = meta.speed;
+                    document.getElementById('speed-val').innerText = meta.speed.toFixed(2) + 'x';
+                }
+                const pitchVal = parseInt(meta.pitch) || 0;
+                if (document.getElementById('pitch-slider')) {
+                    document.getElementById('pitch-slider').value = pitchVal;
+                    document.getElementById('pitch-val').innerText = (pitchVal >= 0 ? '+' : '') + pitchVal + 'Hz';
+                }
+                const badge = document.getElementById('persona-meta-badge');
+                if (badge) badge.innerText = meta.badge;
+            }
         }
 
         let CURRENT_VOICE_PROVIDER = 'edge_tts';
