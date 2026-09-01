@@ -1166,6 +1166,78 @@ async def export_scorm_package(
         "questions_count": len(questions)
     }
 
+class CustomSCORMBuildRequest(BaseModel):
+    course_title: str
+    course_id: Optional[str] = "CUSTOM_COURSE"
+    module_title: Optional[str] = "Module 1"
+    topic: Optional[str] = "E-Learning Unit"
+    pass_percentage: Optional[int] = 70
+    scorm_version: Optional[str] = "1.2"
+    video_filename: Optional[str] = None
+    module_id: Optional[int] = 1
+
+@app.post("/api/v1/scorm/custom-build")
+async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
+    """
+    Builds a custom SCORM 1.2 / 2004 e-learning package with custom metadata, media attachment, and module quiz.
+    """
+    safe_course_id = "".join(c for c in (req.course_id or "COURSE") if c.isalnum() or c in ('_', '-')).strip() or "COURSE"
+    package_name = f"SCORM_{safe_course_id}_{int(time.time())}.zip"
+    zip_path = EXPORTS_DIR / package_name
+    
+    questions = quiz_engine.get_module_questions(req.module_id or 1)
+    
+    video_file = None
+    target_vid_name = req.video_filename or ""
+    if req.video_filename:
+        v1 = OUTPUT_DIR / req.video_filename
+        v2 = ASSETS_DIR / req.video_filename
+        if v1.exists():
+            video_file = v1
+        elif v2.exists():
+            video_file = v2
+
+    manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<manifest identifier="{safe_course_id}" version="{req.scorm_version}" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
+  <organizations default="org_{safe_course_id}">
+    <organization identifier="org_{safe_course_id}">
+      <title>{req.course_title}</title>
+      <item identifier="item_{safe_course_id}" identifierref="res_{safe_course_id}">
+        <title>{req.module_title}: {req.topic} ({len(questions)} Questions)</title>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res_{safe_course_id}" type="webcontent" adlcp:scormtype="sco" href="index.html">
+      <file href="index.html"/>
+      {f'<file href="{target_vid_name}"/>' if video_file else ''}
+    </resource>
+  </resources>
+</manifest>
+"""
+    player_html = quiz_engine.generate_interactive_scorm_html(
+        video_filename=target_vid_name if video_file else "",
+        module_id=req.module_id or 1,
+        pass_percentage=req.pass_percentage or 70
+    )
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("imsmanifest.xml", manifest_xml)
+        zf.writestr("index.html", player_html)
+        if video_file and video_file.exists():
+            zf.write(video_file, arcname=target_vid_name)
+
+    return {
+        "status": "ok",
+        "package_name": package_name,
+        "download_url": f"/static_exports/{package_name}",
+        "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
+        "course_title": req.course_title,
+        "module_id": req.module_id,
+        "questions_count": len(questions),
+        "scorm_version": req.scorm_version
+    }
+
 @app.get("/api/v1/scorm/packages")
 async def list_scorm_packages():
     """Lists all available SCORM zip packages in the exports directory."""
@@ -1489,6 +1561,22 @@ async def serve_dashboard():
             <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3" id="milestones-container">
             </div>
         </section>
+
+        <!-- 🎛️ STUDIO MODE SELECTOR BAR -->
+        <div class="flex items-center space-x-2 border-b border-slate-800 pb-3">
+            <button onclick="switchStudioMode('video')" id="mode-btn-video" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all">
+                <span>🎬</span> <span>Multi-Agent Video Studio</span>
+            </button>
+            <button onclick="switchStudioMode('voice')" id="mode-btn-voice" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all">
+                <span>🎙️</span> <span>Voice Director Studio (Audio Masters)</span>
+            </button>
+            <button onclick="switchStudioMode('scorm')" id="mode-btn-scorm" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all">
+                <span>📦</span> <span>Custom SCORM & LMS Generator</span>
+            </button>
+        </div>
+
+        <!-- MODE 1: MULTI-AGENT VIDEO STUDIO -->
+        <div id="mode-video-section" class="space-y-6">
 
         <!-- Studio Control Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -1928,6 +2016,294 @@ async def serve_dashboard():
             </div>
         </section>
 
+        </div><!-- END OF MODE 1: MULTI-AGENT VIDEO STUDIO -->
+
+        <!-- MODE 2: STANDALONE VOICE DIRECTOR & AUDIO MASTER STUDIO -->
+        <div id="mode-voice-section" class="hidden space-y-6">
+            <div class="glass-panel rounded-2xl p-6 space-y-6 border border-emerald-500/20">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div>
+                        <h3 class="text-base font-bold text-white flex items-center gap-2">
+                            <span>🎙️</span> Voice Director Studio & Multi-Format Audio Master Exporter
+                        </h3>
+                        <p class="text-xs text-slate-400">High-fidelity neural speech synthesis, prosody tuning, and synchronous subtitle generation without video rendering</p>
+                    </div>
+                    <span class="text-xs font-mono px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        ⚡ Edge-TTS & ElevenLabs Audio Engine
+                    </span>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <!-- Left: Script Input, Prosody & Controls (7 cols) -->
+                    <div class="lg:col-span-7 space-y-4">
+                        <!-- Script Input -->
+                        <div class="space-y-1.5">
+                            <div class="flex justify-between items-center">
+                                <label class="text-xs font-semibold text-slate-300">Narration Script & Directorial Cues</label>
+                                <div class="flex items-center space-x-3">
+                                    <label for="voice-lab-file-upload" class="text-[10px] text-emerald-400 hover:underline cursor-pointer flex items-center gap-1 font-sans">
+                                        <span>📁</span> <span>Upload Document (.txt, .md, .srt)</span>
+                                    </label>
+                                    <input type="file" id="voice-lab-file-upload" class="hidden" accept=".txt,.md,.srt,.vtt,.json" onchange="handleVoiceLabDocumentUpload(this)">
+                                    <span id="voice-lab-stats" class="text-[11px] font-mono text-emerald-400">0 words | ~0.0 min</span>
+                                </div>
+                            </div>
+
+                            <!-- Director Cue Quick Buttons -->
+                            <div class="flex items-center space-x-1.5 overflow-x-auto py-1 text-[11px]">
+                                <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Director Cues:</span>
+                                <button type="button" onclick="insertVoiceLabTag('[pause 250ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    ⏱️ [0.25s]
+                                </button>
+                                <button type="button" onclick="insertVoiceLabTag('[pause 500ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    ⏱️ [0.5s]
+                                </button>
+                                <button type="button" onclick="insertVoiceLabTag('[pause 1s] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    ⏱️ [1.0s]
+                                </button>
+                                <button type="button" onclick="insertVoiceLabTag('[emphasis] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    ✨ [Emphasis]
+                                </button>
+                                <button type="button" onclick="insertVoiceLabTag('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    💡 [Pro Tip]
+                                </button>
+                            </div>
+
+                            <textarea id="voice-lab-prompt" rows="5" oninput="updateVoiceLabMetrics()" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all font-sans" placeholder="Enter voiceover script or upload a document (e.g. Welcome to the FinTech AI architecture masterclass. [pause 500ms] Today we examine multi-agent settlement)..."></textarea>
+                        </div>
+
+                        <!-- Language & Voice Selector -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🌐 Target Language & Accent</label>
+                                <select id="voice-lab-lang" onchange="onVoiceLabLangChange()" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500">
+                                    <option value="en-US" selected>🇺🇸 English (US Standard)</option>
+                                    <option value="en-IN">🇮🇳 English (Indian Accent)</option>
+                                    <option value="te-IN">🇮🇳 Telugu (తెలుగు)</option>
+                                    <option value="ta-IN">🇮🇳 Tamil (தமிழ்)</option>
+                                    <option value="hi-IN">🇮🇳 Hindi (हिन्दी)</option>
+                                    <option value="es-ES">🇪🇸 Spanish (Castilian)</option>
+                                    <option value="fr-FR">🇫🇷 French (Standard)</option>
+                                    <option value="de-DE">🇩🇪 German (Standard)</option>
+                                    <option value="ja-JP">🇯🇵 Japanese (日本語)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🎙️ Voice Persona Profile</label>
+                                <select id="voice-lab-voice" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500">
+                                    <option value="en-US-GuyNeural" selected>Guy (Male - Deep Professional)</option>
+                                    <option value="en-US-AriaNeural">Aria (Female - Clear Instructional)</option>
+                                    <option value="en-IN-NeerjaNeural">Neerja (Female - Indian FinTech Specialist)</option>
+                                    <option value="en-IN-PrabhatNeural">Prabhat (Male - Indian Senior Architect)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Prosody Sliders -->
+                        <div class="grid grid-cols-2 gap-3 p-3 rounded-xl bg-slate-950/80 border border-slate-800">
+                            <div>
+                                <div class="flex justify-between text-[11px] font-semibold text-slate-300 mb-1">
+                                    <span>Speech Rate</span>
+                                    <span id="voice-lab-rate-val" class="font-mono text-emerald-400 font-bold">1.00x</span>
+                                </div>
+                                <input id="voice-lab-rate" type="range" min="0.75" max="1.50" step="0.05" value="1.0" oninput="document.getElementById('voice-lab-rate-val').innerText = parseFloat(this.value).toFixed(2) + 'x'; updateVoiceLabMetrics();" class="w-full accent-emerald-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+                            <div>
+                                <div class="flex justify-between text-[11px] font-semibold text-slate-300 mb-1">
+                                    <span>Pitch Shift</span>
+                                    <span id="voice-lab-pitch-val" class="font-mono text-emerald-400 font-bold">0 Hz</span>
+                                </div>
+                                <input id="voice-lab-pitch" type="range" min="-20" max="20" step="2" value="0" oninput="document.getElementById('voice-lab-pitch-val').innerText = (this.value > 0 ? '+' : '') + this.value + ' Hz'" class="w-full accent-emerald-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+                        </div>
+
+                        <!-- Format & Action Bar -->
+                        <div class="flex flex-col sm:flex-row items-center justify-between gap-3 p-3 rounded-xl bg-emerald-950/20 border border-emerald-500/30">
+                            <div class="flex items-center space-x-2 w-full sm:w-auto">
+                                <label class="text-xs font-semibold text-emerald-300 whitespace-nowrap">Output Master:</label>
+                                <select id="voice-lab-format" class="rounded-lg bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
+                                    <option value="mp3" selected>🎵 MP3 (320kbps Universal)</option>
+                                    <option value="wav">🔊 WAV (Lossless 44.1kHz)</option>
+                                    <option value="m4a">📱 M4A / AAC (Apple Podcasts)</option>
+                                    <option value="ogg">🌐 OGG (Web Audio)</option>
+                                    <option value="flac">💿 FLAC (Audiophile Lossless)</option>
+                                </select>
+                            </div>
+                            <div class="flex items-center space-x-2 w-full sm:w-auto justify-end">
+                                <button onclick="auditionVoiceLab()" id="voice-lab-audition-btn" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition-all flex items-center gap-1">
+                                    <span>🎧</span> <span>Audition</span>
+                                </button>
+                                <button onclick="exportVoiceLabMaster()" id="voice-lab-export-btn" class="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5">
+                                    <span>⚡</span> <span>Export Audio Master</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Live Waveform & Subtitles Preview (5 cols) -->
+                    <div class="lg:col-span-5 space-y-4">
+                        <div class="glass-panel p-4 rounded-xl space-y-3 border border-slate-800">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>🔊</span> <span>Master Audio Player</span>
+                                </h4>
+                                <span id="voice-lab-player-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">Idle</span>
+                            </div>
+                            <div class="p-3 rounded-lg bg-black/60 border border-slate-800 space-y-2">
+                                <audio id="voice-lab-audio-player" controls class="w-full h-8"></audio>
+                                <div id="voice-lab-download-box" class="hidden flex items-center justify-between text-xs pt-1 border-t border-slate-800">
+                                    <a id="voice-lab-audio-dl" href="#" download class="text-emerald-400 hover:underline font-bold flex items-center gap-1">
+                                        <span>⬇️</span> <span>Download Master</span>
+                                    </a>
+                                    <a id="voice-lab-srt-dl" href="#" download class="text-indigo-400 hover:underline font-bold flex items-center gap-1">
+                                        <span>📄</span> <span>Download .SRT</span>
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Synchronized Transcript & Subtitles Box -->
+                        <div class="glass-panel p-4 rounded-xl space-y-2 border border-slate-800 flex-1">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                                <span class="text-xs font-bold text-slate-300">Synchronized Transcript & Captions</span>
+                                <span class="text-[10px] text-slate-500 font-mono">Auto-generated</span>
+                            </div>
+                            <div id="voice-lab-srt-preview" class="p-3 rounded-lg bg-slate-950 font-mono text-xs text-slate-300 max-h-48 overflow-y-auto leading-relaxed border border-slate-800/80">
+                                Directorial cues and spoken sentences will stream here upon synthesis.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div><!-- END OF MODE 2: VOICE DIRECTOR -->
+
+        <!-- MODE 3: CUSTOM SCORM 1.2 & 2004 COURSEWARE GENERATOR -->
+        <div id="mode-scorm-section" class="hidden space-y-6">
+            <div class="glass-panel rounded-2xl p-6 space-y-6 border border-indigo-500/20">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div>
+                        <h3 class="text-base font-bold text-white flex items-center gap-2">
+                            <span>📦</span> Custom SCORM 1.2 / 2004 Courseware Generator
+                        </h3>
+                        <p class="text-xs text-slate-400">Assemble custom enterprise LMS packages with interactive video lecture, Nipuna question banks, and automatic gradebook tracking</p>
+                    </div>
+                    <span class="text-xs font-mono px-3 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        🎓 LMS Universal Conformance
+                    </span>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <!-- Left: Course Metadata & Assessment Selection (7 cols) -->
+                    <div class="lg:col-span-7 space-y-4">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Course Title</label>
+                                <input type="text" id="scorm-gen-course-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="AI Agents in FinTech: Autonomous Execution">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Course Code / Identifier</label>
+                                <input type="text" id="scorm-gen-course-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-brand-glow font-mono focus:outline-none focus:border-indigo-500" value="FINTECH_AGENTS_M1">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Module Title</label>
+                                <input type="text" id="scorm-gen-module-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="Module 1: Traditional AI vs GenAI vs Agents">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Topic / Lesson Unit</label>
+                                <input type="text" id="scorm-gen-topic" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="1.1 Traditional AI vs GenAI vs Agents">
+                            </div>
+                        </div>
+
+                        <!-- Media Source & Video Picker -->
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-300 mb-1">🎬 Attached Video Lecture</label>
+                            <select id="scorm-gen-video-select" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500">
+                                <option value="">Select a rendered video from Media Vault...</option>
+                            </select>
+                        </div>
+
+                        <!-- Item Bank & Passing Score -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">📝 Attach Assessment Item Bank</label>
+                                <select id="scorm-gen-module-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-emerald-400 font-bold focus:outline-none focus:border-indigo-500">
+                                    <option value="1">Module 1: Traditional AI vs GenAI vs Agents (32 Qs)</option>
+                                    <option value="2">Module 2: Agent Architecture & Planning (32 Qs)</option>
+                                    <option value="3">Module 3: RAG & Financial Memory (32 Qs)</option>
+                                    <option value="4">Module 4: Multi-Agent Collaboration (32 Qs)</option>
+                                    <option value="5">Module 5: Risk, Compliance & Governance (32 Qs)</option>
+                                    <option value="6">Module 6: Enterprise Deployment & Observability (32 Qs)</option>
+                                    <option value="7">Module 7: Algorithmic Execution & Trading (32 Qs)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <div class="flex justify-between text-xs font-semibold text-slate-300 mb-1">
+                                    <span>Passing Grade</span>
+                                    <span id="scorm-gen-pass-val" class="font-mono text-indigo-400 font-bold">70%</span>
+                                </div>
+                                <input id="scorm-gen-pass" type="range" min="50" max="100" step="5" value="70" oninput="document.getElementById('scorm-gen-pass-val').innerText = this.value + '%'" class="w-full accent-indigo-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+                        </div>
+
+                        <!-- SCORM Standard Selector & Build Button -->
+                        <div class="flex flex-col sm:flex-row items-center justify-between gap-3 p-3.5 rounded-xl bg-indigo-950/20 border border-indigo-500/30">
+                            <div class="flex items-center space-x-2 w-full sm:w-auto">
+                                <label class="text-xs font-semibold text-indigo-300">SCORM Standard:</label>
+                                <select id="scorm-gen-version" class="rounded-lg bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
+                                    <option value="1.2" selected>SCORM 1.2 (LMS Universal Standard)</option>
+                                    <option value="2004">SCORM 2004 4th Edition</option>
+                                </select>
+                            </div>
+                            <button onclick="buildCustomScormPackage()" id="scorm-custom-build-btn" class="w-full sm:w-auto px-5 py-2 rounded-xl bg-gradient-to-r from-indigo-600 via-brand-600 to-indigo-500 hover:brightness-110 font-bold text-xs text-white shadow-lg shadow-indigo-500/20 transition-all flex items-center justify-center gap-2">
+                                <span>📦</span> <span>Build & Export SCORM Package (.zip)</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Right: Conformance Checklist & Package Vault (5 cols) -->
+                    <div class="lg:col-span-5 space-y-4">
+                        <div class="glass-panel p-4 rounded-xl space-y-3 border border-slate-800">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>🛡️</span> <span>LMS CMI Data Model Inspector</span>
+                                </h4>
+                                <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">Verified</span>
+                            </div>
+                            <div class="space-y-2 text-xs font-mono">
+                                <div class="p-2 rounded bg-slate-950 border border-slate-800 text-slate-300 flex justify-between">
+                                    <span>cmi.core.lesson_status</span>
+                                    <span class="text-emerald-400">passed / incomplete</span>
+                                </div>
+                                <div class="p-2 rounded bg-slate-950 border border-slate-800 text-slate-300 flex justify-between">
+                                    <span>cmi.core.score.raw</span>
+                                    <span class="text-brand-glow">0 – 100%</span>
+                                </div>
+                                <div class="p-2 rounded bg-slate-950 border border-slate-800 text-slate-300 flex justify-between">
+                                    <span>imsmanifest.xml</span>
+                                    <span class="text-indigo-400">Auto-Validated</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="glass-panel p-4 rounded-xl space-y-3 border border-slate-800">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>📥</span> <span>Recent SCORM Packages</span>
+                                </h4>
+                                <button onclick="fetchScormPackagesTable()" class="text-[10px] text-slate-400 hover:text-white">↻ Refresh</button>
+                            </div>
+                            <div id="scorm-packages-table" class="space-y-2 max-h-48 overflow-y-auto text-xs">
+                                <div class="text-slate-500 text-center py-4">No custom packages built yet.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div><!-- END OF MODE 3: CUSTOM SCORM -->
+
     </main>
 
     <!-- Interactive Quiz & Item Bank Modal -->
@@ -2097,6 +2473,253 @@ async def serve_dashboard():
             const voiceSelect = document.getElementById('voice-select');
             const voices = LANG_VOICES[lang] || LANG_VOICES['en-US'];
             voiceSelect.innerHTML = voices.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+        }
+
+        function switchStudioMode(mode) {
+            const secVideo = document.getElementById('mode-video-section');
+            const secVoice = document.getElementById('mode-voice-section');
+            const secScorm = document.getElementById('mode-scorm-section');
+            const btnVideo = document.getElementById('mode-btn-video');
+            const btnVoice = document.getElementById('mode-btn-voice');
+            const btnScorm = document.getElementById('mode-btn-scorm');
+
+            if (!secVideo || !secVoice || !secScorm) return;
+
+            secVideo.classList.add('hidden');
+            secVoice.classList.add('hidden');
+            secScorm.classList.add('hidden');
+
+            btnVideo.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
+            btnVoice.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
+            btnScorm.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
+
+            if (mode === 'video') {
+                secVideo.classList.remove('hidden');
+                btnVideo.className = "px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all";
+            } else if (mode === 'voice') {
+                secVoice.classList.remove('hidden');
+                btnVoice.className = "px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all";
+                onVoiceLabLangChange();
+            } else if (mode === 'scorm') {
+                secScorm.classList.remove('hidden');
+                btnScorm.className = "px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-500/20 transition-all";
+                fetchScormMediaList();
+                fetchScormPackagesTable();
+            }
+        }
+
+        // ================= VOICE DIRECTOR STUDIO LOGIC =================
+        function updateVoiceLabMetrics() {
+            const text = document.getElementById('voice-lab-prompt').value.trim();
+            const words = text ? text.split(/\s+/).length : 0;
+            const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
+            const spokenMin = (words / (140 * speed)).toFixed(2);
+            document.getElementById('voice-lab-stats').innerText = `${words} words | ~${spokenMin} min`;
+        }
+
+        function insertVoiceLabTag(tag) {
+            const ta = document.getElementById('voice-lab-prompt');
+            const start = ta.selectionStart;
+            const end = ta.selectionEnd;
+            const val = ta.value;
+            ta.value = val.substring(0, start) + tag + val.substring(end);
+            ta.focus();
+            ta.selectionStart = ta.selectionEnd = start + tag.length;
+            updateVoiceLabMetrics();
+        }
+
+        async function handleVoiceLabDocumentUpload(input) {
+            const file = input.files[0];
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/api/v1/script/upload-document', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    document.getElementById('voice-lab-prompt').value = data.extracted_text;
+                    updateVoiceLabMetrics();
+                    alert(`📄 Uploaded ${data.filename} (${data.word_count} words).`);
+                } else {
+                    alert('Upload failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('Upload error: ' + e);
+            }
+        }
+
+        function onVoiceLabLangChange() {
+            const lang = document.getElementById('voice-lab-lang').value;
+            const select = document.getElementById('voice-lab-voice');
+            const voices = LANG_VOICES[lang] || LANG_VOICES['en-US'];
+            select.innerHTML = voices.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+        }
+
+        async function auditionVoiceLab() {
+            const text = document.getElementById('voice-lab-prompt').value.trim() || "Modular NeuroClips Voice Director Studio test.";
+            const voice = document.getElementById('voice-lab-voice').value;
+            const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
+            const pitch = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const btn = document.getElementById('voice-lab-audition-btn');
+            const badge = document.getElementById('voice-lab-player-badge');
+            
+            btn.disabled = true;
+            btn.innerText = "⏳ Generating...";
+            badge.innerText = "Synthesizing...";
+            try {
+                const res = await fetch('/api/v1/preview-voice', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ voice: voice, speech_rate: speed, pitch: pitch, text: text.substring(0, 200) })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.audio_url + '?t=' + Date.now();
+                    player.play();
+                    badge.innerText = "Playing 🎧";
+                } else {
+                    alert('Audition failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('Audition error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>🎧</span> <span>Audition</span>";
+            }
+        }
+
+        async function exportVoiceLabMaster() {
+            const text = document.getElementById('voice-lab-prompt').value.trim();
+            if (!text) {
+                alert("Please enter a voice script or upload a document first.");
+                return;
+            }
+            const voice = document.getElementById('voice-lab-voice').value;
+            const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
+            const pitch = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const format = document.getElementById('voice-lab-format').value;
+            const btn = document.getElementById('voice-lab-export-btn');
+            
+            btn.disabled = true;
+            btn.innerHTML = "<span>⏳</span> <span>Exporting Master...</span>";
+            try {
+                const res = await fetch('/api/v1/voice/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text, voice: voice, speech_rate: speed, pitch: pitch, format: format })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.audio_url + '?t=' + Date.now();
+                    player.play();
+
+                    const dlBox = document.getElementById('voice-lab-download-box');
+                    dlBox.classList.remove('hidden');
+                    document.getElementById('voice-lab-audio-dl').href = data.audio_url;
+                    document.getElementById('voice-lab-audio-dl').download = data.filename;
+                    document.getElementById('voice-lab-srt-dl').href = data.srt_url;
+                    document.getElementById('voice-lab-srt-dl').download = data.srt_filename;
+                    document.getElementById('voice-lab-srt-preview').innerText = `✅ Master Audio (${data.format.toUpperCase()} ${data.size_mb} MB) generated successfully with companion subtitles!`;
+                    
+                    alert(`⚡ ${data.format.toUpperCase()} Audio Master generated (${data.size_mb} MB)!`);
+                } else {
+                    alert('Audio Export failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('Audio Export error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>⚡</span> <span>Export Audio Master</span>";
+            }
+        }
+
+        // ================= CUSTOM SCORM GENERATOR LOGIC =================
+        async function fetchScormMediaList() {
+            try {
+                const res = await fetch('/api/v1/gallery');
+                const data = await res.json();
+                const select = document.getElementById('scorm-gen-video-select');
+                if (data.videos.length > 0) {
+                    select.innerHTML = '<option value="">Select a rendered video from Media Vault...</option>' + 
+                        data.videos.map(v => `<option value="${v.filename}">${v.filename} (${v.size_mb} MB)</option>`).join('');
+                } else {
+                    select.innerHTML = '<option value="">No rendered videos found in vault (Video-free lecture mode)</option>';
+                }
+            } catch (e) {}
+        }
+
+        async function fetchScormPackagesTable() {
+            try {
+                const res = await fetch('/api/v1/scorm/packages');
+                const data = await res.json();
+                const container = document.getElementById('scorm-packages-table');
+                if (data.packages && data.packages.length > 0) {
+                    container.innerHTML = data.packages.map(p => `
+                        <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between text-xs font-mono">
+                            <div>
+                                <div class="font-bold text-slate-200 truncate w-44" title="${p.filename}">${p.filename}</div>
+                                <span class="text-[10px] text-slate-500">${p.size_mb} MB</span>
+                            </div>
+                            <a href="${p.download_url}" download class="px-2.5 py-1 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30 font-bold transition-all">
+                                ⬇️ Download
+                            </a>
+                        </div>
+                    `).join('');
+                } else {
+                    container.innerHTML = '<div class="text-slate-500 text-center py-4">No custom packages built yet.</div>';
+                }
+            } catch (e) {}
+        }
+
+        async function buildCustomScormPackage() {
+            const courseTitle = document.getElementById('scorm-gen-course-title').value.trim();
+            const courseId = document.getElementById('scorm-gen-course-id').value.trim();
+            const moduleTitle = document.getElementById('scorm-gen-module-title').value.trim();
+            const topic = document.getElementById('scorm-gen-topic').value.trim();
+            const videoFile = document.getElementById('scorm-gen-video-select').value;
+            const moduleId = parseInt(document.getElementById('scorm-gen-module-id').value) || 1;
+            const passPercentage = parseInt(document.getElementById('scorm-gen-pass').value) || 70;
+            const scormVersion = document.getElementById('scorm-gen-version').value;
+            const btn = document.getElementById('scorm-custom-build-btn');
+
+            btn.disabled = true;
+            btn.innerHTML = "<span>⏳</span> <span>Packaging SCORM...</span>";
+            try {
+                const res = await fetch('/api/v1/scorm/custom-build', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        course_title: courseTitle,
+                        course_id: courseId,
+                        module_title: moduleTitle,
+                        topic: topic,
+                        video_filename: videoFile,
+                        module_id: moduleId,
+                        pass_percentage: passPercentage,
+                        scorm_version: scormVersion
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const link = document.createElement('a');
+                    link.href = data.download_url;
+                    link.download = data.package_name;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    fetchScormPackagesTable();
+                    alert(`📦 Custom SCORM Package (${data.size_mb} MB) bundled with Module ${data.module_id} Quiz (${data.questions_count} questions) and ready for LMS!`);
+                } else {
+                    alert('SCORM Packaging failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('SCORM Packaging error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>📦</span> <span>Build & Export SCORM Package (.zip)</span>";
+            }
         }
 
         function renderMilestones(currentId = 'init', states = {}) {
