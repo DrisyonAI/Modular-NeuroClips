@@ -1,0 +1,40 @@
+name: GSD CI & Contract Verification
+
+on:
+  push:
+    branches: [ main, "feature/**" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify:
+    name: Verify Multi-Agent Contracts & Quiz Engine
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pydantic fastapi openpyxl edge-tts pytest
+
+      - name: Test Contract Imports & Agent Instantiation
+        run: |
+          python -c "from src.contracts import PERSONA_CATALOG, PersonaIdentityContract, ScriptContract, VoiceContract, ImageContract; print('Contracts validated.')"
+          python -c "from src.agents import DirectorAgent, ScriptwriterAgent, VoiceDirectorAgent, ImageGeneratorAgent; print('Agent packages validated.')"
+
+      - name: Test Quiz Engine & Item Bank (224 Questions)
+        run: |
+          python -c "from src.quiz_engine import QuizEngine; qe = QuizEngine(); summaries = qe.get_modules_summary(); assert len(summaries) == 7, 'Expected 7 modules'; total_q = sum(s.total_questions for s in summaries); assert total_q == 224, f'Expected 224 questions, got {total_q}'; print(f'Item Bank verified: {total_q} questions across {len(summaries)} modules.')"
+
+      - name: Test SCORM Package Generation
+        run: |
+          python -c "from src.quiz_engine import QuizEngine; qe = QuizEngine(); html = qe.generate_interactive_scorm_html('sample.mp4', 1, 70); assert 'cmi.core.lesson_status' in html, 'SCORM CMI tracking missing'; print('SCORM HTML5 Player validated.')"
