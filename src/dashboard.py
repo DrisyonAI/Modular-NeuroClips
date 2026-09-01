@@ -20,6 +20,9 @@ from src.config import (
 from src.orchestrator import ScriptOrchestrator, VideoScript, VideoScene
 from src.pipeline import MediaGenerationEngine, VRAMGuard
 from src.compiler import compile_final_video, generate_srt_subtitles
+from src.quiz_engine import QuizEngine
+
+quiz_engine = QuizEngine()
 
 app = FastAPI(title="Modular-NeuroClips Studio & VPS Control Plane", version="2.6.0")
 
@@ -1045,22 +1048,92 @@ async def preview_tts_voice_api(voice: str = Query("en-IN-NeerjaNeural"), rate: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Voice preview failed: {str(e)}")
 
+@app.post("/api/v1/scorm/package")
+async def create_custom_scorm_package(req: SCORMPackageRequest):
+    """
+    Generates a full ADL SCORM 1.2 or 2004 e-learning package (.zip)
+    from structured Course Title, Modules, Lessons, Topics, and attached media.
+    """
+    packager = SCORMPackager(
+        course_id=req.course_id,
+        course_title=req.course_title,
+        course_description=req.course_description or "",
+        version=req.version
+    )
+
+    for mod in req.modules:
+        packager.add_module(
+            module_id=mod.module_id,
+            module_title=mod.module_title,
+            description=mod.description or ""
+        )
+        for ls in mod.lessons:
+            # Resolve video/audio/srt if relative or job id provided
+            resolved_vid = resolve_video_path(ls.video_path)
+            packager.add_lesson(
+                module_id=mod.module_id,
+                lesson_id=ls.lesson_id,
+                lesson_title=ls.lesson_title,
+                topic=ls.topic or "",
+                description=ls.description or "",
+                video_path=resolved_vid,
+                srt_path=ls.srt_path,
+                audio_path=ls.audio_path,
+                runtime_seconds=ls.runtime_seconds or 0.0
+            )
+
+    output_zip = packager.export_zip()
+
+    return {
+        "status": "ok",
+        "package_name": output_zip.name,
+        "download_url": f"/static_exports/{output_zip.name}",
+        "version": req.version,
+        "size_mb": round(output_zip.stat().st_size / (1024 ** 2), 2),
+        "total_modules": len(req.modules),
+        "total_lessons": sum(len(m.lessons) for m in req.modules)
+    }
+
+@app.get("/api/v1/quiz/modules")
+async def get_quiz_modules_api():
+    """Lists all available course modules and question bank statistics from Nipuna curriculum."""
+    return {"status": "ok", "modules": [s.model_dump() for s in quiz_engine.get_modules_summary()]}
+
+@app.get("/api/v1/quiz/module/{module_id}")
+async def get_quiz_module_questions_api(module_id: int):
+    """Returns question bank items for a specific module."""
+    questions = quiz_engine.get_module_questions(module_id)
+    return {"status": "ok", "module_id": module_id, "questions": [q.model_dump() for q in questions]}
+
 @app.post("/api/v1/scorm/export/{filename}")
-async def export_scorm_package(filename: str):
+async def export_scorm_package(
+    filename: str,
+    module_id: int = Query(1),
+    course_title: Optional[str] = Query(None),
+    scorm_version: str = Query("1.2")
+):
+    """
+    1-click SCORM exporter bundling the rendered video with the module's interactive 32-question assessment from Nipuna curriculum.
+    """
     video_path = OUTPUT_DIR / filename
+    if not video_path.exists():
+        video_path = ASSETS_DIR / filename
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
         
-    package_name = f"SCORM_{video_path.stem}.zip"
+    c_title = course_title or video_path.stem.replace('_', ' ').title()
+    package_name = f"SCORM_{video_path.stem}_Module{module_id}.zip"
     zip_path = EXPORTS_DIR / package_name
+    
+    questions = quiz_engine.get_module_questions(module_id)
     
     manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <manifest identifier="Course_{video_path.stem}" version="1.0" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
   <organizations default="org1">
     <organization identifier="org1">
-      <title>{video_path.stem.replace('_', ' ').title()}</title>
+      <title>{c_title} • Interactive Lecture & Assessment</title>
       <item identifier="item1" identifierref="resource1">
-        <title>Module Video Lesson</title>
+        <title>Module Video Lecture & Knowledge Check ({len(questions)} Questions)</title>
       </item>
     </organization>
   </organizations>
@@ -1072,17 +1145,12 @@ async def export_scorm_package(filename: str):
   </resources>
 </manifest>
 """
-    player_html = f"""<!DOCTYPE html>
-<html>
-<head>
-  <title>{video_path.stem}</title>
-  <style>body {{ margin:0; background:#0f172a; display:flex; justify-content:center; align-items:center; height:100vh; }} video {{ max-width:90%; border-radius:12px; }}</style>
-</head>
-<body>
-  <video src="{filename}" controls autoplay></video>
-</body>
-</html>
-"""
+    player_html = quiz_engine.generate_interactive_scorm_html(
+        video_filename=filename,
+        module_id=module_id,
+        pass_percentage=70
+    )
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("imsmanifest.xml", manifest_xml)
         zf.writestr("index.html", player_html)
@@ -1092,8 +1160,25 @@ async def export_scorm_package(filename: str):
         "status": "ok",
         "package_name": package_name,
         "download_url": f"/static_exports/{package_name}",
-        "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2)
+        "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
+        "module_id": module_id,
+        "questions_count": len(questions)
     }
+
+@app.get("/api/v1/scorm/packages")
+async def list_scorm_packages():
+    """Lists all available SCORM zip packages in the exports directory."""
+    packages = []
+    if EXPORTS_DIR.exists():
+        for f in EXPORTS_DIR.glob("*.zip"):
+            packages.append({
+                "filename": f.name,
+                "download_url": f"/static_exports/{f.name}",
+                "size_mb": round(f.stat().st_size / (1024 ** 2), 2),
+                "created_at": f.stat().st_mtime
+            })
+    packages.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"packages": packages}
 
 class IdentitySaveRequest(BaseModel):
     name: str
@@ -1823,6 +1908,9 @@ async def serve_dashboard():
                     <p class="text-xs text-slate-400">Rendered production MP4 videos, synchronized voiceovers, and 1-click SCORM 1.2 packages</p>
                 </div>
                 <div class="flex items-center gap-2">
+                    <button onclick="openQuizModal()" class="text-xs px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 transition-all flex items-center gap-1.5 shadow-sm">
+                        <span>📝</span> <span>Item Bank & Quizzes (224 Qs)</span>
+                    </button>
                     <button id="filter-session-btn" onclick="toggleSessionFilter()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-all flex items-center gap-1">
                         <span>🔘</span> <span id="filter-session-label">Current Session Only</span>
                     </button>
@@ -1840,6 +1928,41 @@ async def serve_dashboard():
         </section>
 
     </main>
+
+    <!-- Interactive Quiz & Item Bank Modal -->
+    <div id="quiz-modal" class="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md hidden flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl w-full max-w-5xl max-h-[92vh] flex flex-col border border-emerald-500/30 shadow-2xl shadow-emerald-500/10">
+            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <span class="text-lg">📝</span>
+                    <div>
+                        <h3 class="text-sm font-bold text-white uppercase tracking-wider">Assessment & Item Bank Matrix</h3>
+                        <span class="text-[10px] text-emerald-400">Nipuna AI Agents in FinTech 15-Hour Course &bull; 224 Questions</span>
+                    </div>
+                </div>
+                <button onclick="closeQuizModal()" class="text-slate-400 hover:text-white text-lg font-bold px-2 py-1">&times;</button>
+            </div>
+
+            <div class="p-4 border-b border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div class="flex items-center space-x-2 w-full sm:w-auto">
+                    <label class="text-xs font-semibold text-slate-300 whitespace-nowrap">Select Module:</label>
+                    <select id="quiz-module-select" onchange="loadModuleQuestions(this.value)" class="rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-brand-glow font-bold focus:outline-none focus:border-brand-500">
+                    </select>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <span id="quiz-stats-badge" class="text-xs font-mono px-3 py-1 rounded bg-slate-900 text-slate-300 border border-slate-700">32 Questions</span>
+                </div>
+            </div>
+
+            <div id="quiz-questions-list" class="p-6 overflow-y-auto space-y-4 flex-1">
+            </div>
+
+            <div class="p-4 border-t border-slate-800 flex items-center justify-between bg-slate-950/60">
+                <span class="text-xs text-slate-400">💡 Bundles automatically into your SCORM 1.2 package for LMS gradebook tracking.</span>
+                <button onclick="closeQuizModal()" class="text-xs px-5 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700">Close</button>
+            </div>
+        </div>
+    </div>
 
     <!-- Storyboard Editor Modal -->
     <div id="storyboard-modal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md hidden flex items-center justify-center p-4">
@@ -2106,9 +2229,81 @@ async def serve_dashboard():
             }
         }
 
-        async function exportScormPackage(filename) {
+        let ACTIVE_QUIZ_MODULES = [];
+
+        async function openQuizModal() {
+            document.getElementById('quiz-modal').classList.remove('hidden');
+            await fetchQuizModules();
+        }
+
+        function closeQuizModal() {
+            document.getElementById('quiz-modal').classList.add('hidden');
+        }
+
+        async function fetchQuizModules() {
             try {
-                const res = await fetch(`/api/v1/scorm/export/${filename}`, { method: 'POST' });
+                const res = await fetch('/api/v1/quiz/modules');
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    ACTIVE_QUIZ_MODULES = data.modules;
+                    const select = document.getElementById('quiz-module-select');
+                    select.innerHTML = data.modules.map(m => `
+                        <option value="${m.module_id}">${m.title} (${m.total_questions} Qs)</option>
+                    `).join('');
+                    if (data.modules.length > 0) {
+                        loadModuleQuestions(data.modules[0].module_id);
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to fetch quiz modules", e);
+            }
+        }
+
+        async function loadModuleQuestions(moduleId) {
+            const list = document.getElementById('quiz-questions-list');
+            list.innerHTML = '<div class="text-xs text-slate-400 p-4 text-center">Loading questions...</div>';
+            try {
+                const res = await fetch(`/api/v1/quiz/module/${moduleId}`);
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const mod = ACTIVE_QUIZ_MODULES.find(m => m.module_id == moduleId);
+                    document.getElementById('quiz-stats-badge').innerText = `${data.questions.length} Questions (${mod ? mod.knowledge_count : 20} Knowledge, ${mod ? mod.scenario_count : 8} Scenario)`;
+                    renderQuizQuestions(data.questions);
+                }
+            } catch (e) {
+                list.innerHTML = '<div class="text-xs text-red-400 p-4 text-center">Failed to load questions.</div>';
+            }
+        }
+
+        function renderQuizQuestions(questions) {
+            const list = document.getElementById('quiz-questions-list');
+            list.innerHTML = questions.map((q, idx) => `
+                <div class="glass-panel p-4 rounded-xl space-y-2.5 border border-slate-800">
+                    <div class="flex items-center justify-between border-b border-slate-800/80 pb-1.5">
+                        <span class="text-xs font-bold text-brand-glow font-mono">${q.id} &bull; ${q.question_type} Check</span>
+                        <span class="text-[10px] text-slate-400 font-mono">${q.source_topic || ''}</span>
+                    </div>
+                    <p class="text-xs font-semibold text-slate-100">${idx + 1}. ${q.question}</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-xs">
+                        ${q.options.map(opt => `
+                            <div class="p-2 rounded bg-slate-900/90 border ${opt.key === q.correct_key ? 'border-emerald-500/60 bg-emerald-950/20 text-emerald-300' : 'border-slate-800 text-slate-300'}">
+                                <strong class="font-mono ${opt.key === q.correct_key ? 'text-emerald-400' : 'text-slate-400'}">${opt.key}.</strong> ${opt.text}
+                            </div>
+                        `).join('')}
+                    </div>
+                    ${q.rationale ? `
+                        <div class="p-2.5 rounded bg-slate-950 border border-slate-800 text-[11px] text-slate-400 leading-relaxed">
+                            <span class="text-brand-glow font-bold">💡 Rationale:</span> ${q.rationale}
+                        </div>
+                    ` : ''}
+                </div>
+            `).join('');
+        }
+
+        async function exportScormPackage(filename) {
+            const modId = prompt("Enter Module ID to bundle (1 to 7):", "1") || "1";
+            try {
+                const res = await fetch(`/api/v1/scorm/export/${encodeURIComponent(filename)}?module_id=${modId}`, { method: 'POST' });
                 const data = await res.json();
                 if (data.status === 'ok') {
                     const link = document.createElement('a');
@@ -2117,11 +2312,11 @@ async def serve_dashboard():
                     document.body.appendChild(link);
                     link.click();
                     document.body.removeChild(link);
-                    alert(`📦 SCORM 1.2 Package (${data.size_mb} MB) generated and downloading for LMS import!`);
+                    alert(`📦 SCORM 1.2 Package (${data.size_mb} MB) bundled with Module ${modId} Quiz (${data.questions_count} questions) and ready for LMS!`);
                 } else {
                     alert("SCORM export failed: " + data.detail);
                 }
-            } catch(e) {
+            } catch (e) {
                 alert("SCORM Export error: " + e);
             }
         }
