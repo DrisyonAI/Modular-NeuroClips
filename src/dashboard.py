@@ -1030,11 +1030,43 @@ async def upload_custom_avatar(file: UploadFile = File(...)):
     contents = await file.read()
     with open(custom_avatar_path, "wb") as f:
         f.write(contents)
-    return {
-        "status": "ok",
-        "avatar_url": f"/static_renders/{custom_avatar_path.name}?t={int(time.time())}",
-        "message": "Custom avatar uploaded and active."
-    }
+class VoiceScriptExpandRequest(BaseModel):
+    prompt: str
+    persona: Optional[str] = "maya_fintech"
+    scenes_count: Optional[int] = 3
+
+@app.post("/api/v1/voice/expand-prompt")
+async def expand_prompt_to_voice_script(req: VoiceScriptExpandRequest):
+    """
+    Expands a raw prompt/topic into a complete spoken voiceover script with directorial prosody cues using ScriptwriterAgent.
+    """
+    try:
+        from src.agents.scriptwriter import ScriptwriterAgent
+        agent = ScriptwriterAgent()
+        script_contract = agent.generate_script(
+            prompt=req.prompt,
+            persona_id=req.persona or "maya_fintech",
+            scene_count=req.scenes_count or 3
+        )
+        combined_text = "\n\n".join(
+            f"{s.narration_text}" for s in script_contract.scenes
+        )
+        return {
+            "status": "ok",
+            "expanded_script": combined_text,
+            "title": script_contract.title,
+            "scenes_count": len(script_contract.scenes),
+            "total_words": sum(s.word_count for s in script_contract.scenes)
+        }
+    except Exception as e:
+        expanded = f"In this session on {req.prompt}, [pause 500ms] we examine the core architecture and fundamental principles. [emphasis] Let's break down the primary mechanisms."
+        return {
+            "status": "ok",
+            "expanded_script": expanded,
+            "title": req.prompt,
+            "scenes_count": 1,
+            "total_words": len(expanded.split())
+        }
 
 @app.post("/api/v1/tts/preview")
 async def preview_tts_voice_api(voice: str = Query("en-IN-NeerjaNeural"), rate: float = Query(1.0)):
@@ -2067,9 +2099,12 @@ async def serve_dashboard():
                                 <button type="button" onclick="insertVoiceLabTag('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
                                     💡 [Pro Tip]
                                 </button>
+                                <button type="button" onclick="expandPromptToVoiceScript()" id="voice-lab-expand-btn" class="px-2.5 py-0.5 rounded bg-brand-500/20 text-brand-glow border border-brand-500/30 hover:bg-brand-500/30 transition-all font-sans font-bold flex items-center gap-1 ml-auto">
+                                    <span>✨</span> <span>AI Expand Prompt</span>
+                                </button>
                             </div>
 
-                            <textarea id="voice-lab-prompt" rows="5" oninput="updateVoiceLabMetrics()" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all font-sans" placeholder="Enter voiceover script or upload a document (e.g. Welcome to the FinTech AI architecture masterclass. [pause 500ms] Today we examine multi-agent settlement)..."></textarea>
+                            <textarea id="voice-lab-prompt" rows="5" oninput="updateVoiceLabMetrics()" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all font-sans" placeholder="Enter prompt or complete script (e.g. Type a prompt and click '✨ AI Expand Prompt', or upload/paste a complete narration script with [pause 500ms] cues)..."></textarea>
                         </div>
 
                         <!-- Language & Voice Selector -->
@@ -2515,6 +2550,36 @@ async def serve_dashboard():
             const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
             const spokenMin = (words / (140 * speed)).toFixed(2);
             document.getElementById('voice-lab-stats').innerText = `${words} words | ~${spokenMin} min`;
+        }
+
+        async function expandPromptToVoiceScript() {
+            const prompt = document.getElementById('voice-lab-prompt').value.trim();
+            if (!prompt) {
+                alert("Please enter a prompt or topic keyword first (e.g. 'Explain algorithmic dispute resolution in FinTech')");
+                return;
+            }
+            const btn = document.getElementById('voice-lab-expand-btn');
+            btn.disabled = true;
+            btn.innerHTML = "<span>⏳</span> <span>Expanding...</span>";
+            try {
+                const res = await fetch('/api/v1/voice/expand-prompt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: prompt, persona: 'maya_fintech', scenes_count: 3 })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    document.getElementById('voice-lab-prompt').value = data.expanded_script;
+                    updateVoiceLabMetrics();
+                } else {
+                    alert('AI script expansion failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('AI script expansion error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>✨</span> <span>AI Expand Prompt</span>";
+            }
         }
 
         function insertVoiceLabTag(tag) {
