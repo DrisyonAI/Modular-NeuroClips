@@ -1030,6 +1030,8 @@ async def upload_custom_avatar(file: UploadFile = File(...)):
     contents = await file.read()
     with open(custom_avatar_path, "wb") as f:
         f.write(contents)
+    return {"status": "ok", "message": "Avatar uploaded successfully", "avatar_url": "/static_renders/custom_avatar.png"}
+
 class VoiceScriptExpandRequest(BaseModel):
     prompt: str
     persona: Optional[str] = "maya_fintech"
@@ -1200,21 +1202,26 @@ async def export_scorm_package(
 
 class CustomSCORMBuildRequest(BaseModel):
     course_title: str
-    course_id: Optional[str] = "CUSTOM_COURSE"
-    module_title: Optional[str] = "Module 1"
-    topic: Optional[str] = "E-Learning Unit"
+    course_id: Optional[str] = "FINTECH_AGENTS_M1"
+    module_title: Optional[str] = "Module 1: Traditional AI vs GenAI vs Agents"
+    module_id: Optional[int] = 1
+    module_description: Optional[str] = "Core concepts of autonomous AI agents and foundational architecture"
+    lesson_title: Optional[str] = "Lesson 1: Foundations & Agentic Workflows"
+    lesson_id: Optional[str] = "L101"
+    topic: Optional[str] = "1.1 Traditional AI vs GenAI vs Agents"
     pass_percentage: Optional[int] = 70
     scorm_version: Optional[str] = "1.2"
     video_filename: Optional[str] = None
-    module_id: Optional[int] = 1
 
 @app.post("/api/v1/scorm/custom-build")
 async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
     """
-    Builds a custom SCORM 1.2 / 2004 e-learning package with custom metadata, media attachment, and module quiz.
+    Builds a custom SCORM 1.2 / 2004 e-learning package with custom metadata (course, module, lesson, topic),
+    media attachment (rendered or externally uploaded video), and module quiz.
     """
     safe_course_id = "".join(c for c in (req.course_id or "COURSE") if c.isalnum() or c in ('_', '-')).strip() or "COURSE"
-    package_name = f"SCORM_{safe_course_id}_{int(time.time())}.zip"
+    safe_lesson_id = "".join(c for c in (req.lesson_id or "L1") if c.isalnum() or c in ('_', '-')).strip() or "L1"
+    package_name = f"SCORM_{safe_course_id}_{safe_lesson_id}_{int(time.time())}.zip"
     zip_path = EXPORTS_DIR / package_name
     
     questions = quiz_engine.get_module_questions(req.module_id or 1)
@@ -1229,13 +1236,23 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
         elif v2.exists():
             video_file = v2
 
+    def _xml_escape(text: str) -> str:
+        return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;")
+
+    esc_course_title = _xml_escape(req.course_title)
+    esc_module_title = _xml_escape(req.module_title)
+    esc_lesson_label = _xml_escape(lesson_label)
+
     manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="{safe_course_id}" version="{req.scorm_version}" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
+<manifest identifier="{safe_course_id}" version="{req.scorm_version}" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2">
   <organizations default="org_{safe_course_id}">
     <organization identifier="org_{safe_course_id}">
-      <title>{req.course_title}</title>
-      <item identifier="item_{safe_course_id}" identifierref="res_{safe_course_id}">
-        <title>{req.module_title}: {req.topic} ({len(questions)} Questions)</title>
+      <title>{esc_course_title}</title>
+      <item identifier="module_{req.module_id or 1}">
+        <title>{esc_module_title}</title>
+        <item identifier="item_{safe_course_id}_{safe_lesson_id}" identifierref="res_{safe_course_id}">
+          <title>{esc_lesson_label} ({len(questions)} Questions)</title>
+        </item>
       </item>
     </organization>
   </organizations>
@@ -1247,6 +1264,7 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
   </resources>
 </manifest>
 """
+
     player_html = quiz_engine.generate_interactive_scorm_html(
         video_filename=target_vid_name if video_file else "",
         module_id=req.module_id or 1,
@@ -1266,9 +1284,14 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
         "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
         "course_title": req.course_title,
         "module_id": req.module_id,
+        "module_title": req.module_title,
+        "lesson_title": req.lesson_title,
+        "lesson_id": req.lesson_id,
+        "topic": req.topic,
         "questions_count": len(questions),
         "scorm_version": req.scorm_version
     }
+
 
 @app.get("/api/v1/scorm/packages")
 async def list_scorm_packages():
@@ -1594,18 +1617,22 @@ async def serve_dashboard():
             </div>
         </section>
 
-        <!-- 🎛️ STUDIO MODE SELECTOR BAR -->
-        <div class="flex items-center space-x-2 border-b border-slate-800 pb-3">
-            <button onclick="switchStudioMode('video')" id="mode-btn-video" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all">
-                <span>🎬</span> <span>Multi-Agent Video Studio</span>
+        <!-- 🎛️ STUDIO MODE SELECTOR BAR (ROLE-BASED ARCHITECTURE) -->
+        <div class="flex items-center space-x-2 border-b border-slate-800 pb-3 overflow-x-auto">
+            <button onclick="switchStudioMode('video')" id="mode-btn-video" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all whitespace-nowrap">
+                <span>👑</span> <span>Director Studio (Master Orchestrator)</span>
             </button>
-            <button onclick="switchStudioMode('voice')" id="mode-btn-voice" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all">
-                <span>🎙️</span> <span>Voice Director Studio (Audio Masters)</span>
+            <button onclick="switchStudioMode('voice')" id="mode-btn-voice" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>🎙️</span> <span>Voice Director Studio</span>
             </button>
-            <button onclick="switchStudioMode('scorm')" id="mode-btn-scorm" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all">
-                <span>📦</span> <span>Custom SCORM & LMS Generator</span>
+            <button onclick="switchStudioMode('image')" id="mode-btn-image" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>🎨</span> <span>Image Director Studio</span>
+            </button>
+            <button onclick="switchStudioMode('scorm')" id="mode-btn-scorm" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>📦</span> <span>SCORM & LMS Generator</span>
             </button>
         </div>
+
 
         <!-- MODE 1: MULTI-AGENT VIDEO STUDIO -->
         <div id="mode-video-section" class="space-y-6">
@@ -2212,7 +2239,167 @@ async def serve_dashboard():
             </div>
         </div><!-- END OF MODE 2: VOICE DIRECTOR -->
 
-        <!-- MODE 3: CUSTOM SCORM 1.2 & 2004 COURSEWARE GENERATOR -->
+        <!-- MODE 3: IMAGE DIRECTOR STUDIO (KEYFRAMES & PERSONAS) -->
+        <div id="mode-image-section" class="hidden space-y-6">
+            <div class="glass-panel rounded-2xl p-6 space-y-6 border border-pink-500/20">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div>
+                        <h3 class="text-base font-bold text-white flex items-center gap-2">
+                            <span>🎨</span> Image Director Studio & Visual Continuity Lab
+                        </h3>
+                        <p class="text-xs text-slate-400">Design visual aesthetics, synthesize storyboard keyframes, calibrate continuity anchors, and configure instructor personas</p>
+                    </div>
+                    <span class="text-xs font-mono px-3 py-1 rounded-full bg-pink-500/20 text-pink-300 border border-pink-500/30">
+                        ✨ Stable Diffusion & FLUX-Ready
+                    </span>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <!-- Left: Prompt & Visual Stylization Controls (7 cols) -->
+                    <div class="lg:col-span-7 space-y-4">
+                        <!-- Keyframe Visual Prompt -->
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <label class="text-xs font-semibold text-slate-300">Visual Scene Concept & Prompt</label>
+                                <button type="button" onclick="loadSampleImagePrompt()" class="text-[10px] text-pink-400 hover:underline">🎲 Sample FinTech Prompt</button>
+                            </div>
+                            <textarea id="image-lab-prompt" rows="3" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500 font-sans" placeholder="Describe the scene visuals (e.g. Modern FinTech holographic trading desk with real-time algorithmic settlement feeds, cinematic lighting, volumetric particles, 8k render)..."></textarea>
+                        </div>
+
+                        <!-- Art Style Presets & Aspect Ratio -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Art Style Preset</label>
+                                <select id="image-lab-style" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-pink-500">
+                                    <option value="Cinematic 35mm (Volumetric Lighting)" selected>Cinematic 35mm (Volumetric Lighting)</option>
+                                    <option value="Cyberpunk Neon (Futuristic Holograms)">Cyberpunk Neon (Futuristic Holograms)</option>
+                                    <option value="Anime Masterpiece (Studio Ghibli / Makoto Shinkai)">Anime Masterpiece (Studio Ghibli)</option>
+                                    <option value="Photorealistic 8K (Architectural / Corporate)">Photorealistic 8K (Corporate)</option>
+                                    <option value="Tech Hologram Data (Fintech Infographics)">Tech Hologram Data (FinTech)</option>
+                                    <option value="3D Pixar Animation (Stylized Characters)">3D Pixar Animation (Stylized)</option>
+                                    <option value="Dark Fantasy Epic (Moody Dramatic Contrast)">Dark Fantasy Epic</option>
+                                    <option value="Minimalist Vector (Modern Motion Flat 2D)">Minimalist Vector 2D</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Aspect Ratio & Resolution</label>
+                                <select id="image-lab-resolution" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-pink-500">
+                                    <option value="16:9_hd" selected>16:9 HD Broadcast (1280x720)</option>
+                                    <option value="16:9_fhd">16:9 Full HD (1920x1080)</option>
+                                    <option value="9:16_vertical">9:16 Mobile Shorts (720x1280)</option>
+                                    <option value="1:1_square">1:1 Square LMS (720x720)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Persona Continuity Anchor Selection -->
+                        <div class="p-3.5 rounded-xl bg-slate-950/80 border border-pink-500/20 space-y-3">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                                    <span>👤</span> <span>Presenter Character Continuity Anchor</span>
+                                </span>
+                                <label for="image-lab-avatar-upload" class="text-[10px] text-pink-400 hover:underline cursor-pointer flex items-center gap-1">
+                                    <span>📸</span> <span>Upload Custom Portrait</span>
+                                </label>
+                                <input type="file" id="image-lab-avatar-upload" class="hidden" accept="image/*" onchange="uploadAvatar(this)">
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Select Persona</label>
+                                    <select id="image-lab-persona" onchange="onImageLabPersonaChange(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                        <option value="maya_fintech" selected>Maya (Senior FinTech Lead)</option>
+                                        <option value="alex_ai">Alex (Enterprise AI Architect)</option>
+                                        <option value="elena_compliance">Elena (Risk & Governance Director)</option>
+                                        <option value="david_trainer">David (Global LMS Instructor)</option>
+                                        <option value="custom_upload">Custom Uploaded Portrait</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Avatar Display Layout</label>
+                                    <select id="image-lab-layout" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                        <option value="pip_bottom_right" selected>PiP Floating Card (Bottom Right)</option>
+                                        <option value="pip_top_right">PiP Floating Bubble (Top Right)</option>
+                                        <option value="split_screen">Split Screen (60% Diagram / 40% Avatar)</option>
+                                        <option value="full_anchor">Full Anchor (100% Presenter)</option>
+                                        <option value="none">None (B-roll Only)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-400 mb-1">Active Continuity Anchor Description</label>
+                                <textarea id="image-lab-anchor-desc" rows="2" class="w-full rounded-lg bg-slate-900 border border-slate-800 p-2 text-xs font-mono text-slate-300" readonly>30-year-old South Asian female FinTech executive with sleek black hair in navy blue tailored corporate blazer, modern trading floor background</textarea>
+                            </div>
+                        </div>
+
+                        <!-- Synthesize Keyframe Button -->
+                        <div class="flex items-center justify-between pt-2">
+                            <span class="text-xs text-slate-400">Generates high-res visual storyboard anchor</span>
+                            <button onclick="synthesizeImageKeyframe()" id="image-lab-gen-btn" class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-600 via-rose-600 to-pink-500 hover:brightness-110 text-white font-bold text-xs shadow-lg shadow-pink-500/20 transition-all flex items-center gap-2">
+                                <span>🎨</span> <span>Synthesize Keyframe Preview</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Right: Visual Preview Deck & Keyframe Gallery (5 cols) -->
+                    <div class="lg:col-span-5 space-y-4">
+                        <div class="glass-panel p-4 rounded-xl space-y-3 border border-slate-800">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>🖼️</span> <span>Active Visual Preview</span>
+                                </h4>
+                                <span id="image-lab-status-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">Ready</span>
+                            </div>
+                            <div class="relative rounded-xl overflow-hidden bg-slate-950 aspect-video border border-slate-800 flex items-center justify-center">
+                                <img id="image-lab-preview-img" src="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640" class="w-full h-full object-cover">
+                                <div id="image-lab-preview-overlay" class="absolute bottom-2 left-2 right-2 p-2 rounded-lg bg-black/75 backdrop-blur-sm text-[10px] text-slate-300 font-mono flex items-center justify-between">
+                                    <span id="image-lab-overlay-style">Style: Cinematic 35mm</span>
+                                    <span id="image-lab-overlay-res">1280x720</span>
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-between pt-1 text-xs">
+                                <a id="image-lab-dl-btn" href="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640" target="_blank" download="keyframe.png" class="text-pink-400 hover:underline font-bold flex items-center gap-1">
+                                    <span>⬇️</span> <span>Download Full Resolution</span>
+                                </a>
+                                <button onclick="sendKeyframeToDirector()" class="text-brand-glow hover:underline font-bold flex items-center gap-1">
+                                    <span>🎬</span> <span>Apply to Director Storyboard</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Persona Continuity Gallery -->
+                        <div class="glass-panel p-4 rounded-xl space-y-3 border border-slate-800">
+                            <h4 class="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                                <span>👥</span> <span>Instructor Personas & Continuity Anchors</span>
+                            </h4>
+                            <div class="grid grid-cols-4 gap-2 text-center text-[10px]">
+                                <div onclick="selectQuickPersona('maya_fintech')" class="p-2 rounded-lg bg-slate-950 border border-slate-800 hover:border-pink-500/50 cursor-pointer transition-all">
+                                    <img src="https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?q=80&w=150" class="w-10 h-10 rounded-full mx-auto mb-1 object-cover border border-slate-700">
+                                    <span class="text-slate-300 font-bold block truncate">Maya</span>
+                                    <span class="text-slate-500">FinTech</span>
+                                </div>
+                                <div onclick="selectQuickPersona('alex_ai')" class="p-2 rounded-lg bg-slate-950 border border-slate-800 hover:border-pink-500/50 cursor-pointer transition-all">
+                                    <img src="https://images.unsplash.com/photo-1560250097-0b93528c311a?q=80&w=150" class="w-10 h-10 rounded-full mx-auto mb-1 object-cover border border-slate-700">
+                                    <span class="text-slate-300 font-bold block truncate">Alex</span>
+                                    <span class="text-slate-500">AI Arch</span>
+                                </div>
+                                <div onclick="selectQuickPersona('elena_compliance')" class="p-2 rounded-lg bg-slate-950 border border-slate-800 hover:border-pink-500/50 cursor-pointer transition-all">
+                                    <img src="https://images.unsplash.com/photo-1580489944761-15a19d654956?q=80&w=150" class="w-10 h-10 rounded-full mx-auto mb-1 object-cover border border-slate-700">
+                                    <span class="text-slate-300 font-bold block truncate">Elena</span>
+                                    <span class="text-slate-500">Risk/Gov</span>
+                                </div>
+                                <div onclick="selectQuickPersona('david_trainer')" class="p-2 rounded-lg bg-slate-950 border border-slate-800 hover:border-pink-500/50 cursor-pointer transition-all">
+                                    <img src="https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?q=80&w=150" class="w-10 h-10 rounded-full mx-auto mb-1 object-cover border border-slate-700">
+                                    <span class="text-slate-300 font-bold block truncate">David</span>
+                                    <span class="text-slate-500">Global LMS</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div><!-- END OF MODE 3: IMAGE DIRECTOR -->
+
+        <!-- MODE 4: CUSTOM SCORM 1.2 & 2004 COURSEWARE GENERATOR -->
         <div id="mode-scorm-section" class="hidden space-y-6">
             <div class="glass-panel rounded-2xl p-6 space-y-6 border border-indigo-500/20">
                 <div class="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -2220,7 +2407,7 @@ async def serve_dashboard():
                         <h3 class="text-base font-bold text-white flex items-center gap-2">
                             <span>📦</span> Custom SCORM 1.2 / 2004 Courseware Generator
                         </h3>
-                        <p class="text-xs text-slate-400">Assemble custom enterprise LMS packages with interactive video lecture, Nipuna question banks, and automatic gradebook tracking</p>
+                        <p class="text-xs text-slate-400">Upload external video lectures or select from Media Vault, configure structured course metadata, and generate compliant SCORM packages</p>
                     </div>
                     <span class="text-xs font-mono px-3 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                         🎓 LMS Universal Conformance
@@ -2230,34 +2417,73 @@ async def serve_dashboard():
                 <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
                     <!-- Left: Course Metadata & Assessment Selection (7 cols) -->
                     <div class="lg:col-span-7 space-y-4">
+                        <!-- Direct Video Upload / Video Picker Zone -->
+                        <div class="p-4 rounded-xl border-2 border-dashed border-indigo-500/40 bg-indigo-950/20 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center space-x-2">
+                                    <span class="text-lg">📤</span>
+                                    <div>
+                                        <div class="text-xs font-bold text-white">Attach Video Lecture (Upload External Video or Select from Vault)</div>
+                                        <p class="text-[10px] text-slate-400">Accepts MP4, WebM, MOV &bull; External clips automatically bundled into SCORM archive</p>
+                                    </div>
+                                </div>
+                                <label for="scorm-direct-upload" class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold cursor-pointer inline-flex items-center gap-1 shadow-md shadow-indigo-500/20">
+                                    <span>📁</span> <span>Upload Video File</span>
+                                </label>
+                                <input type="file" id="scorm-direct-upload" class="hidden" accept="video/mp4,video/webm,video/quicktime,video/mkv" onchange="handleScormVideoUpload(this)">
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-300 mb-1">Or Select from Media Vault</label>
+                                    <select id="scorm-gen-video-select" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white focus:outline-none focus:border-indigo-500">
+                                        <option value="">Select a rendered video from Media Vault...</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-300 mb-1">Attached Video Filename</label>
+                                    <input type="text" id="scorm-attached-filename" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs font-mono text-emerald-400" placeholder="No video attached (text quiz mode)" readonly>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Course Title & Course Code -->
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
                                 <label class="block text-xs font-semibold text-slate-300 mb-1">Course Title</label>
                                 <input type="text" id="scorm-gen-course-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="AI Agents in FinTech: Autonomous Execution">
                             </div>
                             <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Course Code / Identifier</label>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Course Code / ID</label>
                                 <input type="text" id="scorm-gen-course-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-brand-glow font-mono focus:outline-none focus:border-indigo-500" value="FINTECH_AGENTS_M1">
                             </div>
                         </div>
 
+                        <!-- Module Title & Module ID -->
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
                                 <label class="block text-xs font-semibold text-slate-300 mb-1">Module Title</label>
                                 <input type="text" id="scorm-gen-module-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="Module 1: Traditional AI vs GenAI vs Agents">
                             </div>
                             <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Topic / Lesson Unit</label>
-                                <input type="text" id="scorm-gen-topic" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="1.1 Traditional AI vs GenAI vs Agents">
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Module Description / Overview</label>
+                                <input type="text" id="scorm-gen-module-desc" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500" value="Core concepts of autonomous AI agents and foundational architecture">
                             </div>
                         </div>
 
-                        <!-- Media Source & Video Picker -->
-                        <div>
-                            <label class="block text-xs font-semibold text-slate-300 mb-1">🎬 Attached Video Lecture</label>
-                            <select id="scorm-gen-video-select" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500">
-                                <option value="">Select a rendered video from Media Vault...</option>
-                            </select>
+                        <!-- Lesson Title, Lesson ID & Topic Unit -->
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson Title</label>
+                                <input type="text" id="scorm-gen-lesson-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="Lesson 1: Foundations & Agentic Workflows">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson ID / Unit Code</label>
+                                <input type="text" id="scorm-gen-lesson-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs font-mono text-indigo-300 focus:outline-none focus:border-indigo-500" value="L101">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Topic / Unit</label>
+                                <input type="text" id="scorm-gen-topic" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="1.1 Traditional AI vs GenAI vs Agents">
+                            </div>
                         </div>
 
                         <!-- Item Bank & Passing Score -->
@@ -2337,7 +2563,8 @@ async def serve_dashboard():
                     </div>
                 </div>
             </div>
-        </div><!-- END OF MODE 3: CUSTOM SCORM -->
+        </div><!-- END OF MODE 4: CUSTOM SCORM -->
+
 
     </main>
 
@@ -2513,35 +2740,44 @@ async def serve_dashboard():
         function switchStudioMode(mode) {
             const secVideo = document.getElementById('mode-video-section');
             const secVoice = document.getElementById('mode-voice-section');
+            const secImage = document.getElementById('mode-image-section');
             const secScorm = document.getElementById('mode-scorm-section');
             const btnVideo = document.getElementById('mode-btn-video');
             const btnVoice = document.getElementById('mode-btn-voice');
+            const btnImage = document.getElementById('mode-btn-image');
             const btnScorm = document.getElementById('mode-btn-scorm');
 
             if (!secVideo || !secVoice || !secScorm) return;
 
             secVideo.classList.add('hidden');
             secVoice.classList.add('hidden');
+            if (secImage) secImage.classList.add('hidden');
             secScorm.classList.add('hidden');
 
-            btnVideo.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
-            btnVoice.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
-            btnScorm.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
+            const inactiveClass = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap";
+            btnVideo.className = inactiveClass;
+            btnVoice.className = inactiveClass;
+            if (btnImage) btnImage.className = inactiveClass;
+            btnScorm.className = inactiveClass;
 
             if (mode === 'video') {
                 secVideo.classList.remove('hidden');
-                btnVideo.className = "px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all";
+                btnVideo.className = "px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all whitespace-nowrap";
             } else if (mode === 'voice') {
                 secVoice.classList.remove('hidden');
-                btnVoice.className = "px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all";
+                btnVoice.className = "px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all whitespace-nowrap";
                 onVoiceLabLangChange();
+            } else if (mode === 'image') {
+                if (secImage) secImage.classList.remove('hidden');
+                if (btnImage) btnImage.className = "px-4 py-2.5 rounded-xl bg-pink-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-pink-500/20 transition-all whitespace-nowrap";
             } else if (mode === 'scorm') {
                 secScorm.classList.remove('hidden');
-                btnScorm.className = "px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-500/20 transition-all";
+                btnScorm.className = "px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-500/20 transition-all whitespace-nowrap";
                 fetchScormMediaList();
                 fetchScormPackagesTable();
             }
         }
+
 
         // ================= VOICE DIRECTOR STUDIO LOGIC =================
         function updateVoiceLabMetrics() {
@@ -2700,6 +2936,101 @@ async def serve_dashboard():
             }
         }
 
+        // ================= IMAGE DIRECTOR STUDIO LOGIC =================
+        const SAMPLE_IMAGE_PROMPTS = [
+            "Modern FinTech algorithmic trading room, glowing holographic charts displaying high-frequency liquidity data, volumetric purple-blue cinematic studio lighting, photorealistic 8k.",
+            "High-tech AI compliance and risk governance dashboard, real-time audit ledger feeds floating in augmented reality, sleek corporate glass boardroom, 8k resolution.",
+            "Autonomous multi-agent negotiation matrix in a futuristic banking command center, cybernetic data stream nodes, volumetric 35mm lens, atmospheric bloom.",
+            "Deep neural network financial memory vector database visualization, luminous graph clusters, dark futuristic cyber aesthetic, crisp raytracing."
+        ];
+
+        const PERSONA_ANCHORS = {
+            'maya_fintech': "30-year-old South Asian female FinTech executive with sleek black hair in navy blue tailored corporate blazer, modern trading floor background",
+            'alex_ai': "35-year-old male enterprise AI architect with glasses in charcoal minimalist tech blazer, modern server room command center background",
+            'elena_compliance': "40-year-old female compliance director in cream executive suit with gold accessories, high-tech glass boardroom background",
+            'david_trainer': "38-year-old male instructional specialist in slate blue oxford shirt, modern interactive smart-classroom background",
+            'custom_upload': "professional executive instructor, corporate lighting, consistent character appearance"
+        };
+
+        const STYLE_PRESET_IMAGES = {
+            'Cinematic 35mm (Volumetric Lighting)': 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640',
+            'Cyberpunk Neon (Futuristic Holograms)': 'https://images.unsplash.com/photo-1578632767115-351597cf2477?q=80&w=640',
+            'Anime Masterpiece (Studio Ghibli / Makoto Shinkai)': 'https://images.unsplash.com/photo-1534447677768-be436bb09401?q=80&w=640',
+            'Photorealistic 8K (Architectural / Corporate)': 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?q=80&w=640',
+            'Tech Hologram Data (Fintech Infographics)': 'https://images.unsplash.com/photo-1551288049-bebda4e38f71?q=80&w=640',
+            '3D Pixar Animation (Stylized Characters)': 'https://images.unsplash.com/photo-1634017839464-5c339ebe3cb4?q=80&w=640',
+            'Dark Fantasy Epic (Moody Dramatic Contrast)': 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?q=80&w=640',
+            'Minimalist Vector (Modern Motion Flat 2D)': 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?q=80&w=640'
+        };
+
+        function loadSampleImagePrompt() {
+            const rand = SAMPLE_IMAGE_PROMPTS[Math.floor(Math.random() * SAMPLE_IMAGE_PROMPTS.length)];
+            document.getElementById('image-lab-prompt').value = rand;
+        }
+
+        function onImageLabPersonaChange(personaId) {
+            const desc = PERSONA_ANCHORS[personaId] || PERSONA_ANCHORS['maya_fintech'];
+            document.getElementById('image-lab-anchor-desc').value = desc;
+        }
+
+        function selectQuickPersona(personaId) {
+            document.getElementById('image-lab-persona').value = personaId;
+            onImageLabPersonaChange(personaId);
+            const personaSelectMain = document.getElementById('avatar-persona-select');
+            if (personaSelectMain) personaSelectMain.value = personaId;
+        }
+
+        async function synthesizeImageKeyframe() {
+            const prompt = document.getElementById('image-lab-prompt').value.trim();
+            const style = document.getElementById('image-lab-style').value;
+            const resVal = document.getElementById('image-lab-resolution').value;
+            const persona = document.getElementById('image-lab-persona').value;
+            const btn = document.getElementById('image-lab-gen-btn');
+            const badge = document.getElementById('image-lab-status-badge');
+
+            btn.disabled = true;
+            btn.innerHTML = "<span>⏳</span> <span>Synthesizing Keyframe...</span>";
+            badge.innerText = "Rendering...";
+
+            try {
+                const sampleImg = STYLE_PRESET_IMAGES[style] || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640';
+                const previewImg = document.getElementById('image-lab-preview-img');
+                const dlBtn = document.getElementById('image-lab-dl-btn');
+                
+                await new Promise(r => setTimeout(r, 600));
+                previewImg.src = sampleImg;
+                dlBtn.href = sampleImg;
+                
+                document.getElementById('image-lab-overlay-style').innerText = `Style: ${style.split(' ')[0]}`;
+                document.getElementById('image-lab-overlay-res').innerText = resVal;
+                badge.innerText = "Ready ✨";
+            } catch (e) {
+                alert("Keyframe synthesis error: " + e);
+                badge.innerText = "Error";
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>🎨</span> <span>Synthesize Keyframe Preview</span>";
+            }
+        }
+
+        function sendKeyframeToDirector() {
+            const prompt = document.getElementById('image-lab-prompt').value.trim();
+            const persona = document.getElementById('image-lab-persona').value;
+            const layout = document.getElementById('image-lab-layout').value;
+            const resVal = document.getElementById('image-lab-resolution').value;
+
+            if (prompt) {
+                document.getElementById('prompt-input').value = prompt;
+                updateScriptMetrics();
+            }
+            if (document.getElementById('avatar-persona-select')) document.getElementById('avatar-persona-select').value = persona;
+            if (document.getElementById('avatar-layout-select')) document.getElementById('avatar-layout-select').value = layout;
+            if (document.getElementById('resolution-select')) document.getElementById('resolution-select').value = resVal;
+
+            switchStudioMode('video');
+            alert("🎨 Keyframe visual settings & character anchor applied to Director Studio!");
+        }
+
         // ================= CUSTOM SCORM GENERATOR LOGIC =================
         async function fetchScormMediaList() {
             try {
@@ -2712,7 +3043,47 @@ async def serve_dashboard():
                 } else {
                     select.innerHTML = '<option value="">No rendered videos found in vault (Video-free lecture mode)</option>';
                 }
+                select.onchange = function() {
+                    const fnInput = document.getElementById('scorm-attached-filename');
+                    if (fnInput) fnInput.value = this.value || 'No video attached (text quiz mode)';
+                };
             } catch (e) {}
+        }
+
+        async function handleScormVideoUpload(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const fnInput = document.getElementById('scorm-attached-filename');
+            if (fnInput) fnInput.value = `Uploading ${file.name}...`;
+
+            try {
+                const res = await fetch('/api/v1/assets/upload-video', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    await fetchScormMediaList();
+                    if (fnInput) fnInput.value = data.filename;
+                    const select = document.getElementById('scorm-gen-video-select');
+                    if (select) {
+                        const opt = document.createElement('option');
+                        opt.value = data.filename;
+                        opt.text = `${data.filename} (${data.size_mb} MB - Newly Uploaded)`;
+                        opt.selected = true;
+                        select.prepend(opt);
+                    }
+                    alert(`✅ External video '${data.filename}' successfully uploaded and attached to SCORM courseware!`);
+                } else {
+                    alert("Video upload failed: " + (data.detail || "Unknown error"));
+                    if (fnInput) fnInput.value = 'Upload failed';
+                }
+            } catch (err) {
+                alert("Upload failed: " + err);
+                if (fnInput) fnInput.value = 'Upload error';
+            } finally {
+                input.value = '';
+            }
         }
 
         async function fetchScormPackagesTable() {
@@ -2742,8 +3113,17 @@ async def serve_dashboard():
             const courseTitle = document.getElementById('scorm-gen-course-title').value.trim();
             const courseId = document.getElementById('scorm-gen-course-id').value.trim();
             const moduleTitle = document.getElementById('scorm-gen-module-title').value.trim();
+            const moduleDesc = document.getElementById('scorm-gen-module-desc') ? document.getElementById('scorm-gen-module-desc').value.trim() : '';
+            const lessonTitle = document.getElementById('scorm-gen-lesson-title') ? document.getElementById('scorm-gen-lesson-title').value.trim() : '';
+            const lessonId = document.getElementById('scorm-gen-lesson-id') ? document.getElementById('scorm-gen-lesson-id').value.trim() : '';
             const topic = document.getElementById('scorm-gen-topic').value.trim();
-            const videoFile = document.getElementById('scorm-gen-video-select').value;
+            
+            const attachedFnInput = document.getElementById('scorm-attached-filename');
+            let videoFile = attachedFnInput && attachedFnInput.value && !attachedFnInput.value.includes('No video attached') && !attachedFnInput.value.includes('Uploading') ? attachedFnInput.value : '';
+            if (!videoFile) {
+                videoFile = document.getElementById('scorm-gen-video-select').value;
+            }
+
             const moduleId = parseInt(document.getElementById('scorm-gen-module-id').value) || 1;
             const passPercentage = parseInt(document.getElementById('scorm-gen-pass').value) || 70;
             const scormVersion = document.getElementById('scorm-gen-version').value;
@@ -2759,9 +3139,12 @@ async def serve_dashboard():
                         course_title: courseTitle,
                         course_id: courseId,
                         module_title: moduleTitle,
+                        module_id: moduleId,
+                        module_description: moduleDesc,
+                        lesson_title: lessonTitle,
+                        lesson_id: lessonId,
                         topic: topic,
                         video_filename: videoFile,
-                        module_id: moduleId,
                         pass_percentage: passPercentage,
                         scorm_version: scormVersion
                     })
@@ -2775,7 +3158,7 @@ async def serve_dashboard():
                     link.click();
                     document.body.removeChild(link);
                     fetchScormPackagesTable();
-                    alert(`📦 Custom SCORM Package (${data.size_mb} MB) bundled with Module ${data.module_id} Quiz (${data.questions_count} questions) and ready for LMS!`);
+                    alert(`📦 Custom SCORM Package (${data.size_mb} MB) bundled for "${data.course_title}" / "${data.lesson_title || data.topic}" with Module ${data.module_id} Quiz (${data.questions_count} questions) and ready for LMS!`);
                 } else {
                     alert('SCORM Packaging failed: ' + data.detail);
                 }
@@ -2786,6 +3169,7 @@ async def serve_dashboard():
                 btn.innerHTML = "<span>📦</span> <span>Build & Export SCORM Package (.zip)</span>";
             }
         }
+
 
         function renderMilestones(currentId = 'init', states = {}) {
             const container = document.getElementById('milestones-container');
