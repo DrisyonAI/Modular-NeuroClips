@@ -40,6 +40,34 @@ def generate_srt_subtitles(scenes: List[Dict[str, Any]], output_srt_path: Path) 
 
     return str(output_srt_path)
 
+def normalize_bumper_clip(video_path: str, output_path: Path, width: int = RENDER_WIDTH, height: int = RENDER_HEIGHT) -> Optional[str]:
+    """Normalizes an intro or outro video bumper to match studio resolution and 30fps."""
+    p = Path(video_path)
+    if not p.exists():
+        from src.config import ASSETS_DIR
+        alt_p = ASSETS_DIR / p.name
+        if alt_p.exists():
+            p = alt_p
+        else:
+            return None
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(p.resolve()),
+            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-an",
+            str(output_path)
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return str(output_path)
+    except Exception as e:
+        print(f"[Bumper Warning] Failed to normalize bumper ({e}).")
+        return str(p.resolve())
+
 def compile_final_video(
     clip_paths: List[str],
     output_filename: str = "final_production_sd.mp4",
@@ -49,12 +77,37 @@ def compile_final_video(
     avatar_layout: str = "pip_bottom_right",
     burn_subtitles: bool = True,
     srt_path: Optional[str] = None,
-    remotion_metadata: Optional[Dict[str, Any]] = None
+    remotion_metadata: Optional[Dict[str, Any]] = None,
+    intro_video_path: Optional[str] = None,
+    outro_video_path: Optional[str] = None
 ) -> str:
     """
-    Unified compiler supporting Remotion React and FFmpeg PiP Multi-Layer Compositing with Subtitle Burning.
+    Unified compiler supporting Remotion React and FFmpeg PiP Multi-Layer Compositing
+    with Subtitle Burning and optional Intro / Outro Video Bumpers.
     """
     final_output_path = OUTPUT_DIR / output_filename
+
+    # Assemble sequence clips with optional intro and outro bumpers
+    final_clips = list(clip_paths)
+    if intro_video_path:
+        intro_norm = normalize_bumper_clip(
+            intro_video_path,
+            OUTPUT_DIR / f"intro_{Path(output_filename).stem}.mp4",
+            width=RENDER_WIDTH,
+            height=RENDER_HEIGHT
+        )
+        if intro_norm:
+            final_clips.insert(0, intro_norm)
+
+    if outro_video_path:
+        outro_norm = normalize_bumper_clip(
+            outro_video_path,
+            OUTPUT_DIR / f"outro_{Path(output_filename).stem}.mp4",
+            width=RENDER_WIDTH,
+            height=RENDER_HEIGHT
+        )
+        if outro_norm:
+            final_clips.append(outro_norm)
 
     # 1. Remotion React Engine
     if engine == "remotion" and is_remotion_available() and remotion_metadata:
@@ -71,9 +124,9 @@ def compile_final_video(
             print(f"[Remotion Warning] Failed ({err}). Falling back to FFmpeg multi-layer.")
 
     # 2. FFmpeg Multi-Layer PiP & Subtitles Concatenation
-    concat_list_path = OUTPUT_DIR / "concat_list.txt"
+    concat_list_path = OUTPUT_DIR / f"concat_{Path(output_filename).stem}.txt"
     with open(concat_list_path, "w") as f:
-        for clip in clip_paths:
+        for clip in final_clips:
             f.write(f"file '{Path(clip).resolve()}'\n")
 
     has_audio = audio_path and Path(audio_path).exists() and Path(audio_path).stat().st_size > 100

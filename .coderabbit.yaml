@@ -1,0 +1,58 @@
+# =====================================================================
+# CodeRabbit Configuration for Modular-NeuroClips Studio
+# =====================================================================
+# Documentation: https://docs.coderabbit.ai/guides/configure-coderabbit
+
+version: "2"
+language: "en-US"
+tone_instructions: "You are a senior software architect and instructional systems engineer reviewing code for Modular-NeuroClips Studio. Focus on correctness, contract validation (Pydantic v2), asynchronous execution safety (async/await, threadpools), FFmpeg and audio duration precision, demographic consistency (PersonaIdentityContract), and SCORM 1.2 / 2004 LMS compliance. Keep feedback concise, actionable, and constructive."
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+      - "master"
+      - "feature/.*"
+      - "release/.*"
+
+  path_filters:
+    - "!render_output/**"
+    - "!curriculum_output/**"
+    - "!exports/**"
+    - "!identities/**"
+    - "!static_assets/**"
+    - "!Others/**"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+    - "!**/*.lock"
+    - "!**/*.zip"
+    - "!**/*.mp4"
+    - "!**/*.mp3"
+    - "!**/*.wav"
+
+  path_instructions:
+    - path: "src/contracts/**"
+      instructions: "Ensure all models inherit from Pydantic BaseModel, include field constraints and default values, and enforce strict type safety across persona, script, voice, and visual schemas."
+
+    - path: "src/agents/**"
+      instructions: "Verify multi-agent decoupling. DirectorAgent must enforce Validation Gates (Gate 1: Script, Gate 2: AV Sync, Gate 3: Persona). VoiceDirectorAgent must accurately probe audio lengths via ffprobe. ScriptwriterAgent must output structured scene objects with prosody cues."
+
+    - path: "src/quiz_engine.py"
+      instructions: "Verify zero-dependency fallback (JSON loader), HTML5 SCORM player script safety, correct option parsing, and accurate CMI data model mapping (cmi.core.score.raw, cmi.core.lesson_status)."
+
+    - path: "src/dashboard.py"
+      instructions: "Check FastAPI route signatures, background tasks safety, clean exception handling, and responsive Tailwind CSS layout integrity across all three studio workbenches."
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false

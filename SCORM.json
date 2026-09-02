@@ -1,0 +1,226 @@
+{
+  "name": "SCORM Cloud - Package and Deploy Pipeline",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "90e0c034-7546-4e56-b188-75179ee49b25",
+      "name": "When clicking ‘Test workflow’",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "courseId",
+              "value": "NovaAI_Module_2"
+            },
+            {
+              "name": "folderPath",
+              "value": "C:\\tt-ai-stack\\01_projects\\active\\bov\\02_curriculum_tracks\\financials\\module_2"
+            },
+            {
+              "name": "zipOutputPath",
+              "value": "C:\\tt-ai-stack\\01_projects\\active\\bov\\02_curriculum_tracks\\financials\\module_2\\module_2_scorm12.zip"
+            },
+            {
+              "name": "scormAppId",
+              "value": "YOUR_SCORM_CLOUD_APP_ID"
+            },
+            {
+              "name": "scormSecretKey",
+              "value": "YOUR_SCORM_CLOUD_SECRET_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a671cf47-0e6d-4952-b80c-7b470daecae6",
+      "name": "Set Course Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=powershell.exe -Command \"Compress-Archive -Path '{{ $json.folderPath }}\\imsmanifest.xml', '{{ $json.folderPath }}\\index.html', '{{ $json.folderPath }}\\assets' -DestinationPath '{{ $json.zipOutputPath }}' -Force\""
+      },
+      "id": "e0b8cb55-6d04-4b5c-a5b6-68b209e51ea7",
+      "name": "Package SCORM ZIP",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $('Set Course Configuration').item.json.zipOutputPath }}",
+        "options": {}
+      },
+      "id": "18f972b9-e137-4d92-9111-e77ad45e7f1e",
+      "name": "Read ZIP from Disk",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://cloud.scorm.com/api/v2/courses/importJobs/upload?courseId={{ $('Set Course Configuration').item.json.courseId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Basic {{ Buffer.from($('Set Course Configuration').item.json.scormAppId + ':' + $('Set Course Configuration').item.json.scormSecretKey).toString('base64') }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cc074e2d-327c-47bc-ae51-40e9f1cf98f0",
+      "name": "Upload to SCORM Cloud API v2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "b1b7ce3a-3d23-41bb-b054-d83ee6ae1a44",
+      "name": "Wait for Processing",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1320,
+        300
+      ],
+      "webhookId": "9b122709-3221-4ebc-a81d-6512ce24ff88"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://cloud.scorm.com/api/v2/courses/importJobs/{{ $('Upload to SCORM Cloud API v2').item.json.result }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Basic {{ Buffer.from($('Set Course Configuration').item.json.scormAppId + ':' + $('Set Course Configuration').item.json.scormSecretKey).toString('base64') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "422e1327-0cbe-4fc4-bbdc-e875db0c6ff2",
+      "name": "Check Import Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "When clicking ‘Test workflow’": {
+      "main": [
+        [
+          {
+            "node": "Set Course Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Course Configuration": {
+      "main": [
+        [
+          {
+            "node": "Package SCORM ZIP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Package SCORM ZIP": {
+      "main": [
+        [
+          {
+            "node": "Read ZIP from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read ZIP from Disk": {
+      "main": [
+        [
+          {
+            "node": "Upload to SCORM Cloud API v2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to SCORM Cloud API v2": {
+      "main": [
+        [
+          {
+            "node": "Wait for Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Processing": {
+      "main": [
+        [
+          {
+            "node": "Check Import Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

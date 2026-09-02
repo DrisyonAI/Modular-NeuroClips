@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from src.config import (
-    OUTPUT_DIR, CURRICULUM_OUTPUT_DIR, EXPORTS_DIR, IDENTITIES_DIR,
+    OUTPUT_DIR, CURRICULUM_OUTPUT_DIR, EXPORTS_DIR, IDENTITIES_DIR, ASSETS_DIR,
     ART_STYLE_PRESETS, RESOLUTION_PROFILES, VOICE_PROFILES,
     AVATAR_PROFILES, AVATAR_LAYOUT_MODES, LANGUAGE_PROFILES,
     DASHBOARD_HOST, DASHBOARD_PORT
@@ -20,12 +20,17 @@ from src.config import (
 from src.orchestrator import ScriptOrchestrator, VideoScript, VideoScene
 from src.pipeline import MediaGenerationEngine, VRAMGuard
 from src.compiler import compile_final_video, generate_srt_subtitles
+from src.quiz_engine import QuizEngine
+from src.scorm_packager import SCORMPackager, SCORMPackageRequest, SCORMModuleModel, SCORMLessonModel
+
+quiz_engine = QuizEngine()
 
 app = FastAPI(title="Modular-NeuroClips Studio & VPS Control Plane", version="2.6.0")
 
 app.mount("/static_renders", StaticFiles(directory=str(OUTPUT_DIR)), name="static_renders")
 app.mount("/static_curriculum", StaticFiles(directory=str(CURRICULUM_OUTPUT_DIR)), name="static_curriculum")
 app.mount("/static_exports", StaticFiles(directory=str(EXPORTS_DIR)), name="static_exports")
+app.mount("/static_assets", StaticFiles(directory=str(ASSETS_DIR)), name="static_assets")
 
 try:
     import psutil
@@ -170,17 +175,71 @@ def log_job_milestone(job_id: str, milestone_id: str, step_msg: str, progress: i
     PIPELINE_STATE["current_milestone"] = milestone_id
     PIPELINE_STATE["progress_percent"] = progress
 
-def generate_voiceover_audio_sync(text: str, voice: str, speech_rate: float, output_path: Path) -> bool:
-    """Generates voiceover narration synchronously with guaranteed event loop handling & fallback."""
-    rate_str = f"{int((speech_rate - 1.0) * 100):+d}%"
+def generate_voiceover_audio_sync(
+    text: str,
+    voice: str,
+    speech_rate: float,
+    output_path: Path,
+    pitch: str = "+0Hz",
+    volume: str = "+0%",
+    voice_provider: str = "edge_tts",
+    elevenlabs_api_key: Optional[str] = None,
+    elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM",
+    stability: float = 0.75,
+    similarity_boost: float = 0.75
+) -> bool:
+    """
+    Generates voiceover narration supporting Edge-TTS with pitch/rate/volume prosody
+    and ElevenLabs multilingual neural synthesis with stability/similarity control.
+    """
     clean_text = text.strip()
     if not clean_text:
         return False
-        
+
+    # 1. ElevenLabs Neural Provider
+    if voice_provider == "elevenlabs" and elevenlabs_api_key and elevenlabs_api_key.strip():
+        try:
+            voice_id = elevenlabs_voice_id or "21m00Tcm4TlvDq8ikWAM"
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+            headers = {
+                "xi-api-key": elevenlabs_api_key.strip(),
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg"
+            }
+            # Clean director tags for ElevenLabs input
+            raw_script = re.sub(r"\[pause\s+\w+\]", " ... ", clean_text, flags=re.IGNORECASE)
+            raw_script = re.sub(r"\[emphasis\]", "", raw_script, flags=re.IGNORECASE)
+            payload = {
+                "text": raw_script,
+                "model_id": "eleven_multilingual_v2",
+                "voice_settings": {
+                    "stability": float(stability),
+                    "similarity_boost": float(similarity_boost),
+                    "style": 0.0,
+                    "use_speaker_boost": True
+                }
+            }
+            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                audio_data = resp.read()
+                if audio_data and len(audio_data) > 500:
+                    with open(output_path, "wb") as f:
+                        f.write(audio_data)
+                    return True
+        except Exception as e:
+            print(f"[ElevenLabs Warning] Synthesis error ({e}). Falling back to Edge-TTS.")
+
+    # 2. Edge-TTS High-Definition Neural Voice with Prosody Pitch & Speed
     try:
         import edge_tts
+        rate_str = f"{int((speech_rate - 1.0) * 100):+d}%"
+        # Parse natural pauses: replace [pause 500ms] with brief ellipses
+        formatted_text = re.sub(r"\[pause\s+(\d+)m?s?\]", r" ... ", clean_text, flags=re.IGNORECASE)
+        formatted_text = re.sub(r"\[emphasis\]", "", formatted_text, flags=re.IGNORECASE)
+        formatted_text = re.sub(r"\[protip\]", "Pro tip: ", formatted_text, flags=re.IGNORECASE)
+        
         async def _save_tts():
-            communicate = edge_tts.Communicate(clean_text, voice, rate=rate_str)
+            communicate = edge_tts.Communicate(formatted_text, voice, rate=rate_str, pitch=pitch, volume=volume)
             await communicate.save(str(output_path))
             
         try:
@@ -199,6 +258,7 @@ def generate_voiceover_audio_sync(text: str, voice: str, speech_rate: float, out
     except Exception as e:
         print(f"[TTS Error] Edge-TTS error ({e}). Trying local fallback.")
 
+    # 3. pyttsx3 Local Fallback
     try:
         import pyttsx3
         tts_engine = pyttsx3.init()
@@ -209,7 +269,25 @@ def generate_voiceover_audio_sync(text: str, voice: str, speech_rate: float, out
     except Exception:
         pass
 
-    return False
+def convert_audio_format(input_path: Path, target_format: str, output_path: Path) -> bool:
+    """Converts synthesized audio to target format (MP3, WAV, M4A/AAC, OGG, FLAC) using ffmpeg."""
+    target_format = target_format.lower().replace(".", "").strip()
+    cmd = ["ffmpeg", "-y", "-i", str(input_path)]
+    if target_format == "wav":
+        cmd.extend(["-c:a", "pcm_s16le", "-ar", "44100"])
+    elif target_format in ["m4a", "aac"]:
+        cmd.extend(["-c:a", "aac", "-b:a", "256k"])
+    elif target_format == "ogg":
+        cmd.extend(["-c:a", "libvorbis", "-q:a", "6"])
+    elif target_format == "flac":
+        cmd.extend(["-c:a", "flac"])
+    elif target_format == "mp3":
+        cmd.extend(["-c:a", "libmp3lame", "-b:a", "256k"])
+    else:
+        cmd.extend(["-c:a", "copy"])
+    cmd.append(str(output_path))
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return res.returncode == 0 and output_path.exists()
 
 def translate_narration_text(text: str, target_lang: str) -> str:
     """Translates narration text into the target dubbing language using lightweight translation endpoint."""
@@ -230,6 +308,27 @@ def translate_narration_text(text: str, target_lang: str) -> str:
         print(f"[Translation Notice] Using source text ({e})")
     return text
 
+def resolve_video_path(url_or_path: Optional[str]) -> Optional[str]:
+    """Resolves a video URL (static asset or render) to an absolute local filesystem path."""
+    if not url_or_path:
+        return None
+    s = str(url_or_path).strip()
+    if not s:
+        return None
+    if s.startswith("/static_assets/"):
+        p = ASSETS_DIR / s.replace("/static_assets/", "")
+        return str(p) if p.exists() else None
+    if s.startswith("/static_renders/"):
+        p = OUTPUT_DIR / s.replace("/static_renders/", "")
+        return str(p) if p.exists() else None
+    p = Path(s)
+    if p.exists():
+        return str(p)
+    alt = ASSETS_DIR / p.name
+    if alt.exists():
+        return str(alt)
+    return None
+
 async def execute_tracked_generation(
     job_id: str,
     topic: str,
@@ -243,7 +342,16 @@ async def execute_tracked_generation(
     avatar_persona: str = "maya_fintech",
     avatar_layout: str = "pip_bottom_right",
     burn_subtitles: bool = True,
-    auto_clean: bool = False
+    auto_clean: bool = False,
+    intro_video_url: Optional[str] = None,
+    outro_video_url: Optional[str] = None,
+    pitch: str = "+0Hz",
+    volume: str = "+0%",
+    voice_provider: str = "edge_tts",
+    elevenlabs_api_key: Optional[str] = None,
+    elevenlabs_voice_id: Optional[str] = None,
+    stability: float = 0.75,
+    similarity_boost: float = 0.75
 ):
     job = JOBS_DB.get(job_id)
     if not job:
@@ -298,25 +406,57 @@ async def execute_tracked_generation(
             job["processed_scenes"] = idx
             PIPELINE_STATE["processed_scenes"] = idx
             
-            base_p = 30 + int(((idx - 0.5) / total) * 35)
-            log_job_milestone(job_id, "keyframes", f"Synthesizing keyframe {idx}/{total}...", base_p, f"Scene {idx}: Visual Prompt -> {scene.visual_prompt[:60]}...")
-            
-            full_prompt = f"{script.art_style_preset}, {scene.visual_prompt}"
-            kf_path = engine.generate_image_keyframe(full_prompt, scene.scene_id, job_id=job_id, width=width, height=height, force_refresh=True)
-            keyframe_paths.append(kf_path)
-            job["keyframe_paths"] = keyframe_paths
-            
-            anim_p = 30 + int((idx / total) * 35)
-            log_job_milestone(job_id, "animation", f"Animating scene {idx}/{total}...", anim_p, f"Scene {idx}: Motion -> {scene.motion_prompt[:50]}...")
-            clip_path = engine.generate_video_clip(kf_path, scene.motion_prompt, scene.scene_id, job_id=job_id, width=width, height=height, force_refresh=True)
-            clip_paths.append(clip_path)
-            job["clip_paths"] = clip_paths
+            v_type = getattr(scene, "video_source_type", "ai_generated")
+            v_url = getattr(scene, "video_source_url", "")
+            dur = getattr(scene, "duration_seconds", 4)
+            vis_prompt = getattr(scene, "visual_prompt", "")
+            mot_prompt = getattr(scene, "motion_prompt", "")
+            resolved_v_path = resolve_video_path(v_url) if (v_type == "uploaded_video" and v_url) else None
+
+            if resolved_v_path:
+                base_p = 30 + int(((idx - 0.5) / total) * 35)
+                log_job_milestone(job_id, "keyframes", f"Extracting frame from video asset {idx}/{total}...", base_p, f"Scene {idx}: Using user video clip -> {Path(resolved_v_path).name}")
+                kf_path = str(OUTPUT_DIR / f"scene_{scene.scene_id}_{job_id}_keyframe.png")
+                engine.extract_video_thumbnail(resolved_v_path, Path(kf_path), width=width, height=height)
+                keyframe_paths.append(kf_path)
+                job["keyframe_paths"] = keyframe_paths
+
+                anim_p = 30 + int((idx / total) * 35)
+                log_job_milestone(job_id, "animation", f"Normalizing video clip {idx}/{total}...", anim_p, f"Scene {idx}: Conforming video ({dur}s, {width}x{height})")
+                clip_path = engine.prepare_existing_video_clip(resolved_v_path, scene.scene_id, job_id=job_id, target_duration=float(dur), width=width, height=height)
+                clip_paths.append(clip_path)
+                job["clip_paths"] = clip_paths
+            else:
+                base_p = 30 + int(((idx - 0.5) / total) * 35)
+                log_job_milestone(job_id, "keyframes", f"Synthesizing keyframe {idx}/{total}...", base_p, f"Scene {idx}: Visual Prompt -> {vis_prompt[:60]}...")
+                full_prompt = f"{script.art_style_preset}, {vis_prompt}"
+                kf_path = engine.generate_image_keyframe(full_prompt, scene.scene_id, job_id=job_id, width=width, height=height, force_refresh=True)
+                keyframe_paths.append(kf_path)
+                job["keyframe_paths"] = keyframe_paths
+                
+                anim_p = 30 + int((idx / total) * 35)
+                log_job_milestone(job_id, "animation", f"Animating scene {idx}/{total}...", anim_p, f"Scene {idx}: Motion -> {mot_prompt[:50]}...")
+                clip_path = engine.generate_video_clip(kf_path, mot_prompt, scene.scene_id, job_id=job_id, width=width, height=height, force_refresh=True)
+                clip_paths.append(clip_path)
+                job["clip_paths"] = clip_paths
 
         # MILESTONE 4: VOICEOVER / TTS
         audio_file = OUTPUT_DIR / f"audio_{job_id}.mp3"
-        log_job_milestone(job_id, "voiceover", f"Synthesizing voiceover ({voice}, {speech_rate}x)...", 75, f"Generating neural voice narration for '{script.title}'")
+        log_job_milestone(job_id, "voiceover", f"Synthesizing voiceover ({voice}, {speech_rate}x, {voice_provider})...", 75, f"Generating neural voice narration for '{script.title}'")
         
-        tts_ok = generate_voiceover_audio_sync(topic, voice, speech_rate, audio_file)
+        tts_ok = generate_voiceover_audio_sync(
+            text=topic,
+            voice=voice,
+            speech_rate=speech_rate,
+            output_path=audio_file,
+            pitch=pitch,
+            volume=volume,
+            voice_provider=voice_provider,
+            elevenlabs_api_key=elevenlabs_api_key,
+            elevenlabs_voice_id=elevenlabs_voice_id,
+            stability=stability,
+            similarity_boost=similarity_boost
+        )
         if tts_ok:
             job["audio_paths"] = [str(audio_file)]
             log_job_milestone(job_id, "voiceover", "Voiceover synthesized successfully", 80, f"Generated voice audio: {audio_file.name} ({audio_file.stat().st_size / 1024:.1f} KB)")
@@ -357,7 +497,7 @@ async def execute_tracked_generation(
                     "keyframe_path": keyframe_paths[i] if i < len(keyframe_paths) else "",
                     "visual_prompt": sc.visual_prompt,
                     "motion_prompt": sc.motion_prompt,
-                    "narration": getattr(sc, "narration", ""),
+                    "narration": getattr(sc, "narration", "") or sc.visual_prompt,
                     "duration_seconds": sc.duration_seconds
                 }
                 for i, sc in enumerate(script.scenes)
@@ -373,7 +513,9 @@ async def execute_tracked_generation(
             avatar_layout=avatar_layout,
             burn_subtitles=burn_subtitles,
             srt_path=str(srt_file),
-            remotion_metadata=remotion_meta
+            remotion_metadata=remotion_meta,
+            intro_video_path=resolve_video_path(intro_video_url),
+            outro_video_path=resolve_video_path(outro_video_url)
         )
         
         # MILESTONE 6: COMPLETE
@@ -409,6 +551,15 @@ class GenerationRequest(BaseModel):
     avatar_layout: str = "pip_bottom_right"
     burn_subtitles: bool = True
     auto_clean: bool = False
+    intro_video_url: Optional[str] = None
+    outro_video_url: Optional[str] = None
+    pitch: Optional[str] = "+0Hz"
+    volume: Optional[str] = "+0%"
+    voice_provider: Optional[str] = "edge_tts"
+    elevenlabs_api_key: Optional[str] = None
+    elevenlabs_voice_id: Optional[str] = None
+    stability: Optional[float] = 0.75
+    similarity_boost: Optional[float] = 0.75
     speaker_script: Optional[str] = None
     trainee_reading_material: Optional[str] = None
     visuals_recommended: Optional[str] = None
@@ -469,7 +620,16 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         avatar_persona=req.avatar_persona,
         avatar_layout=req.avatar_layout,
         burn_subtitles=req.burn_subtitles,
-        auto_clean=req.auto_clean
+        auto_clean=req.auto_clean,
+        intro_video_url=req.intro_video_url,
+        outro_video_url=req.outro_video_url,
+        pitch=req.pitch or "+0Hz",
+        volume=req.volume or "+0%",
+        voice_provider=req.voice_provider or "edge_tts",
+        elevenlabs_api_key=req.elevenlabs_api_key,
+        elevenlabs_voice_id=req.elevenlabs_voice_id,
+        stability=req.stability or 0.75,
+        similarity_boost=req.similarity_boost or 0.75
     )
     
     return {"status": "started", "job_id": job_id, "topic": req.topic, "scenes": req.scenes, "meta": job["curriculum_meta"]}
@@ -503,6 +663,15 @@ class FromStoryboardRequest(BaseModel):
     avatar_layout: str = "pip_bottom_right"
     burn_subtitles: bool = True
     auto_clean: bool = False
+    intro_video_url: Optional[str] = None
+    outro_video_url: Optional[str] = None
+    pitch: Optional[str] = "+0Hz"
+    volume: Optional[str] = "+0%"
+    voice_provider: Optional[str] = "edge_tts"
+    elevenlabs_api_key: Optional[str] = None
+    elevenlabs_voice_id: Optional[str] = None
+    stability: Optional[float] = 0.75
+    similarity_boost: Optional[float] = 0.75
     scenes: List[Dict[str, Any]]
 
 @app.post("/api/v1/generate/from-storyboard")
@@ -539,22 +708,56 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
                 job["processed_scenes"] = idx
                 PIPELINE_STATE["processed_scenes"] = idx
 
-                base_p = 25 + int(((idx - 0.5) / total) * 40)
-                log_job_milestone(job_id, "keyframes", f"Synthesizing keyframe {idx}/{total}...", base_p, f"Scene {idx}: Visual -> {scene.get('visual_prompt', '')[:50]}...")
-                full_prompt = f"{req.art_style}, {scene.get('visual_prompt', '')}"
-                kf_path = engine.generate_image_keyframe(full_prompt, scene.get("scene_id", idx), job_id=job_id, width=width, height=height, force_refresh=True)
-                keyframe_paths.append(kf_path)
-                job["keyframe_paths"] = keyframe_paths
+                v_type = scene.get("video_source_type", "ai_generated")
+                v_url = scene.get("video_source_url", "")
+                dur = float(scene.get("duration_seconds", 4))
+                vis_prompt = scene.get("visual_prompt", "")
+                mot_prompt = scene.get("motion_prompt", "")
 
-                anim_p = 25 + int((idx / total) * 40)
-                log_job_milestone(job_id, "animation", f"Animating scene {idx}/{total}...", anim_p, f"Scene {idx}: Motion -> {scene.get('motion_prompt', '')[:50]}...")
-                clip_path = engine.generate_video_clip(kf_path, scene.get("motion_prompt", ""), scene.get("scene_id", idx), job_id=job_id, width=width, height=height, force_refresh=True)
-                clip_paths.append(clip_path)
-                job["clip_paths"] = clip_paths
+                resolved_v_path = resolve_video_path(v_url) if (v_type == "uploaded_video" and v_url) else None
+
+                if resolved_v_path:
+                    base_p = 25 + int(((idx - 0.5) / total) * 40)
+                    log_job_milestone(job_id, "keyframes", f"Extracting frame from video asset {idx}/{total}...", base_p, f"Scene {idx}: Using user video asset -> {Path(resolved_v_path).name}")
+                    kf_path = str(OUTPUT_DIR / f"scene_{scene.get('scene_id', idx)}_{job_id}_keyframe.png")
+                    engine.extract_video_thumbnail(resolved_v_path, Path(kf_path), width=width, height=height)
+                    keyframe_paths.append(kf_path)
+                    job["keyframe_paths"] = keyframe_paths
+
+                    anim_p = 25 + int((idx / total) * 40)
+                    log_job_milestone(job_id, "animation", f"Normalizing video clip {idx}/{total}...", anim_p, f"Scene {idx}: Conforming video ({dur}s, {width}x{height})")
+                    clip_path = engine.prepare_existing_video_clip(resolved_v_path, scene.get("scene_id", idx), job_id=job_id, target_duration=dur, width=width, height=height)
+                    clip_paths.append(clip_path)
+                    job["clip_paths"] = clip_paths
+                else:
+                    base_p = 25 + int(((idx - 0.5) / total) * 40)
+                    log_job_milestone(job_id, "keyframes", f"Synthesizing keyframe {idx}/{total}...", base_p, f"Scene {idx}: Visual -> {vis_prompt[:50]}...")
+                    full_prompt = f"{req.art_style}, {vis_prompt}"
+                    kf_path = engine.generate_image_keyframe(full_prompt, scene.get("scene_id", idx), job_id=job_id, width=width, height=height, force_refresh=True)
+                    keyframe_paths.append(kf_path)
+                    job["keyframe_paths"] = keyframe_paths
+
+                    anim_p = 25 + int((idx / total) * 40)
+                    log_job_milestone(job_id, "animation", f"Animating scene {idx}/{total}...", anim_p, f"Scene {idx}: Motion -> {mot_prompt[:50]}...")
+                    clip_path = engine.generate_video_clip(kf_path, mot_prompt, scene.get("scene_id", idx), job_id=job_id, width=width, height=height, force_refresh=True)
+                    clip_paths.append(clip_path)
+                    job["clip_paths"] = clip_paths
 
             audio_file = OUTPUT_DIR / f"audio_{job_id}.mp3"
-            log_job_milestone(job_id, "voiceover", "Generating voiceover for refined storyboard...", 75, "Synthesizing audio")
-            generate_voiceover_audio_sync(full_narration or req.title, req.voice, req.speech_rate, audio_file)
+            log_job_milestone(job_id, "voiceover", f"Generating voiceover for refined storyboard ({req.voice_provider})...", 75, "Synthesizing audio")
+            generate_voiceover_audio_sync(
+                text=full_narration or req.title,
+                voice=req.voice,
+                speech_rate=req.speech_rate,
+                output_path=audio_file,
+                pitch=req.pitch or "+0Hz",
+                volume=req.volume or "+0%",
+                voice_provider=req.voice_provider or "edge_tts",
+                elevenlabs_api_key=req.elevenlabs_api_key,
+                elevenlabs_voice_id=req.elevenlabs_voice_id,
+                stability=req.stability or 0.75,
+                similarity_boost=req.similarity_boost or 0.75
+            )
             job["audio_paths"] = [str(audio_file)]
 
             srt_file = OUTPUT_DIR / f"subtitles_{job_id}.srt"
@@ -596,7 +799,9 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
                 avatar_layout=req.avatar_layout,
                 burn_subtitles=req.burn_subtitles,
                 srt_path=str(srt_file),
-                remotion_metadata=remotion_meta
+                remotion_metadata=remotion_meta,
+                intro_video_path=resolve_video_path(req.intro_video_url),
+                outro_video_path=resolve_video_path(req.outro_video_url)
             )
 
             job["status"] = "complete"
@@ -617,17 +822,251 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
     background_tasks.add_task(_run_custom_storyboard)
     return {"status": "started", "job_id": job_id, "title": req.title, "scenes_count": len(req.scenes)}
 
+class VoiceAuditionRequest(BaseModel):
+    text: str = "Welcome to Modular-NeuroClips. Auditioning neural voice director prosody and natural pacing."
+    voice: str = "en-IN-NeerjaNeural"
+    speech_rate: float = 1.0
+    pitch: str = "+0Hz"
+    volume: str = "+0%"
+    voice_provider: str = "edge_tts"
+    elevenlabs_api_key: Optional[str] = None
+    elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM"
+    stability: float = 0.75
+    similarity_boost: float = 0.75
+
+@app.post("/api/v1/voice-director/audition")
+async def audition_voice_director_api(req: VoiceAuditionRequest):
+    audition_file = OUTPUT_DIR / f"audition_{uuid.uuid4().hex[:6]}.mp3"
+    success = generate_voiceover_audio_sync(
+        text=req.text,
+        voice=req.voice,
+        speech_rate=req.speech_rate,
+        output_path=audition_file,
+        pitch=req.pitch,
+        volume=req.volume,
+        voice_provider=req.voice_provider,
+        elevenlabs_api_key=req.elevenlabs_api_key,
+        elevenlabs_voice_id=req.elevenlabs_voice_id,
+        stability=req.stability,
+        similarity_boost=req.similarity_boost
+    )
+    if success and audition_file.exists():
+        return {
+            "status": "ok",
+            "audio_url": f"/static_renders/{audition_file.name}",
+            "provider": req.voice_provider,
+            "duration_est": round(len(req.text.split()) / (140 * req.speech_rate) * 60, 1)
+        }
+    raise HTTPException(status_code=500, detail="Voice audition synthesis failed. Please check voice settings or ElevenLabs API credentials.")
+
+class VoiceExportRequest(BaseModel):
+    text: str
+    voice: str = "en-IN-NeerjaNeural"
+    speech_rate: float = 1.0
+    pitch: str = "+0Hz"
+    volume: str = "+0%"
+    format: str = "mp3"  # mp3, wav, m4a, ogg, flac
+    voice_provider: str = "edge_tts"
+    elevenlabs_api_key: Optional[str] = None
+    elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM"
+    stability: float = 0.75
+    similarity_boost: float = 0.75
+
+@app.post("/api/v1/voice/export")
+async def export_voiceover_api(req: VoiceExportRequest):
+    """Generates standalone studio-quality voiceover audio in MP3, WAV, M4A, OGG, or FLAC with companion subtitles."""
+    clean_text = req.text.strip()
+    if not clean_text:
+        raise HTTPException(status_code=400, detail="Text content is required for voice export.")
+
+    base_id = uuid.uuid4().hex[:8]
+    raw_mp3 = OUTPUT_DIR / f"raw_voice_{base_id}.mp3"
+    
+    success = generate_voiceover_audio_sync(
+        text=clean_text,
+        voice=req.voice,
+        speech_rate=req.speech_rate,
+        output_path=raw_mp3,
+        pitch=req.pitch,
+        volume=req.volume,
+        voice_provider=req.voice_provider,
+        elevenlabs_api_key=req.elevenlabs_api_key,
+        elevenlabs_voice_id=req.elevenlabs_voice_id,
+        stability=req.stability,
+        similarity_boost=req.similarity_boost
+    )
+    if not success or not raw_mp3.exists():
+        raise HTTPException(status_code=500, detail="Voice synthesis failed. Please check voice configuration.")
+
+    target_fmt = req.format.lower().replace(".", "").strip()
+    final_audio = OUTPUT_DIR / f"voice_master_{base_id}.{target_fmt}"
+    convert_ok = convert_audio_format(raw_mp3, target_fmt, final_audio)
+    if not convert_ok:
+        final_audio = raw_mp3
+        target_fmt = "mp3"
+
+    # Generate companion subtitle file
+    words = clean_text.split()
+    est_sec = max(round(len(words) / (140 * req.speech_rate) * 60, 1), 3.0)
+    srt_path = OUTPUT_DIR / f"subtitles_{base_id}.srt"
+    scenes_dummy = [{"scene_id": 1, "narration": clean_text, "duration_seconds": est_sec}]
+    generate_srt_subtitles(scenes_dummy, srt_path)
+
+    return {
+        "status": "ok",
+        "audio_url": f"/static_renders/{final_audio.name}",
+        "filename": final_audio.name,
+        "format": target_fmt.upper(),
+        "size_mb": round(final_audio.stat().st_size / (1024 ** 2), 2),
+        "duration_seconds": est_sec,
+        "subtitles_url": f"/static_renders/{srt_path.name}" if srt_path.exists() else None
+    }
+
+@app.post("/api/v1/script/upload-document")
+async def upload_script_document(file: UploadFile = File(...)):
+    """Ingests TXT, Markdown, SRT, VTT, or JSON script documents and returns cleaned narration text."""
+    contents = await file.read()
+    try:
+        raw_text = contents.decode("utf-8")
+    except UnicodeDecodeError:
+        raw_text = contents.decode("latin-1", errors="ignore")
+
+    # Clean VTT / SRT timestamps if subtitle file
+    if file.filename.endswith((".srt", ".vtt")):
+        lines = raw_text.splitlines()
+        clean_lines = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.isdigit() or "-->" in line or line.startswith("WEBVTT"):
+                continue
+            clean_lines.append(line)
+        clean_text = " ".join(clean_lines)
+    else:
+        clean_text = raw_text.strip()
+
+    word_count = len(clean_text.split())
+    suggested_scenes = min(max(word_count // 35, 2), 16)
+
+    return {
+        "status": "ok",
+        "filename": file.filename,
+        "content": clean_text,
+        "word_count": word_count,
+        "suggested_scenes": suggested_scenes
+    }
+
+@app.post("/api/v1/assets/upload-video")
+async def upload_video_asset(file: UploadFile = File(...), tag: str = Query("general")):
+    """Uploads pre-recorded videos, screen recordings, B-roll, or intro/outro bumpers."""
+    ext = Path(file.filename).suffix.lower()
+    if ext not in [".mp4", ".mov", ".webm", ".mkv"]:
+        raise HTTPException(status_code=400, detail="Invalid video format. Supported: MP4, MOV, WebM, MKV.")
+
+    asset_id = str(uuid.uuid4())[:8]
+    clean_name = f"asset_{asset_id}_{Path(file.filename).name.replace(' ', '_')}"
+    target_path = ASSETS_DIR / clean_name
+    
+    contents = await file.read()
+    with open(target_path, "wb") as f:
+        f.write(contents)
+
+    # Extract video thumbnail
+    thumb_name = f"{target_path.stem}_thumb.png"
+    thumb_path = ASSETS_DIR / thumb_name
+    engine = MediaGenerationEngine()
+    engine.extract_video_thumbnail(str(target_path), thumb_path)
+
+    # Probe duration if possible
+    duration = 5.0
+    try:
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(target_path)]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            duration = round(float(res.stdout.strip()), 1)
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "filename": clean_name,
+        "video_url": f"/static_assets/{clean_name}",
+        "thumbnail_url": f"/static_assets/{thumb_name}",
+        "duration_seconds": duration,
+        "size_mb": round(len(contents) / (1024 ** 2), 2),
+        "tag": tag
+    }
+
+@app.get("/api/v1/assets/videos")
+async def list_video_assets():
+    """Lists all reusable video clips, screen recordings, and bumper assets."""
+    assets = []
+    for f in ASSETS_DIR.glob("*.*"):
+        if f.suffix.lower() in [".mp4", ".mov", ".webm", ".mkv"]:
+            thumb = ASSETS_DIR / f"{f.stem}_thumb.png"
+            assets.append({
+                "filename": f.name,
+                "video_url": f"/static_assets/{f.name}",
+                "thumbnail_url": f"/static_assets/{thumb.name}" if thumb.exists() else None,
+                "size_mb": round(f.stat().st_size / (1024 ** 2), 2),
+                "created_at": f.stat().st_mtime
+            })
+    assets.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"status": "ok", "assets": assets}
+
+@app.delete("/api/v1/assets/videos/{filename}")
+async def delete_video_asset(filename: str):
+    """Deletes an uploaded video asset and its thumbnail."""
+    p = ASSETS_DIR / filename
+    if p.exists():
+        p.unlink(missing_ok=True)
+        thumb = ASSETS_DIR / f"{p.stem}_thumb.png"
+        thumb.unlink(missing_ok=True)
+        return {"status": "ok", "message": f"Asset {filename} deleted."}
+    raise HTTPException(status_code=404, detail="Asset not found")
+
 @app.post("/api/v1/avatar/upload")
 async def upload_custom_avatar(file: UploadFile = File(...)):
     custom_avatar_path = OUTPUT_DIR / "custom_avatar.png"
     contents = await file.read()
     with open(custom_avatar_path, "wb") as f:
         f.write(contents)
-    return {
-        "status": "ok",
-        "avatar_url": f"/static_renders/{custom_avatar_path.name}?t={int(time.time())}",
-        "message": "Custom avatar uploaded and active."
-    }
+class VoiceScriptExpandRequest(BaseModel):
+    prompt: str
+    persona: Optional[str] = "maya_fintech"
+    scenes_count: Optional[int] = 3
+
+@app.post("/api/v1/voice/expand-prompt")
+async def expand_prompt_to_voice_script(req: VoiceScriptExpandRequest):
+    """
+    Expands a raw prompt/topic into a complete spoken voiceover script with directorial prosody cues using ScriptwriterAgent.
+    """
+    try:
+        from src.agents.scriptwriter import ScriptwriterAgent
+        agent = ScriptwriterAgent()
+        script_contract = agent.generate_script(
+            prompt=req.prompt,
+            persona_id=req.persona or "maya_fintech",
+            scene_count=req.scenes_count or 3
+        )
+        combined_text = "\n\n".join(
+            f"{s.narration_text}" for s in script_contract.scenes
+        )
+        return {
+            "status": "ok",
+            "expanded_script": combined_text,
+            "title": script_contract.title,
+            "scenes_count": len(script_contract.scenes),
+            "total_words": sum(s.word_count for s in script_contract.scenes)
+        }
+    except Exception as e:
+        expanded = f"In this session on {req.prompt}, [pause 500ms] we examine the core architecture and fundamental principles. [emphasis] Let's break down the primary mechanisms."
+        return {
+            "status": "ok",
+            "expanded_script": expanded,
+            "title": req.prompt,
+            "scenes_count": 1,
+            "total_words": len(expanded.split())
+        }
 
 @app.post("/api/v1/tts/preview")
 async def preview_tts_voice_api(voice: str = Query("en-IN-NeerjaNeural"), rate: float = Query(1.0)):
@@ -642,22 +1081,92 @@ async def preview_tts_voice_api(voice: str = Query("en-IN-NeerjaNeural"), rate: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Voice preview failed: {str(e)}")
 
+@app.post("/api/v1/scorm/package")
+async def create_custom_scorm_package(req: SCORMPackageRequest):
+    """
+    Generates a full ADL SCORM 1.2 or 2004 e-learning package (.zip)
+    from structured Course Title, Modules, Lessons, Topics, and attached media.
+    """
+    packager = SCORMPackager(
+        course_id=req.course_id,
+        course_title=req.course_title,
+        course_description=req.course_description or "",
+        version=req.version
+    )
+
+    for mod in req.modules:
+        packager.add_module(
+            module_id=mod.module_id,
+            module_title=mod.module_title,
+            description=mod.description or ""
+        )
+        for ls in mod.lessons:
+            # Resolve video/audio/srt if relative or job id provided
+            resolved_vid = resolve_video_path(ls.video_path)
+            packager.add_lesson(
+                module_id=mod.module_id,
+                lesson_id=ls.lesson_id,
+                lesson_title=ls.lesson_title,
+                topic=ls.topic or "",
+                description=ls.description or "",
+                video_path=resolved_vid,
+                srt_path=ls.srt_path,
+                audio_path=ls.audio_path,
+                runtime_seconds=ls.runtime_seconds or 0.0
+            )
+
+    output_zip = packager.export_zip()
+
+    return {
+        "status": "ok",
+        "package_name": output_zip.name,
+        "download_url": f"/static_exports/{output_zip.name}",
+        "version": req.version,
+        "size_mb": round(output_zip.stat().st_size / (1024 ** 2), 2),
+        "total_modules": len(req.modules),
+        "total_lessons": sum(len(m.lessons) for m in req.modules)
+    }
+
+@app.get("/api/v1/quiz/modules")
+async def get_quiz_modules_api():
+    """Lists all available course modules and question bank statistics from Nipuna curriculum."""
+    return {"status": "ok", "modules": [s.model_dump() for s in quiz_engine.get_modules_summary()]}
+
+@app.get("/api/v1/quiz/module/{module_id}")
+async def get_quiz_module_questions_api(module_id: int):
+    """Returns question bank items for a specific module."""
+    questions = quiz_engine.get_module_questions(module_id)
+    return {"status": "ok", "module_id": module_id, "questions": [q.model_dump() for q in questions]}
+
 @app.post("/api/v1/scorm/export/{filename}")
-async def export_scorm_package(filename: str):
+async def export_scorm_package(
+    filename: str,
+    module_id: int = Query(1),
+    course_title: Optional[str] = Query(None),
+    scorm_version: str = Query("1.2")
+):
+    """
+    1-click SCORM exporter bundling the rendered video with the module's interactive 32-question assessment from Nipuna curriculum.
+    """
     video_path = OUTPUT_DIR / filename
+    if not video_path.exists():
+        video_path = ASSETS_DIR / filename
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
         
-    package_name = f"SCORM_{video_path.stem}.zip"
+    c_title = course_title or video_path.stem.replace('_', ' ').title()
+    package_name = f"SCORM_{video_path.stem}_Module{module_id}.zip"
     zip_path = EXPORTS_DIR / package_name
+    
+    questions = quiz_engine.get_module_questions(module_id)
     
     manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <manifest identifier="Course_{video_path.stem}" version="1.0" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
   <organizations default="org1">
     <organization identifier="org1">
-      <title>{video_path.stem.replace('_', ' ').title()}</title>
+      <title>{c_title} • Interactive Lecture & Assessment</title>
       <item identifier="item1" identifierref="resource1">
-        <title>Module Video Lesson</title>
+        <title>Module Video Lecture & Knowledge Check ({len(questions)} Questions)</title>
       </item>
     </organization>
   </organizations>
@@ -669,17 +1178,12 @@ async def export_scorm_package(filename: str):
   </resources>
 </manifest>
 """
-    player_html = f"""<!DOCTYPE html>
-<html>
-<head>
-  <title>{video_path.stem}</title>
-  <style>body {{ margin:0; background:#0f172a; display:flex; justify-content:center; align-items:center; height:100vh; }} video {{ max-width:90%; border-radius:12px; }}</style>
-</head>
-<body>
-  <video src="{filename}" controls autoplay></video>
-</body>
-</html>
-"""
+    player_html = quiz_engine.generate_interactive_scorm_html(
+        video_filename=filename,
+        module_id=module_id,
+        pass_percentage=70
+    )
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("imsmanifest.xml", manifest_xml)
         zf.writestr("index.html", player_html)
@@ -689,8 +1193,97 @@ async def export_scorm_package(filename: str):
         "status": "ok",
         "package_name": package_name,
         "download_url": f"/static_exports/{package_name}",
-        "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2)
+        "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
+        "module_id": module_id,
+        "questions_count": len(questions)
     }
+
+class CustomSCORMBuildRequest(BaseModel):
+    course_title: str
+    course_id: Optional[str] = "CUSTOM_COURSE"
+    module_title: Optional[str] = "Module 1"
+    topic: Optional[str] = "E-Learning Unit"
+    pass_percentage: Optional[int] = 70
+    scorm_version: Optional[str] = "1.2"
+    video_filename: Optional[str] = None
+    module_id: Optional[int] = 1
+
+@app.post("/api/v1/scorm/custom-build")
+async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
+    """
+    Builds a custom SCORM 1.2 / 2004 e-learning package with custom metadata, media attachment, and module quiz.
+    """
+    safe_course_id = "".join(c for c in (req.course_id or "COURSE") if c.isalnum() or c in ('_', '-')).strip() or "COURSE"
+    package_name = f"SCORM_{safe_course_id}_{int(time.time())}.zip"
+    zip_path = EXPORTS_DIR / package_name
+    
+    questions = quiz_engine.get_module_questions(req.module_id or 1)
+    
+    video_file = None
+    target_vid_name = req.video_filename or ""
+    if req.video_filename:
+        v1 = OUTPUT_DIR / req.video_filename
+        v2 = ASSETS_DIR / req.video_filename
+        if v1.exists():
+            video_file = v1
+        elif v2.exists():
+            video_file = v2
+
+    manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<manifest identifier="{safe_course_id}" version="{req.scorm_version}" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
+  <organizations default="org_{safe_course_id}">
+    <organization identifier="org_{safe_course_id}">
+      <title>{req.course_title}</title>
+      <item identifier="item_{safe_course_id}" identifierref="res_{safe_course_id}">
+        <title>{req.module_title}: {req.topic} ({len(questions)} Questions)</title>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res_{safe_course_id}" type="webcontent" adlcp:scormtype="sco" href="index.html">
+      <file href="index.html"/>
+      {f'<file href="{target_vid_name}"/>' if video_file else ''}
+    </resource>
+  </resources>
+</manifest>
+"""
+    player_html = quiz_engine.generate_interactive_scorm_html(
+        video_filename=target_vid_name if video_file else "",
+        module_id=req.module_id or 1,
+        pass_percentage=req.pass_percentage or 70
+    )
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("imsmanifest.xml", manifest_xml)
+        zf.writestr("index.html", player_html)
+        if video_file and video_file.exists():
+            zf.write(video_file, arcname=target_vid_name)
+
+    return {
+        "status": "ok",
+        "package_name": package_name,
+        "download_url": f"/static_exports/{package_name}",
+        "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
+        "course_title": req.course_title,
+        "module_id": req.module_id,
+        "questions_count": len(questions),
+        "scorm_version": req.scorm_version
+    }
+
+@app.get("/api/v1/scorm/packages")
+async def list_scorm_packages():
+    """Lists all available SCORM zip packages in the exports directory."""
+    packages = []
+    if EXPORTS_DIR.exists():
+        for f in EXPORTS_DIR.glob("*.zip"):
+            packages.append({
+                "filename": f.name,
+                "download_url": f"/static_exports/{f.name}",
+                "size_mb": round(f.stat().st_size / (1024 ** 2), 2),
+                "created_at": f.stat().st_mtime
+            })
+    packages.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"packages": packages}
 
 class IdentitySaveRequest(BaseModel):
     name: str
@@ -869,12 +1462,16 @@ async def sse_metrics():
             await asyncio.sleep(0.8)
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "gpu_available": GPU_AVAILABLE, "timestamp": time.time()}
+
 # -------------------------------------------------------------
 # Web UI Portal Interface with SCORM & Visual Storyboard
 # -------------------------------------------------------------
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def serve_dashboard():
-    return """
+    return r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -950,6 +1547,9 @@ async def serve_dashboard():
             <button onclick="newProjectCanvas()" class="px-3 py-1.5 rounded-lg bg-brand-500/15 text-brand-glow border border-brand-500/30 hover:bg-brand-500/25 transition-all flex items-center gap-1.5 font-sans font-bold shadow-md shadow-brand-500/10">
                 <span>✨</span> <span>New Project</span>
             </button>
+            <button onclick="openAssetVaultModal()" class="px-3 py-1.5 rounded-lg bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/25 transition-all flex items-center gap-1.5 font-sans font-semibold">
+                <span>📼</span> <span>Video Library</span>
+            </button>
             <div class="glass-panel px-3 py-1.5 rounded-lg flex items-center space-x-2">
                 <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
                 <span class="text-slate-400">GPU:</span>
@@ -994,6 +1594,22 @@ async def serve_dashboard():
             </div>
         </section>
 
+        <!-- 🎛️ STUDIO MODE SELECTOR BAR -->
+        <div class="flex items-center space-x-2 border-b border-slate-800 pb-3">
+            <button onclick="switchStudioMode('video')" id="mode-btn-video" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all">
+                <span>🎬</span> <span>Multi-Agent Video Studio</span>
+            </button>
+            <button onclick="switchStudioMode('voice')" id="mode-btn-voice" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all">
+                <span>🎙️</span> <span>Voice Director Studio (Audio Masters)</span>
+            </button>
+            <button onclick="switchStudioMode('scorm')" id="mode-btn-scorm" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all">
+                <span>📦</span> <span>Custom SCORM & LMS Generator</span>
+            </button>
+        </div>
+
+        <!-- MODE 1: MULTI-AGENT VIDEO STUDIO -->
+        <div id="mode-video-section" class="space-y-6">
+
         <!-- Studio Control Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
 
@@ -1007,16 +1623,40 @@ async def serve_dashboard():
                         <span class="text-xs text-brand-glow bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/20">Prompt-to-Visual AI Synthesis</span>
                     </div>
 
-                    <!-- Speaker Script Input -->
-                    <div>
-                        <div class="flex justify-between items-center mb-1">
-                            <label class="text-xs font-semibold text-slate-300">Speaker Script (Narration & Prompt Content)</label>
-                            <span id="script-stats" class="text-[11px] font-mono text-brand-glow">0 words | ~0.0 min</span>
+                    <!-- Speaker Script Input with Director Toolbar & Document Ingestion -->
+                    <div class="space-y-1.5">
+                        <div class="flex justify-between items-center">
+                            <label class="text-xs font-semibold text-slate-300">Speaker Script (Narration & Directorial Cues)</label>
+                            <div class="flex items-center space-x-3">
+                                <label for="script-file-upload" class="text-[10px] text-brand-glow hover:underline cursor-pointer flex items-center gap-1 font-sans">
+                                    <span>📁</span> <span>Upload Document (.txt, .md, .srt)</span>
+                                </label>
+                                <input type="file" id="script-file-upload" class="hidden" accept=".txt,.md,.srt,.vtt,.json" onchange="handleScriptDocumentUpload(this)">
+                                <span id="script-stats" class="text-[11px] font-mono text-brand-glow">0 words | ~0.0 min</span>
+                            </div>
                         </div>
-                        <textarea id="prompt-input" rows="4" oninput="updateScriptMetrics()" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all" placeholder="Enter lecture topic or narration script (e.g. AI-driven dispute settlement with algorithmic liquidity)..."></textarea>
+                        
+                        <!-- Director Quick Insert Toolbar -->
+                        <div class="flex items-center space-x-1.5 overflow-x-auto py-1 text-[11px]">
+                            <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Director Cues:</span>
+                            <button type="button" onclick="insertScriptTag('[pause 500ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
+                                ⏱️ [Pause 0.5s]
+                            </button>
+                            <button type="button" onclick="insertScriptTag('[pause 1s] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
+                                ⏱️ [Pause 1.0s]
+                            </button>
+                            <button type="button" onclick="insertScriptTag('[emphasis] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
+                                ✨ [Emphasis]
+                            </button>
+                            <button type="button" onclick="insertScriptTag('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
+                                💡 [Pro Tip]
+                            </button>
+                        </div>
+
+                        <textarea id="prompt-input" rows="4" oninput="updateScriptMetrics()" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all font-sans" placeholder="Enter lecture topic or upload a text file (e.g. In this session, [pause 500ms] we explore algorithmic liquidity and automated dispute settlement with AI agents)..."></textarea>
                     </div>
 
-                    <!-- Language, Resolution, Style, and Scenes -->
+                    <!-- Language, Resolution, Style, and Chunking Scenes -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                         <div>
                             <label class="block text-xs font-semibold text-slate-300 mb-1">🌐 Language & Dubbing</label>
@@ -1043,10 +1683,16 @@ async def serve_dashboard():
                         </div>
                         <div>
                             <div class="flex justify-between text-xs font-semibold text-slate-300 mb-1">
-                                <span>Shots / Scenes (#)</span>
-                                <span id="scene-val" class="font-mono text-brand-glow">3</span>
+                                <span>Scene Chunking (#)</span>
+                                <span id="scene-val" class="font-mono text-brand-glow font-bold">4 Scenes</span>
                             </div>
-                            <input id="scene-slider" type="range" min="1" max="8" value="3" oninput="document.getElementById('scene-val').innerText = this.value" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
+                            <input id="scene-slider" type="range" min="1" max="16" value="4" oninput="document.getElementById('scene-val').innerText = this.value + ' Scenes'" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
+                            <div class="flex items-center justify-between text-[10px] text-slate-400 mt-1">
+                                <button type="button" onclick="setSceneChunk(3)" class="hover:text-brand-glow">Shorts (3)</button>
+                                <button type="button" onclick="setSceneChunk(6)" class="hover:text-brand-glow">Standard (6)</button>
+                                <button type="button" onclick="setSceneChunk(10)" class="hover:text-brand-glow">Deep (10)</button>
+                                <button type="button" onclick="setSceneChunk(16)" class="hover:text-brand-glow">Master (16)</button>
+                            </div>
                         </div>
                     </div>
 
@@ -1075,13 +1721,15 @@ async def serve_dashboard():
                                     </label>
                                     <input type="file" id="avatar-file-input" class="hidden" accept="image/*" onchange="uploadAvatar(this)">
                                 </div>
-                                <select id="avatar-persona-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                    <option value="maya_fintech">Maya (Senior FinTech Lead)</option>
+                                <select id="avatar-persona-select" onchange="onPersonaSelectChange(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="maya_fintech" selected>Maya (Senior FinTech Lead)</option>
                                     <option value="alex_ai">Alex (Enterprise AI Architect)</option>
                                     <option value="elena_compliance">Elena (Risk & Governance Director)</option>
                                     <option value="david_trainer">David (Global LMS Instructor)</option>
+                                    <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
                                     <option value="custom_upload">Custom Uploaded Portrait</option>
                                 </select>
+                                <span id="persona-meta-badge" class="text-[10px] text-brand-glow font-mono block mt-1">🇮🇳 South Asian | en-IN (Neerja) | FinTech</span>
                             </div>
 
                             <div>
@@ -1105,33 +1753,193 @@ async def serve_dashboard():
                         </div>
                     </div>
 
-                    <!-- Voiceover & Pacing Row -->
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 rounded-xl bg-slate-950/70 border border-slate-800/80">
-                        <div>
-                            <div class="flex justify-between items-center mb-1">
-                                <label class="text-xs font-semibold text-slate-300">Voiceover Profile</label>
-                                <button onclick="auditionVoice()" id="audition-btn" class="text-[10px] text-brand-glow hover:underline flex items-center gap-0.5">
-                                    <span>🔊</span> <span>Audition</span>
+                    <!-- 🎙️ NEURAL VOICE DIRECTOR STUDIO (ELEVENLABS-STYLE CONTROL DECK) -->
+                    <div class="p-4 rounded-xl bg-slate-950/90 border border-brand-500/30 space-y-3.5 shadow-lg shadow-brand-500/5">
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                            <div class="flex items-center space-x-2">
+                                <span class="text-sm">🎙️</span>
+                                <div>
+                                    <span class="text-xs font-bold text-white">Neural Voice Director Studio</span>
+                                    <span class="text-[10px] text-slate-400 block">Prosody, emotion tuning & dual-engine synthesis</span>
+                                </div>
+                            </div>
+                            
+                            <!-- Engine Switcher -->
+                            <div class="flex rounded-lg bg-slate-900 p-0.5 border border-slate-800 text-[10px]">
+                                <button type="button" id="engine-tab-edgetts" onclick="switchVoiceEngine('edge_tts')" class="px-2.5 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
+                                    ⚡ Free Neural
+                                </button>
+                                <button type="button" id="engine-tab-elevenlabs" onclick="switchVoiceEngine('elevenlabs')" class="px-2.5 py-1 rounded-md text-slate-400 hover:text-white transition-all">
+                                    👑 ElevenLabs Studio
                                 </button>
                             </div>
-                            <select id="voice-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                <option value="en-IN-NeerjaNeural">Neerja (en-IN, Female)</option>
-                                <option value="en-US-GuyNeural">Guy (en-US, Male)</option>
-                                <option value="en-US-AriaNeural">Aria (en-US, Female)</option>
-                                <option value="te-IN-MohanNeural">Mohan (te-IN, Telugu Male)</option>
-                                <option value="te-IN-ShrutiNeural">Shruti (te-IN, Telugu Female)</option>
-                                <option value="ta-IN-PallaviNeural">Pallavi (ta-IN, Tamil Female)</option>
-                                <option value="ta-IN-ValluvarNeural">Valluvar (ta-IN, Tamil Male)</option>
-                                <option value="hi-IN-MadhurNeural">Madhur (hi-IN, Hindi Male)</option>
-                            </select>
                         </div>
 
-                        <div>
-                            <div class="flex justify-between text-xs font-semibold text-slate-300 mb-1">
-                                <span>Speech Speed</span>
-                                <span id="speed-val" class="font-mono text-brand-glow">1.0x</span>
+                        <!-- ElevenLabs API Key / Voice ID Config (Collapsible) -->
+                        <div id="elevenlabs-config-box" class="hidden p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 space-y-2 text-xs">
+                            <div class="flex items-center justify-between">
+                                <span class="text-amber-300 font-bold text-[11px] flex items-center gap-1">
+                                    <span>👑</span> <span>ElevenLabs MultiLingual V2 Credentials</span>
+                                </span>
+                                <span class="text-[10px] text-slate-400">Stored locally in your browser</span>
                             </div>
-                            <input id="speed-slider" type="range" min="0.8" max="1.2" step="0.05" value="1.0" oninput="document.getElementById('speed-val').innerText = parseFloat(this.value).toFixed(2) + 'x'; updateScriptMetrics();" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                <div>
+                                    <label class="block text-[10px] text-slate-300 mb-1">ElevenLabs API Key</label>
+                                    <input type="password" id="elevenlabs-api-key" placeholder="xi-api-key..." onchange="localStorage.setItem('neuroclips_eleven_key', this.value)" class="w-full rounded bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] text-slate-300 mb-1">Voice ID (or Cloned ID)</label>
+                                    <select id="elevenlabs-voice-id" onchange="localStorage.setItem('neuroclips_eleven_voice', this.value)" class="w-full rounded bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
+                                        <option value="21m00Tcm4TlvDq8ikWAM" selected>Rachel (Female - Warm & Professional)</option>
+                                        <option value="pNInz6obpgDQGcFmaJgB">Adam (Male - Deep & Executive)</option>
+                                        <option value="ErXwobaYiN019PkySvjV">Antoni (Male - Engaging Narrator)</option>
+                                        <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female - Crisp Educational)</option>
+                                        <option value="TxGEqnHWrfWFTfGW9XjX">Josh (Male - Conversational Host)</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Voice Profile & Archetype Selection -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                            <div id="edgetts-voice-container">
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="text-xs font-semibold text-slate-300">Voice Profile</label>
+                                    <span class="text-[10px] text-brand-glow">HD Neural</span>
+                                </div>
+                                <select id="voice-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
+                                    <option value="en-IN-NeerjaNeural" selected>Neerja (en-IN, Female - Instructional)</option>
+                                    <option value="en-US-GuyNeural">Guy (en-US, Male - Executive)</option>
+                                    <option value="en-US-AriaNeural">Aria (en-US, Female - Presenter)</option>
+                                    <option value="en-US-ChristopherNeural">Christopher (en-US, Male - Authoritative)</option>
+                                    <option value="te-IN-MohanNeural">Mohan (te-IN, Telugu Male)</option>
+                                    <option value="te-IN-ShrutiNeural">Shruti (te-IN, Telugu Female)</option>
+                                    <option value="ta-IN-PallaviNeural">Pallavi (ta-IN, Tamil Female)</option>
+                                    <option value="ta-IN-ValluvarNeural">Valluvar (ta-IN, Tamil Male)</option>
+                                    <option value="hi-IN-MadhurNeural">Madhur (hi-IN, Hindi Male)</option>
+                                    <option value="es-ES-AlvaroNeural">Álvaro (es-ES, Spanish Executive)</option>
+                                    <option value="fr-FR-HenriNeural">Henri (fr-FR, French Clear)</option>
+                                    <option value="de-DE-ConradNeural">Conrad (de-DE, German Technical)</option>
+                                    <option value="ja-JP-KeitaNeural">Keita (ja-JP, Japanese Standard)</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🎭 Emotion & Prosody Archetype</label>
+                                <select id="archetype-select" onchange="applyVoiceArchetype(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
+                                    <option value="technical" selected>Technical Instructor (Clear & Measured)</option>
+                                    <option value="executive">Executive & Boardroom (Deep & Authoritative)</option>
+                                    <option value="conversational">Warm & Conversational (Friendly Mentor)</option>
+                                    <option value="presenter">High-Energy Presenter (Fast & Dynamic)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Directorial Sliders: Speed, Pitch, Stability, Clarity -->
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 pt-1 text-xs">
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[11px] text-slate-300">
+                                    <span>Pacing / Speed</span>
+                                    <span id="speed-val" class="font-mono text-brand-glow font-bold">1.00x</span>
+                                </div>
+                                <input id="speed-slider" type="range" min="0.75" max="1.30" step="0.05" value="1.0" oninput="document.getElementById('speed-val').innerText = parseFloat(this.value).toFixed(2) + 'x'; updateScriptMetrics();" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[11px] text-slate-300">
+                                    <span>Pitch Tuning</span>
+                                    <span id="pitch-val" class="font-mono text-brand-glow font-bold">+0Hz</span>
+                                </div>
+                                <input id="pitch-slider" type="range" min="-10" max="10" step="1" value="0" oninput="document.getElementById('pitch-val').innerText = (this.value >= 0 ? '+' : '') + this.value + 'Hz'" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[11px] text-slate-300">
+                                    <span>Stability</span>
+                                    <span id="stability-val" class="font-mono text-brand-glow font-bold">75%</span>
+                                </div>
+                                <input id="stability-slider" type="range" min="20" max="100" step="5" value="75" oninput="document.getElementById('stability-val').innerText = this.value + '%'" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[11px] text-slate-300">
+                                    <span>Clarity Boost</span>
+                                    <span id="clarity-val" class="font-mono text-brand-glow font-bold">75%</span>
+                                </div>
+                                <input id="clarity-slider" type="range" min="20" max="100" step="5" value="75" oninput="document.getElementById('clarity-val').innerText = this.value + '%'" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+                        </div>
+
+                        <!-- Audition Deck & Waveform Audio Preview -->
+                        <div class="flex flex-col sm:flex-row items-center justify-between gap-2.5 p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 text-xs">
+                            <div class="flex items-center space-x-2 w-full sm:w-auto">
+                                <button type="button" onclick="auditionVoiceDirector()" id="audition-btn" class="px-3 py-1.5 rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 text-white font-bold hover:brightness-110 transition-all flex items-center gap-1.5 shadow-md shadow-brand-500/20 whitespace-nowrap">
+                                    <span>🔊</span> <span>Audition Voice Line</span>
+                                </button>
+                                <span id="audition-status" class="text-[11px] text-slate-400 font-mono">Ready</span>
+                            </div>
+                            <audio id="director-audio-player" controls class="h-7 w-full sm:w-64 accent-brand-500" style="filter: invert(1) hue-rotate(180deg) brightness(0.85);"></audio>
+                        </div>
+
+                        <!-- 🎧 Standalone Audio Master & Subtitle Export -->
+                        <div class="p-3 rounded-lg bg-slate-900/95 border border-emerald-500/30 space-y-2.5 text-xs">
+                            <div class="flex items-center justify-between">
+                                <span class="text-emerald-400 font-bold flex items-center gap-1.5">
+                                    <span>🎧</span> <span>Export Standalone Audio Master</span>
+                                </span>
+                                <span class="text-[10px] text-slate-400">Generate high-fidelity audio + subtitles without video</span>
+                            </div>
+                            <div class="flex flex-col md:flex-row items-center justify-between gap-2.5">
+                                <div class="flex items-center space-x-2 w-full md:w-auto">
+                                    <label class="text-[11px] text-slate-300 font-semibold whitespace-nowrap">Output Format:</label>
+                                    <select id="audio-export-format" class="rounded bg-slate-950 border border-slate-700 p-1.5 text-xs text-brand-glow font-mono font-bold">
+                                        <option value="mp3" selected>🎵 MP3 (Universal Broadcast 256k)</option>
+                                        <option value="wav">🎙️ WAV (Studio Lossless Master 44.1kHz)</option>
+                                        <option value="m4a">📱 M4A / AAC (Apple Podcasts & LMS)</option>
+                                        <option value="ogg">🌐 OGG (Web Audio / Game Engines)</option>
+                                        <option value="flac">💿 FLAC (Audiophile Lossless)</option>
+                                    </select>
+                                </div>
+                                <div class="flex items-center space-x-2 w-full md:w-auto justify-end">
+                                    <button type="button" onclick="exportStandaloneAudio()" id="export-audio-btn" class="w-full md:w-auto px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-bold hover:brightness-110 transition-all flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20">
+                                        <span>⚡</span> <span>Generate & Download Audio Master</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="audio-export-result-box" class="hidden p-2 rounded bg-slate-950 border border-emerald-500/40 flex items-center justify-between">
+                                <span id="audio-export-meta" class="text-[11px] text-emerald-300 font-mono"></span>
+                                <div class="flex items-center space-x-3 text-[11px]">
+                                    <a id="audio-download-link" href="#" download class="text-brand-glow hover:underline font-bold">⬇️ Download Audio</a>
+                                    <a id="srt-download-link" href="#" download class="text-indigo-400 hover:underline font-bold">📄 Download Subtitles (.SRT)</a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Video Bumpers: Intro & Outro (Optional Pre-recorded Clips) -->
+                    <div class="p-3.5 rounded-xl bg-slate-950/80 border border-indigo-500/20 space-y-2.5">
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                            <label class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                                <span>🎞️</span> <span>Branded Video Bumpers (Intro / Outro)</span>
+                            </label>
+                            <button onclick="openAssetVaultModal()" class="text-[10px] text-indigo-400 hover:underline">
+                                Manage Video Library ↗
+                            </button>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                            <div>
+                                <label class="block text-[11px] text-slate-400 mb-1">Intro Opener Clip</label>
+                                <select id="intro-bumper-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="">None (Direct start)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-[11px] text-slate-400 mb-1">Outro Closer Clip</label>
+                                <select id="outro-bumper-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="">None (Direct finish)</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
 
@@ -1221,6 +2029,9 @@ async def serve_dashboard():
                     <p class="text-xs text-slate-400">Rendered production MP4 videos, synchronized voiceovers, and 1-click SCORM 1.2 packages</p>
                 </div>
                 <div class="flex items-center gap-2">
+                    <button onclick="openQuizModal()" class="text-xs px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 transition-all flex items-center gap-1.5 shadow-sm">
+                        <span>📝</span> <span>Item Bank & Quizzes (224 Qs)</span>
+                    </button>
                     <button id="filter-session-btn" onclick="toggleSessionFilter()" class="text-xs px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-all flex items-center gap-1">
                         <span>🔘</span> <span id="filter-session-label">Current Session Only</span>
                     </button>
@@ -1237,7 +2048,333 @@ async def serve_dashboard():
             </div>
         </section>
 
+        </div><!-- END OF MODE 1: MULTI-AGENT VIDEO STUDIO -->
+
+        <!-- MODE 2: STANDALONE VOICE DIRECTOR & AUDIO MASTER STUDIO -->
+        <div id="mode-voice-section" class="hidden space-y-6">
+            <div class="glass-panel rounded-2xl p-6 space-y-6 border border-emerald-500/20">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div>
+                        <h3 class="text-base font-bold text-white flex items-center gap-2">
+                            <span>🎙️</span> Voice Director Studio & Multi-Format Audio Master Exporter
+                        </h3>
+                        <p class="text-xs text-slate-400">High-fidelity neural speech synthesis, prosody tuning, and synchronous subtitle generation without video rendering</p>
+                    </div>
+                    <span class="text-xs font-mono px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        ⚡ Edge-TTS & ElevenLabs Audio Engine
+                    </span>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <!-- Left: Script Input, Prosody & Controls (7 cols) -->
+                    <div class="lg:col-span-7 space-y-4">
+                        <!-- Script Input -->
+                        <div class="space-y-1.5">
+                            <div class="flex justify-between items-center">
+                                <label class="text-xs font-semibold text-slate-300">Narration Script & Directorial Cues</label>
+                                <div class="flex items-center space-x-3">
+                                    <label for="voice-lab-file-upload" class="text-[10px] text-emerald-400 hover:underline cursor-pointer flex items-center gap-1 font-sans">
+                                        <span>📁</span> <span>Upload Document (.txt, .md, .srt)</span>
+                                    </label>
+                                    <input type="file" id="voice-lab-file-upload" class="hidden" accept=".txt,.md,.srt,.vtt,.json" onchange="handleVoiceLabDocumentUpload(this)">
+                                    <span id="voice-lab-stats" class="text-[11px] font-mono text-emerald-400">0 words | ~0.0 min</span>
+                                </div>
+                            </div>
+
+                            <!-- Director Cue Quick Buttons -->
+                            <div class="flex items-center space-x-1.5 overflow-x-auto py-1 text-[11px]">
+                                <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Director Cues:</span>
+                                <button type="button" onclick="insertVoiceLabTag('[pause 250ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    ⏱️ [0.25s]
+                                </button>
+                                <button type="button" onclick="insertVoiceLabTag('[pause 500ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    ⏱️ [0.5s]
+                                </button>
+                                <button type="button" onclick="insertVoiceLabTag('[pause 1s] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    ⏱️ [1.0s]
+                                </button>
+                                <button type="button" onclick="insertVoiceLabTag('[emphasis] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    ✨ [Emphasis]
+                                </button>
+                                <button type="button" onclick="insertVoiceLabTag('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 transition-all font-mono">
+                                    💡 [Pro Tip]
+                                </button>
+                                <button type="button" onclick="expandPromptToVoiceScript()" id="voice-lab-expand-btn" class="px-2.5 py-0.5 rounded bg-brand-500/20 text-brand-glow border border-brand-500/30 hover:bg-brand-500/30 transition-all font-sans font-bold flex items-center gap-1 ml-auto">
+                                    <span>✨</span> <span>AI Expand Prompt</span>
+                                </button>
+                            </div>
+
+                            <textarea id="voice-lab-prompt" rows="5" oninput="updateVoiceLabMetrics()" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all font-sans" placeholder="Enter prompt or complete script (e.g. Type a prompt and click '✨ AI Expand Prompt', or upload/paste a complete narration script with [pause 500ms] cues)..."></textarea>
+                        </div>
+
+                        <!-- Language & Voice Selector -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🌐 Target Language & Accent</label>
+                                <select id="voice-lab-lang" onchange="onVoiceLabLangChange()" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500">
+                                    <option value="en-US" selected>🇺🇸 English (US Standard)</option>
+                                    <option value="en-IN">🇮🇳 English (Indian Accent)</option>
+                                    <option value="te-IN">🇮🇳 Telugu (తెలుగు)</option>
+                                    <option value="ta-IN">🇮🇳 Tamil (தமிழ்)</option>
+                                    <option value="hi-IN">🇮🇳 Hindi (हिन्दी)</option>
+                                    <option value="es-ES">🇪🇸 Spanish (Castilian)</option>
+                                    <option value="fr-FR">🇫🇷 French (Standard)</option>
+                                    <option value="de-DE">🇩🇪 German (Standard)</option>
+                                    <option value="ja-JP">🇯🇵 Japanese (日本語)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🎙️ Voice Persona Profile</label>
+                                <select id="voice-lab-voice" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500">
+                                    <option value="en-US-GuyNeural" selected>Guy (Male - Deep Professional)</option>
+                                    <option value="en-US-AriaNeural">Aria (Female - Clear Instructional)</option>
+                                    <option value="en-IN-NeerjaNeural">Neerja (Female - Indian FinTech Specialist)</option>
+                                    <option value="en-IN-PrabhatNeural">Prabhat (Male - Indian Senior Architect)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Prosody Sliders -->
+                        <div class="grid grid-cols-2 gap-3 p-3 rounded-xl bg-slate-950/80 border border-slate-800">
+                            <div>
+                                <div class="flex justify-between text-[11px] font-semibold text-slate-300 mb-1">
+                                    <span>Speech Rate</span>
+                                    <span id="voice-lab-rate-val" class="font-mono text-emerald-400 font-bold">1.00x</span>
+                                </div>
+                                <input id="voice-lab-rate" type="range" min="0.75" max="1.50" step="0.05" value="1.0" oninput="document.getElementById('voice-lab-rate-val').innerText = parseFloat(this.value).toFixed(2) + 'x'; updateVoiceLabMetrics();" class="w-full accent-emerald-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+                            <div>
+                                <div class="flex justify-between text-[11px] font-semibold text-slate-300 mb-1">
+                                    <span>Pitch Shift</span>
+                                    <span id="voice-lab-pitch-val" class="font-mono text-emerald-400 font-bold">0 Hz</span>
+                                </div>
+                                <input id="voice-lab-pitch" type="range" min="-20" max="20" step="2" value="0" oninput="document.getElementById('voice-lab-pitch-val').innerText = (this.value > 0 ? '+' : '') + this.value + ' Hz'" class="w-full accent-emerald-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+                        </div>
+
+                        <!-- Format & Action Bar -->
+                        <div class="flex flex-col sm:flex-row items-center justify-between gap-3 p-3 rounded-xl bg-emerald-950/20 border border-emerald-500/30">
+                            <div class="flex items-center space-x-2 w-full sm:w-auto">
+                                <label class="text-xs font-semibold text-emerald-300 whitespace-nowrap">Output Master:</label>
+                                <select id="voice-lab-format" class="rounded-lg bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
+                                    <option value="mp3" selected>🎵 MP3 (320kbps Universal)</option>
+                                    <option value="wav">🔊 WAV (Lossless 44.1kHz)</option>
+                                    <option value="m4a">📱 M4A / AAC (Apple Podcasts)</option>
+                                    <option value="ogg">🌐 OGG (Web Audio)</option>
+                                    <option value="flac">💿 FLAC (Audiophile Lossless)</option>
+                                </select>
+                            </div>
+                            <div class="flex items-center space-x-2 w-full sm:w-auto justify-end">
+                                <button onclick="auditionVoiceLab()" id="voice-lab-audition-btn" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition-all flex items-center gap-1">
+                                    <span>🎧</span> <span>Audition</span>
+                                </button>
+                                <button onclick="exportVoiceLabMaster()" id="voice-lab-export-btn" class="px-4 py-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5">
+                                    <span>⚡</span> <span>Export Audio Master</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Live Waveform & Subtitles Preview (5 cols) -->
+                    <div class="lg:col-span-5 space-y-4">
+                        <div class="glass-panel p-4 rounded-xl space-y-3 border border-slate-800">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>🔊</span> <span>Master Audio Player</span>
+                                </h4>
+                                <span id="voice-lab-player-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">Idle</span>
+                            </div>
+                            <div class="p-3 rounded-lg bg-black/60 border border-slate-800 space-y-2">
+                                <audio id="voice-lab-audio-player" controls class="w-full h-8"></audio>
+                                <div id="voice-lab-download-box" class="hidden flex items-center justify-between text-xs pt-1 border-t border-slate-800">
+                                    <a id="voice-lab-audio-dl" href="#" download class="text-emerald-400 hover:underline font-bold flex items-center gap-1">
+                                        <span>⬇️</span> <span>Download Master</span>
+                                    </a>
+                                    <a id="voice-lab-srt-dl" href="#" download class="text-indigo-400 hover:underline font-bold flex items-center gap-1">
+                                        <span>📄</span> <span>Download .SRT</span>
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Synchronized Transcript & Subtitles Box -->
+                        <div class="glass-panel p-4 rounded-xl space-y-2 border border-slate-800 flex-1">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                                <span class="text-xs font-bold text-slate-300">Synchronized Transcript & Captions</span>
+                                <span class="text-[10px] text-slate-500 font-mono">Auto-generated</span>
+                            </div>
+                            <div id="voice-lab-srt-preview" class="p-3 rounded-lg bg-slate-950 font-mono text-xs text-slate-300 max-h-48 overflow-y-auto leading-relaxed border border-slate-800/80">
+                                Directorial cues and spoken sentences will stream here upon synthesis.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div><!-- END OF MODE 2: VOICE DIRECTOR -->
+
+        <!-- MODE 3: CUSTOM SCORM 1.2 & 2004 COURSEWARE GENERATOR -->
+        <div id="mode-scorm-section" class="hidden space-y-6">
+            <div class="glass-panel rounded-2xl p-6 space-y-6 border border-indigo-500/20">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <div>
+                        <h3 class="text-base font-bold text-white flex items-center gap-2">
+                            <span>📦</span> Custom SCORM 1.2 / 2004 Courseware Generator
+                        </h3>
+                        <p class="text-xs text-slate-400">Assemble custom enterprise LMS packages with interactive video lecture, Nipuna question banks, and automatic gradebook tracking</p>
+                    </div>
+                    <span class="text-xs font-mono px-3 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        🎓 LMS Universal Conformance
+                    </span>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <!-- Left: Course Metadata & Assessment Selection (7 cols) -->
+                    <div class="lg:col-span-7 space-y-4">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Course Title</label>
+                                <input type="text" id="scorm-gen-course-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="AI Agents in FinTech: Autonomous Execution">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Course Code / Identifier</label>
+                                <input type="text" id="scorm-gen-course-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-brand-glow font-mono focus:outline-none focus:border-indigo-500" value="FINTECH_AGENTS_M1">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Module Title</label>
+                                <input type="text" id="scorm-gen-module-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="Module 1: Traditional AI vs GenAI vs Agents">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Topic / Lesson Unit</label>
+                                <input type="text" id="scorm-gen-topic" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="1.1 Traditional AI vs GenAI vs Agents">
+                            </div>
+                        </div>
+
+                        <!-- Media Source & Video Picker -->
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-300 mb-1">🎬 Attached Video Lecture</label>
+                            <select id="scorm-gen-video-select" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500">
+                                <option value="">Select a rendered video from Media Vault...</option>
+                            </select>
+                        </div>
+
+                        <!-- Item Bank & Passing Score -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">📝 Attach Assessment Item Bank</label>
+                                <select id="scorm-gen-module-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-emerald-400 font-bold focus:outline-none focus:border-indigo-500">
+                                    <option value="1">Module 1: Traditional AI vs GenAI vs Agents (32 Qs)</option>
+                                    <option value="2">Module 2: Agent Architecture & Planning (32 Qs)</option>
+                                    <option value="3">Module 3: RAG & Financial Memory (32 Qs)</option>
+                                    <option value="4">Module 4: Multi-Agent Collaboration (32 Qs)</option>
+                                    <option value="5">Module 5: Risk, Compliance & Governance (32 Qs)</option>
+                                    <option value="6">Module 6: Enterprise Deployment & Observability (32 Qs)</option>
+                                    <option value="7">Module 7: Algorithmic Execution & Trading (32 Qs)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <div class="flex justify-between text-xs font-semibold text-slate-300 mb-1">
+                                    <span>Passing Grade</span>
+                                    <span id="scorm-gen-pass-val" class="font-mono text-indigo-400 font-bold">70%</span>
+                                </div>
+                                <input id="scorm-gen-pass" type="range" min="50" max="100" step="5" value="70" oninput="document.getElementById('scorm-gen-pass-val').innerText = this.value + '%'" class="w-full accent-indigo-500 bg-slate-800 rounded-lg cursor-pointer">
+                            </div>
+                        </div>
+
+                        <!-- SCORM Standard Selector & Build Button -->
+                        <div class="flex flex-col sm:flex-row items-center justify-between gap-3 p-3.5 rounded-xl bg-indigo-950/20 border border-indigo-500/30">
+                            <div class="flex items-center space-x-2 w-full sm:w-auto">
+                                <label class="text-xs font-semibold text-indigo-300">SCORM Standard:</label>
+                                <select id="scorm-gen-version" class="rounded-lg bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
+                                    <option value="1.2" selected>SCORM 1.2 (LMS Universal Standard)</option>
+                                    <option value="2004">SCORM 2004 4th Edition</option>
+                                </select>
+                            </div>
+                            <button onclick="buildCustomScormPackage()" id="scorm-custom-build-btn" class="w-full sm:w-auto px-5 py-2 rounded-xl bg-gradient-to-r from-indigo-600 via-brand-600 to-indigo-500 hover:brightness-110 font-bold text-xs text-white shadow-lg shadow-indigo-500/20 transition-all flex items-center justify-center gap-2">
+                                <span>📦</span> <span>Build & Export SCORM Package (.zip)</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Right: Conformance Checklist & Package Vault (5 cols) -->
+                    <div class="lg:col-span-5 space-y-4">
+                        <div class="glass-panel p-4 rounded-xl space-y-3 border border-slate-800">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>🛡️</span> <span>LMS CMI Data Model Inspector</span>
+                                </h4>
+                                <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">Verified</span>
+                            </div>
+                            <div class="space-y-2 text-xs font-mono">
+                                <div class="p-2 rounded bg-slate-950 border border-slate-800 text-slate-300 flex justify-between">
+                                    <span>cmi.core.lesson_status</span>
+                                    <span class="text-emerald-400">passed / incomplete</span>
+                                </div>
+                                <div class="p-2 rounded bg-slate-950 border border-slate-800 text-slate-300 flex justify-between">
+                                    <span>cmi.core.score.raw</span>
+                                    <span class="text-brand-glow">0 – 100%</span>
+                                </div>
+                                <div class="p-2 rounded bg-slate-950 border border-slate-800 text-slate-300 flex justify-between">
+                                    <span>imsmanifest.xml</span>
+                                    <span class="text-indigo-400">Auto-Validated</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="glass-panel p-4 rounded-xl space-y-3 border border-slate-800">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>📥</span> <span>Recent SCORM Packages</span>
+                                </h4>
+                                <button onclick="fetchScormPackagesTable()" class="text-[10px] text-slate-400 hover:text-white">↻ Refresh</button>
+                            </div>
+                            <div id="scorm-packages-table" class="space-y-2 max-h-48 overflow-y-auto text-xs">
+                                <div class="text-slate-500 text-center py-4">No custom packages built yet.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div><!-- END OF MODE 3: CUSTOM SCORM -->
+
     </main>
+
+    <!-- Interactive Quiz & Item Bank Modal -->
+    <div id="quiz-modal" class="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md hidden flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl w-full max-w-5xl max-h-[92vh] flex flex-col border border-emerald-500/30 shadow-2xl shadow-emerald-500/10">
+            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <span class="text-lg">📝</span>
+                    <div>
+                        <h3 class="text-sm font-bold text-white uppercase tracking-wider">Assessment & Item Bank Matrix</h3>
+                        <span class="text-[10px] text-emerald-400">Nipuna AI Agents in FinTech 15-Hour Course &bull; 224 Questions</span>
+                    </div>
+                </div>
+                <button onclick="closeQuizModal()" class="text-slate-400 hover:text-white text-lg font-bold px-2 py-1">&times;</button>
+            </div>
+
+            <div class="p-4 border-b border-slate-800 bg-slate-950/60 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div class="flex items-center space-x-2 w-full sm:w-auto">
+                    <label class="text-xs font-semibold text-slate-300 whitespace-nowrap">Select Module:</label>
+                    <select id="quiz-module-select" onchange="loadModuleQuestions(this.value)" class="rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-brand-glow font-bold focus:outline-none focus:border-brand-500">
+                    </select>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <span id="quiz-stats-badge" class="text-xs font-mono px-3 py-1 rounded bg-slate-900 text-slate-300 border border-slate-700">32 Questions</span>
+                </div>
+            </div>
+
+            <div id="quiz-questions-list" class="p-6 overflow-y-auto space-y-4 flex-1">
+            </div>
+
+            <div class="p-4 border-t border-slate-800 flex items-center justify-between bg-slate-950/60">
+                <span class="text-xs text-slate-400">💡 Bundles automatically into your SCORM 1.2 package for LMS gradebook tracking.</span>
+                <button onclick="closeQuizModal()" class="text-xs px-5 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700">Close</button>
+            </div>
+        </div>
+    </div>
 
     <!-- Storyboard Editor Modal -->
     <div id="storyboard-modal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md hidden flex items-center justify-center p-4">
@@ -1263,6 +2400,48 @@ async def serve_dashboard():
                         🚀 Render Video from Storyboard
                     </button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Video Asset Library Modal -->
+    <div id="asset-vault-modal" class="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md hidden flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col border border-indigo-500/30 shadow-2xl shadow-indigo-500/10">
+            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <span class="text-lg">📼</span>
+                    <h3 class="text-sm font-bold text-white uppercase tracking-wider">Video Asset Vault & Media Library</h3>
+                </div>
+                <button onclick="closeAssetVaultModal()" class="text-slate-400 hover:text-white text-lg font-bold px-2 py-1">&times;</button>
+            </div>
+
+            <div class="p-6 overflow-y-auto space-y-6 flex-1">
+                <!-- Upload Box -->
+                <div class="p-5 rounded-2xl border-2 border-dashed border-indigo-500/40 bg-indigo-950/20 hover:bg-indigo-950/30 transition-all text-center space-y-2">
+                    <div class="text-2xl">📤</div>
+                    <div class="text-xs font-bold text-white">Upload Existing Videos, Screen Recordings, or Intro/Outro Bumpers</div>
+                    <p class="text-[11px] text-slate-400">Supports MP4, WebM, MOV &bull; Clips are automatically conformed to resolution & framerate</p>
+                    <div class="pt-2">
+                        <label for="asset-upload-input" class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold cursor-pointer inline-flex items-center gap-1.5 shadow-md shadow-indigo-500/20">
+                            <span>📁</span> <span>Choose Video File</span>
+                        </label>
+                        <input type="file" id="asset-upload-input" class="hidden" accept="video/mp4,video/webm,video/quicktime" onchange="handleAssetUpload(this)">
+                    </div>
+                </div>
+
+                <!-- Asset Grid -->
+                <div>
+                    <div class="flex items-center justify-between mb-3">
+                        <h4 class="text-xs font-bold text-slate-300 uppercase tracking-wider">Available Video Clips</h4>
+                        <span id="asset-count-badge" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">0 Clips</span>
+                    </div>
+                    <div id="asset-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    </div>
+                </div>
+            </div>
+
+            <div class="p-4 border-t border-slate-800 flex justify-end bg-slate-950/60">
+                <button onclick="closeAssetVaultModal()" class="text-xs px-5 py-2 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700">Close</button>
             </div>
         </div>
     </div>
@@ -1329,6 +2508,283 @@ async def serve_dashboard():
             const voiceSelect = document.getElementById('voice-select');
             const voices = LANG_VOICES[lang] || LANG_VOICES['en-US'];
             voiceSelect.innerHTML = voices.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+        }
+
+        function switchStudioMode(mode) {
+            const secVideo = document.getElementById('mode-video-section');
+            const secVoice = document.getElementById('mode-voice-section');
+            const secScorm = document.getElementById('mode-scorm-section');
+            const btnVideo = document.getElementById('mode-btn-video');
+            const btnVoice = document.getElementById('mode-btn-voice');
+            const btnScorm = document.getElementById('mode-btn-scorm');
+
+            if (!secVideo || !secVoice || !secScorm) return;
+
+            secVideo.classList.add('hidden');
+            secVoice.classList.add('hidden');
+            secScorm.classList.add('hidden');
+
+            btnVideo.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
+            btnVoice.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
+            btnScorm.className = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all";
+
+            if (mode === 'video') {
+                secVideo.classList.remove('hidden');
+                btnVideo.className = "px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all";
+            } else if (mode === 'voice') {
+                secVoice.classList.remove('hidden');
+                btnVoice.className = "px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all";
+                onVoiceLabLangChange();
+            } else if (mode === 'scorm') {
+                secScorm.classList.remove('hidden');
+                btnScorm.className = "px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-500/20 transition-all";
+                fetchScormMediaList();
+                fetchScormPackagesTable();
+            }
+        }
+
+        // ================= VOICE DIRECTOR STUDIO LOGIC =================
+        function updateVoiceLabMetrics() {
+            const text = document.getElementById('voice-lab-prompt').value.trim();
+            const words = text ? text.split(/\s+/).length : 0;
+            const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
+            const spokenMin = (words / (140 * speed)).toFixed(2);
+            document.getElementById('voice-lab-stats').innerText = `${words} words | ~${spokenMin} min`;
+        }
+
+        async function expandPromptToVoiceScript() {
+            const prompt = document.getElementById('voice-lab-prompt').value.trim();
+            if (!prompt) {
+                alert("Please enter a prompt or topic keyword first (e.g. 'Explain algorithmic dispute resolution in FinTech')");
+                return;
+            }
+            const btn = document.getElementById('voice-lab-expand-btn');
+            btn.disabled = true;
+            btn.innerHTML = "<span>⏳</span> <span>Expanding...</span>";
+            try {
+                const res = await fetch('/api/v1/voice/expand-prompt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: prompt, persona: 'maya_fintech', scenes_count: 3 })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    document.getElementById('voice-lab-prompt').value = data.expanded_script;
+                    updateVoiceLabMetrics();
+                } else {
+                    alert('AI script expansion failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('AI script expansion error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>✨</span> <span>AI Expand Prompt</span>";
+            }
+        }
+
+        function insertVoiceLabTag(tag) {
+            const ta = document.getElementById('voice-lab-prompt');
+            const start = ta.selectionStart;
+            const end = ta.selectionEnd;
+            const val = ta.value;
+            ta.value = val.substring(0, start) + tag + val.substring(end);
+            ta.focus();
+            ta.selectionStart = ta.selectionEnd = start + tag.length;
+            updateVoiceLabMetrics();
+        }
+
+        async function handleVoiceLabDocumentUpload(input) {
+            const file = input.files[0];
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/api/v1/script/upload-document', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    document.getElementById('voice-lab-prompt').value = data.extracted_text;
+                    updateVoiceLabMetrics();
+                    alert(`📄 Uploaded ${data.filename} (${data.word_count} words).`);
+                } else {
+                    alert('Upload failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('Upload error: ' + e);
+            }
+        }
+
+        function onVoiceLabLangChange() {
+            const lang = document.getElementById('voice-lab-lang').value;
+            const select = document.getElementById('voice-lab-voice');
+            const voices = LANG_VOICES[lang] || LANG_VOICES['en-US'];
+            select.innerHTML = voices.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+        }
+
+        async function auditionVoiceLab() {
+            const text = document.getElementById('voice-lab-prompt').value.trim() || "Modular NeuroClips Voice Director Studio test.";
+            const voice = document.getElementById('voice-lab-voice').value;
+            const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
+            const pitch = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const btn = document.getElementById('voice-lab-audition-btn');
+            const badge = document.getElementById('voice-lab-player-badge');
+            
+            btn.disabled = true;
+            btn.innerText = "⏳ Generating...";
+            badge.innerText = "Synthesizing...";
+            try {
+                const res = await fetch('/api/v1/preview-voice', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ voice: voice, speech_rate: speed, pitch: pitch, text: text.substring(0, 200) })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.audio_url + '?t=' + Date.now();
+                    player.play();
+                    badge.innerText = "Playing 🎧";
+                } else {
+                    alert('Audition failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('Audition error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>🎧</span> <span>Audition</span>";
+            }
+        }
+
+        async function exportVoiceLabMaster() {
+            const text = document.getElementById('voice-lab-prompt').value.trim();
+            if (!text) {
+                alert("Please enter a voice script or upload a document first.");
+                return;
+            }
+            const voice = document.getElementById('voice-lab-voice').value;
+            const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
+            const pitch = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const format = document.getElementById('voice-lab-format').value;
+            const btn = document.getElementById('voice-lab-export-btn');
+            
+            btn.disabled = true;
+            btn.innerHTML = "<span>⏳</span> <span>Exporting Master...</span>";
+            try {
+                const res = await fetch('/api/v1/voice/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text, voice: voice, speech_rate: speed, pitch: pitch, format: format })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.audio_url + '?t=' + Date.now();
+                    player.play();
+
+                    const dlBox = document.getElementById('voice-lab-download-box');
+                    dlBox.classList.remove('hidden');
+                    document.getElementById('voice-lab-audio-dl').href = data.audio_url;
+                    document.getElementById('voice-lab-audio-dl').download = data.filename;
+                    document.getElementById('voice-lab-srt-dl').href = data.srt_url;
+                    document.getElementById('voice-lab-srt-dl').download = data.srt_filename;
+                    document.getElementById('voice-lab-srt-preview').innerText = `✅ Master Audio (${data.format.toUpperCase()} ${data.size_mb} MB) generated successfully with companion subtitles!`;
+                    
+                    alert(`⚡ ${data.format.toUpperCase()} Audio Master generated (${data.size_mb} MB)!`);
+                } else {
+                    alert('Audio Export failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('Audio Export error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>⚡</span> <span>Export Audio Master</span>";
+            }
+        }
+
+        // ================= CUSTOM SCORM GENERATOR LOGIC =================
+        async function fetchScormMediaList() {
+            try {
+                const res = await fetch('/api/v1/gallery');
+                const data = await res.json();
+                const select = document.getElementById('scorm-gen-video-select');
+                if (data.videos.length > 0) {
+                    select.innerHTML = '<option value="">Select a rendered video from Media Vault...</option>' + 
+                        data.videos.map(v => `<option value="${v.filename}">${v.filename} (${v.size_mb} MB)</option>`).join('');
+                } else {
+                    select.innerHTML = '<option value="">No rendered videos found in vault (Video-free lecture mode)</option>';
+                }
+            } catch (e) {}
+        }
+
+        async function fetchScormPackagesTable() {
+            try {
+                const res = await fetch('/api/v1/scorm/packages');
+                const data = await res.json();
+                const container = document.getElementById('scorm-packages-table');
+                if (data.packages && data.packages.length > 0) {
+                    container.innerHTML = data.packages.map(p => `
+                        <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between text-xs font-mono">
+                            <div>
+                                <div class="font-bold text-slate-200 truncate w-44" title="${p.filename}">${p.filename}</div>
+                                <span class="text-[10px] text-slate-500">${p.size_mb} MB</span>
+                            </div>
+                            <a href="${p.download_url}" download class="px-2.5 py-1 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30 font-bold transition-all">
+                                ⬇️ Download
+                            </a>
+                        </div>
+                    `).join('');
+                } else {
+                    container.innerHTML = '<div class="text-slate-500 text-center py-4">No custom packages built yet.</div>';
+                }
+            } catch (e) {}
+        }
+
+        async function buildCustomScormPackage() {
+            const courseTitle = document.getElementById('scorm-gen-course-title').value.trim();
+            const courseId = document.getElementById('scorm-gen-course-id').value.trim();
+            const moduleTitle = document.getElementById('scorm-gen-module-title').value.trim();
+            const topic = document.getElementById('scorm-gen-topic').value.trim();
+            const videoFile = document.getElementById('scorm-gen-video-select').value;
+            const moduleId = parseInt(document.getElementById('scorm-gen-module-id').value) || 1;
+            const passPercentage = parseInt(document.getElementById('scorm-gen-pass').value) || 70;
+            const scormVersion = document.getElementById('scorm-gen-version').value;
+            const btn = document.getElementById('scorm-custom-build-btn');
+
+            btn.disabled = true;
+            btn.innerHTML = "<span>⏳</span> <span>Packaging SCORM...</span>";
+            try {
+                const res = await fetch('/api/v1/scorm/custom-build', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        course_title: courseTitle,
+                        course_id: courseId,
+                        module_title: moduleTitle,
+                        topic: topic,
+                        video_filename: videoFile,
+                        module_id: moduleId,
+                        pass_percentage: passPercentage,
+                        scorm_version: scormVersion
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const link = document.createElement('a');
+                    link.href = data.download_url;
+                    link.download = data.package_name;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    fetchScormPackagesTable();
+                    alert(`📦 Custom SCORM Package (${data.size_mb} MB) bundled with Module ${data.module_id} Quiz (${data.questions_count} questions) and ready for LMS!`);
+                } else {
+                    alert('SCORM Packaging failed: ' + data.detail);
+                }
+            } catch (e) {
+                alert('SCORM Packaging error: ' + e);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>📦</span> <span>Build & Export SCORM Package (.zip)</span>";
+            }
         }
 
         function renderMilestones(currentId = 'init', states = {}) {
@@ -1462,9 +2918,81 @@ async def serve_dashboard():
             }
         }
 
-        async function exportScormPackage(filename) {
+        let ACTIVE_QUIZ_MODULES = [];
+
+        async function openQuizModal() {
+            document.getElementById('quiz-modal').classList.remove('hidden');
+            await fetchQuizModules();
+        }
+
+        function closeQuizModal() {
+            document.getElementById('quiz-modal').classList.add('hidden');
+        }
+
+        async function fetchQuizModules() {
             try {
-                const res = await fetch(`/api/v1/scorm/export/${filename}`, { method: 'POST' });
+                const res = await fetch('/api/v1/quiz/modules');
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    ACTIVE_QUIZ_MODULES = data.modules;
+                    const select = document.getElementById('quiz-module-select');
+                    select.innerHTML = data.modules.map(m => `
+                        <option value="${m.module_id}">${m.title} (${m.total_questions} Qs)</option>
+                    `).join('');
+                    if (data.modules.length > 0) {
+                        loadModuleQuestions(data.modules[0].module_id);
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to fetch quiz modules", e);
+            }
+        }
+
+        async function loadModuleQuestions(moduleId) {
+            const list = document.getElementById('quiz-questions-list');
+            list.innerHTML = '<div class="text-xs text-slate-400 p-4 text-center">Loading questions...</div>';
+            try {
+                const res = await fetch(`/api/v1/quiz/module/${moduleId}`);
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const mod = ACTIVE_QUIZ_MODULES.find(m => m.module_id == moduleId);
+                    document.getElementById('quiz-stats-badge').innerText = `${data.questions.length} Questions (${mod ? mod.knowledge_count : 20} Knowledge, ${mod ? mod.scenario_count : 8} Scenario)`;
+                    renderQuizQuestions(data.questions);
+                }
+            } catch (e) {
+                list.innerHTML = '<div class="text-xs text-red-400 p-4 text-center">Failed to load questions.</div>';
+            }
+        }
+
+        function renderQuizQuestions(questions) {
+            const list = document.getElementById('quiz-questions-list');
+            list.innerHTML = questions.map((q, idx) => `
+                <div class="glass-panel p-4 rounded-xl space-y-2.5 border border-slate-800">
+                    <div class="flex items-center justify-between border-b border-slate-800/80 pb-1.5">
+                        <span class="text-xs font-bold text-brand-glow font-mono">${q.id} &bull; ${q.question_type} Check</span>
+                        <span class="text-[10px] text-slate-400 font-mono">${q.source_topic || ''}</span>
+                    </div>
+                    <p class="text-xs font-semibold text-slate-100">${idx + 1}. ${q.question}</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-xs">
+                        ${q.options.map(opt => `
+                            <div class="p-2 rounded bg-slate-900/90 border ${opt.key === q.correct_key ? 'border-emerald-500/60 bg-emerald-950/20 text-emerald-300' : 'border-slate-800 text-slate-300'}">
+                                <strong class="font-mono ${opt.key === q.correct_key ? 'text-emerald-400' : 'text-slate-400'}">${opt.key}.</strong> ${opt.text}
+                            </div>
+                        `).join('')}
+                    </div>
+                    ${q.rationale ? `
+                        <div class="p-2.5 rounded bg-slate-950 border border-slate-800 text-[11px] text-slate-400 leading-relaxed">
+                            <span class="text-brand-glow font-bold">💡 Rationale:</span> ${q.rationale}
+                        </div>
+                    ` : ''}
+                </div>
+            `).join('');
+        }
+
+        async function exportScormPackage(filename) {
+            const modId = prompt("Enter Module ID to bundle (1 to 7):", "1") || "1";
+            try {
+                const res = await fetch(`/api/v1/scorm/export/${encodeURIComponent(filename)}?module_id=${modId}`, { method: 'POST' });
                 const data = await res.json();
                 if (data.status === 'ok') {
                     const link = document.createElement('a');
@@ -1473,11 +3001,11 @@ async def serve_dashboard():
                     document.body.appendChild(link);
                     link.click();
                     document.body.removeChild(link);
-                    alert(`📦 SCORM 1.2 Package (${data.size_mb} MB) generated and downloading for LMS import!`);
+                    alert(`📦 SCORM 1.2 Package (${data.size_mb} MB) bundled with Module ${modId} Quiz (${data.questions_count} questions) and ready for LMS!`);
                 } else {
                     alert("SCORM export failed: " + data.detail);
                 }
-            } catch(e) {
+            } catch (e) {
                 alert("SCORM Export error: " + e);
             }
         }
@@ -1498,6 +3026,396 @@ async def serve_dashboard():
             } catch(e) { alert("Clear failed: " + e); }
         }
 
+        let VIDEO_ASSETS_CACHE = [];
+
+        async function fetchVideoAssets() {
+            try {
+                const res = await fetch('/api/v1/assets/videos');
+                const data = await res.json();
+                VIDEO_ASSETS_CACHE = data.assets || [];
+
+                // Update Bumper Selects
+                const introSelect = document.getElementById('intro-bumper-select');
+                const outroSelect = document.getElementById('outro-bumper-select');
+                const prevIntro = introSelect.value;
+                const prevOutro = outroSelect.value;
+
+                const optionsHtml = '<option value="">None (Direct)</option>' + 
+                    VIDEO_ASSETS_CACHE.map(a => `<option value="${a.video_url}">${a.filename} (${a.size_mb}MB)</option>`).join('');
+                
+                introSelect.innerHTML = optionsHtml;
+                outroSelect.innerHTML = optionsHtml;
+                introSelect.value = prevIntro;
+                outroSelect.value = prevOutro;
+
+                // Update Asset Vault Grid & Badge
+                const countBadge = document.getElementById('asset-count-badge');
+                if (countBadge) countBadge.innerText = `${VIDEO_ASSETS_CACHE.length} Clips`;
+
+                const grid = document.getElementById('asset-grid');
+                if (grid) {
+                    if (VIDEO_ASSETS_CACHE.length === 0) {
+                        grid.innerHTML = `<div class="col-span-3 text-center py-6 text-xs text-slate-500 bg-slate-900/40 rounded-xl border border-slate-800">
+                            No uploaded video assets yet. Use the upload box above to add MP4/WebM videos.
+                        </div>`;
+                    } else {
+                        grid.innerHTML = VIDEO_ASSETS_CACHE.map(a => `
+                            <div class="glass-panel p-2.5 rounded-xl border border-slate-800 space-y-2 flex flex-col justify-between">
+                                <div class="space-y-1.5">
+                                    <div class="relative rounded-lg overflow-hidden bg-black aspect-video flex items-center justify-center">
+                                        ${a.thumbnail_url ? `<img src="${a.thumbnail_url}" class="w-full h-full object-cover">` : `<span class="text-2xl">🎬</span>`}
+                                        <div class="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono text-white">${a.size_mb} MB</div>
+                                    </div>
+                                    <div class="text-xs font-mono text-slate-200 truncate" title="${a.filename}">${a.filename}</div>
+                                </div>
+                                <div class="flex items-center justify-between pt-1 border-t border-slate-800 text-[11px]">
+                                    <a href="${a.video_url}" target="_blank" class="text-brand-glow hover:underline">Preview</a>
+                                    <button onclick="deleteVideoAsset('${a.filename}')" class="text-red-400 hover:text-red-300">🗑️ Delete</button>
+                                </div>
+                            </div>
+                        `).join('');
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to fetch video assets:", err);
+            }
+        }
+
+        function openAssetVaultModal() {
+            fetchVideoAssets();
+            document.getElementById('asset-vault-modal').classList.remove('hidden');
+        }
+
+        function closeAssetVaultModal() {
+            document.getElementById('asset-vault-modal').classList.add('hidden');
+        }
+
+        async function handleAssetUpload(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const badge = document.getElementById('asset-count-badge');
+            if (badge) badge.innerText = 'Uploading...';
+
+            try {
+                const res = await fetch('/api/v1/assets/upload-video', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    alert(`✅ Video '${data.filename}' uploaded and ready for scene integration!`);
+                    await fetchVideoAssets();
+                } else {
+                    alert("Upload failed: " + (data.detail || "Unknown error"));
+                }
+            } catch (err) {
+                alert("Upload failed: " + err);
+            } finally {
+                input.value = '';
+            }
+        }
+
+        async function deleteVideoAsset(filename) {
+            if (!confirm(`Delete video asset ${filename}?`)) return;
+            try {
+                await fetch(`/api/v1/assets/videos/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+                await fetchVideoAssets();
+            } catch (err) {
+                alert("Failed to delete asset: " + err);
+            }
+        }
+
+        async function handleSceneVideoUpload(input, idx) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const btn = document.getElementById(`sb-upload-btn-${idx}`);
+            if (btn) btn.innerText = '⏳ Uploading...';
+
+            try {
+                const res = await fetch('/api/v1/assets/upload-video', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    await fetchVideoAssets();
+                    if (currentStoryboardData && currentStoryboardData.scenes[idx]) {
+                        currentStoryboardData.scenes[idx].video_source_type = 'uploaded_video';
+                        currentStoryboardData.scenes[idx].video_source_url = data.video_url;
+                        if (data.duration_seconds) {
+                            currentStoryboardData.scenes[idx].duration_seconds = Math.min(Math.max(Math.round(data.duration_seconds), 2), 30);
+                        }
+                    }
+                    renderStoryboardModal(currentStoryboardData);
+                } else {
+                    alert("Upload failed: " + data.detail);
+                }
+            } catch (err) {
+                alert("Scene upload failed: " + err);
+            } finally {
+                input.value = '';
+            }
+        }
+
+        async function handleScriptDocumentUpload(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/api/v1/script/upload-document', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    document.getElementById('prompt-input').value = data.content;
+                    setSceneChunk(data.suggested_scenes);
+                    updateScriptMetrics();
+                    alert(`📄 Ingested document '${data.filename}' (${data.word_count} words). Configured ${data.suggested_scenes} scene chunks!`);
+                } else {
+                    alert("Document upload failed: " + data.detail);
+                }
+            } catch (err) {
+                alert("Upload failed: " + err);
+            } finally {
+                input.value = '';
+            }
+        }
+
+        async function exportStandaloneAudio() {
+            const text = document.getElementById('prompt-input').value.trim();
+            if (!text) {
+                alert("Please enter narration text or upload a script document first.");
+                return;
+            }
+
+            const voice = document.getElementById('voice-select').value;
+            const speech_rate = parseFloat(document.getElementById('speed-slider').value) || 1.0;
+            const pitchVal = parseInt(document.getElementById('pitch-slider').value) || 0;
+            const pitch = (pitchVal >= 0 ? '+' : '') + pitchVal + 'Hz';
+            const stability = (parseFloat(document.getElementById('stability-slider').value) || 75) / 100.0;
+            const similarity_boost = (parseFloat(document.getElementById('clarity-slider').value) || 75) / 100.0;
+            const format = document.getElementById('audio-export-format').value || 'mp3';
+            const elevenKey = document.getElementById('elevenlabs-api-key').value.trim();
+            const elevenVoice = document.getElementById('elevenlabs-voice-id').value;
+
+            const btn = document.getElementById('export-audio-btn');
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳</span> <span>Synthesizing Audio Master...</span>';
+
+            const resultBox = document.getElementById('audio-export-result-box');
+            resultBox.classList.add('hidden');
+
+            try {
+                const res = await fetch('/api/v1/voice/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text,
+                        voice,
+                        speech_rate,
+                        pitch,
+                        volume: "+0%",
+                        format,
+                        voice_provider: CURRENT_VOICE_PROVIDER,
+                        elevenlabs_api_key: elevenKey,
+                        elevenlabs_voice_id: elevenVoice,
+                        stability,
+                        similarity_boost
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    // Update audio player
+                    const player = document.getElementById('director-audio-player');
+                    player.src = data.audio_url;
+                    player.play();
+
+                    // Show Download Box
+                    resultBox.classList.remove('hidden');
+                    document.getElementById('audio-export-meta').innerText = `✅ Generated ${data.format} Master (${data.size_mb} MB, ~${data.duration_seconds}s)`;
+                    const audioLnk = document.getElementById('audio-download-link');
+                    audioLnk.href = data.audio_url;
+                    audioLnk.setAttribute('download', data.filename);
+
+                    const srtLnk = document.getElementById('srt-download-link');
+                    if (data.subtitles_url) {
+                        srtLnk.href = data.subtitles_url;
+                        srtLnk.classList.remove('hidden');
+                    } else {
+                        srtLnk.classList.add('hidden');
+                    }
+                } else {
+                    alert("Audio export error: " + (data.detail || "Check voice settings"));
+                }
+            } catch (err) {
+                alert("Audio export failed: " + err);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
+
+        function insertScriptTag(tag) {
+            const textarea = document.getElementById('prompt-input');
+            const start = textarea.selectionStart || textarea.value.length;
+            const end = textarea.selectionEnd || textarea.value.length;
+            const text = textarea.value;
+            textarea.value = text.substring(0, start) + tag + text.substring(end);
+            textarea.focus();
+            textarea.selectionStart = textarea.selectionEnd = start + tag.length;
+            updateScriptMetrics();
+        }
+
+        function setSceneChunk(count) {
+            const slider = document.getElementById('scene-slider');
+            slider.value = count;
+            document.getElementById('scene-val').innerText = count + ' Scenes';
+        }
+
+        const PERSONA_CATALOG_JS = {
+            "maya_fintech": { voice: "en-IN-NeerjaNeural", eleven_voice: "21m00Tcm4TlvDq8ikWAM", pitch: "+1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Neerja) | FinTech" },
+            "alex_ai": { voice: "en-US-GuyNeural", eleven_voice: "pNInz6obpgDQGcFmaJgB", pitch: "-2Hz", speed: 1.0, badge: "🇺🇸 Caucasian | en-US (Guy) | AI Architect" },
+            "elena_compliance": { voice: "en-US-AriaNeural", eleven_voice: "EXAVITQu4vr4xnSDxMaL", pitch: "+0Hz", speed: 0.95, badge: "🇪🇸 Latina | en-US (Aria) | Governance" },
+            "david_trainer": { voice: "en-US-ChristopherNeural", eleven_voice: "TxGEqnHWrfWFTfGW9XjX", pitch: "+0Hz", speed: 1.0, badge: "🇺🇸 Global LMS | en-US (Christopher)" },
+            "rajesh_cloud": { voice: "en-IN-PrabhatNeural", eleven_voice: "ErXwobaYiN019PkySvjV", pitch: "-1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Prabhat) | Cloud" }
+        };
+
+        function onPersonaSelectChange(val) {
+            const meta = PERSONA_CATALOG_JS[val];
+            if (meta) {
+                if (document.getElementById('voice-select')) {
+                    document.getElementById('voice-select').value = meta.voice;
+                }
+                if (document.getElementById('elevenlabs-voice-id')) {
+                    document.getElementById('elevenlabs-voice-id').value = meta.eleven_voice;
+                }
+                if (document.getElementById('speed-slider')) {
+                    document.getElementById('speed-slider').value = meta.speed;
+                    document.getElementById('speed-val').innerText = meta.speed.toFixed(2) + 'x';
+                }
+                const pitchVal = parseInt(meta.pitch) || 0;
+                if (document.getElementById('pitch-slider')) {
+                    document.getElementById('pitch-slider').value = pitchVal;
+                    document.getElementById('pitch-val').innerText = (pitchVal >= 0 ? '+' : '') + pitchVal + 'Hz';
+                }
+                const badge = document.getElementById('persona-meta-badge');
+                if (badge) badge.innerText = meta.badge;
+            }
+        }
+
+        let CURRENT_VOICE_PROVIDER = 'edge_tts';
+
+        function switchVoiceEngine(provider) {
+            CURRENT_VOICE_PROVIDER = provider;
+            const btnEdge = document.getElementById('engine-tab-edgetts');
+            const btnEleven = document.getElementById('engine-tab-elevenlabs');
+            const elevenBox = document.getElementById('elevenlabs-config-box');
+
+            if (provider === 'elevenlabs') {
+                btnEleven.className = "px-2.5 py-1 rounded-md bg-amber-600 text-white font-bold transition-all";
+                btnEdge.className = "px-2.5 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+                elevenBox.classList.remove('hidden');
+                
+                // Restore saved API key and Voice ID
+                const savedKey = localStorage.getItem('neuroclips_eleven_key');
+                const savedVoice = localStorage.getItem('neuroclips_eleven_voice');
+                if (savedKey) document.getElementById('elevenlabs-api-key').value = savedKey;
+                if (savedVoice) document.getElementById('elevenlabs-voice-id').value = savedVoice;
+            } else {
+                btnEdge.className = "px-2.5 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                btnEleven.className = "px-2.5 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+                elevenBox.classList.add('hidden');
+            }
+        }
+
+        function applyVoiceArchetype(arch) {
+            const speedSlider = document.getElementById('speed-slider');
+            const pitchSlider = document.getElementById('pitch-slider');
+            const stabSlider = document.getElementById('stability-slider');
+            const clarSlider = document.getElementById('clarity-slider');
+
+            if (arch === 'executive') {
+                speedSlider.value = 0.95;
+                pitchSlider.value = -3;
+                stabSlider.value = 85;
+                clarSlider.value = 80;
+            } else if (arch === 'conversational') {
+                speedSlider.value = 1.05;
+                pitchSlider.value = 2;
+                stabSlider.value = 65;
+                clarSlider.value = 75;
+            } else if (arch === 'presenter') {
+                speedSlider.value = 1.15;
+                pitchSlider.value = 4;
+                stabSlider.value = 60;
+                clarSlider.value = 90;
+            } else { // technical
+                speedSlider.value = 1.00;
+                pitchSlider.value = 0;
+                stabSlider.value = 75;
+                clarSlider.value = 75;
+            }
+
+            document.getElementById('speed-val').innerText = parseFloat(speedSlider.value).toFixed(2) + 'x';
+            document.getElementById('pitch-val').innerText = (pitchSlider.value >= 0 ? '+' : '') + pitchSlider.value + 'Hz';
+            document.getElementById('stability-val').innerText = stabSlider.value + '%';
+            document.getElementById('clarity-val').innerText = clarSlider.value + '%';
+            updateScriptMetrics();
+        }
+
+        async function auditionVoiceDirector() {
+            const text = document.getElementById('prompt-input').value.trim() || "Welcome to Modular-NeuroClips. Auditioning neural voice director prosody and natural pacing.";
+            const voice = document.getElementById('voice-select').value;
+            const speech_rate = parseFloat(document.getElementById('speed-slider').value) || 1.0;
+            const pitchVal = parseInt(document.getElementById('pitch-slider').value) || 0;
+            const pitch = (pitchVal >= 0 ? '+' : '') + pitchVal + 'Hz';
+            const stability = (parseFloat(document.getElementById('stability-slider').value) || 75) / 100.0;
+            const similarity_boost = (parseFloat(document.getElementById('clarity-slider').value) || 75) / 100.0;
+            
+            const elevenKey = document.getElementById('elevenlabs-api-key').value.trim();
+            const elevenVoice = document.getElementById('elevenlabs-voice-id').value;
+
+            const btn = document.getElementById('audition-btn');
+            const statusLabel = document.getElementById('audition-status');
+            btn.disabled = true;
+            statusLabel.innerText = "Synthesizing...";
+
+            try {
+                const res = await fetch('/api/v1/voice-director/audition', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: text.slice(0, 300),
+                        voice,
+                        speech_rate,
+                        pitch,
+                        volume: "+0%",
+                        voice_provider: CURRENT_VOICE_PROVIDER,
+                        elevenlabs_api_key: elevenKey,
+                        elevenlabs_voice_id: elevenVoice,
+                        stability,
+                        similarity_boost
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const player = document.getElementById('director-audio-player');
+                    player.src = data.audio_url;
+                    player.play();
+                    statusLabel.innerText = `Playing (${data.provider})`;
+                } else {
+                    alert("Audition error: " + (data.detail || "Check credentials"));
+                    statusLabel.innerText = "Error";
+                }
+            } catch (err) {
+                alert("Audition failed: " + err);
+                statusLabel.innerText = "Failed";
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
         async function startGeneration() {
             const topic = document.getElementById('prompt-input').value.trim();
             if (!topic) {
@@ -1510,11 +3428,20 @@ async def serve_dashboard():
             const resolution = document.getElementById('resolution-select').value;
             const voice = document.getElementById('voice-select').value;
             const speech_rate = parseFloat(document.getElementById('speed-slider').value) || 1.0;
+            const pitchVal = parseInt(document.getElementById('pitch-slider').value) || 0;
+            const pitch = (pitchVal >= 0 ? '+' : '') + pitchVal + 'Hz';
+            const stability = (parseFloat(document.getElementById('stability-slider').value) || 75) / 100.0;
+            const similarity_boost = (parseFloat(document.getElementById('clarity-slider').value) || 75) / 100.0;
+            const elevenKey = document.getElementById('elevenlabs-api-key').value.trim();
+            const elevenVoice = document.getElementById('elevenlabs-voice-id').value;
+
             const compiler_engine = document.getElementById('engine-select').value;
             const avatar_persona = document.getElementById('avatar-persona-select').value;
             const avatar_layout = document.getElementById('avatar-layout-select').value;
             const burn_subtitles = document.getElementById('burn-subtitles-check').checked;
             const auto_clean = document.getElementById('auto-clean-check').checked;
+            const intro_video_url = document.getElementById('intro-bumper-select').value || null;
+            const outro_video_url = document.getElementById('outro-bumper-select').value || null;
 
             const btn = document.getElementById('generate-btn');
             btn.disabled = true;
@@ -1536,7 +3463,16 @@ async def serve_dashboard():
                         avatar_persona,
                         avatar_layout,
                         burn_subtitles,
-                        auto_clean
+                        auto_clean,
+                        intro_video_url,
+                        outro_video_url,
+                        pitch,
+                        volume: "+0%",
+                        voice_provider: CURRENT_VOICE_PROVIDER,
+                        elevenlabs_api_key: elevenKey,
+                        elevenlabs_voice_id: elevenVoice,
+                        stability,
+                        similarity_boost
                     })
                 });
                 const data = await res.json();
@@ -1569,6 +3505,7 @@ async def serve_dashboard():
             btn.innerHTML = '<span>⏳</span> <span>Directing...</span>';
 
             try {
+                await fetchVideoAssets();
                 const res = await fetch('/api/v1/storyboard/preview', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1596,32 +3533,81 @@ async def serve_dashboard():
 
             script.scenes.forEach((sc, idx) => {
                 const card = document.createElement('div');
+                const isVideo = sc.video_source_type === 'uploaded_video';
                 card.className = "p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-3";
+                
                 card.innerHTML = `
                     <div class="flex items-center justify-between border-b border-slate-800 pb-2">
-                        <span class="text-xs font-bold text-white flex items-center gap-1.5 font-mono">
-                            <span class="px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow">Scene #${sc.scene_id}</span>
-                        </span>
+                        <div class="flex items-center space-x-3">
+                            <span class="text-xs font-bold text-white font-mono">
+                                <span class="px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow">Scene #${sc.scene_id}</span>
+                            </span>
+                            <div class="flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
+                                <button onclick="onSceneSourceToggle(${idx}, 'ai_generated')" class="px-2.5 py-1 rounded-md transition-all ${!isVideo ? 'bg-brand-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
+                                    ✨ AI Diffusion
+                                </button>
+                                <button onclick="onSceneSourceToggle(${idx}, 'uploaded_video')" class="px-2.5 py-1 rounded-md transition-all ${isVideo ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
+                                    📼 Video Clip
+                                </button>
+                            </div>
+                        </div>
                         <button onclick="removeStoryboardScene(${idx})" class="text-red-400 hover:text-red-300 text-xs">🗑️ Remove</button>
                     </div>
+
+                    ${isVideo ? `
+                    <!-- Video Source Selector & Upload Box -->
+                    <div class="p-3 rounded-xl bg-indigo-950/20 border border-indigo-500/30 space-y-3">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                            <div>
+                                <label class="block text-slate-300 font-semibold mb-1">Select from Video Library</label>
+                                <select id="sb-videosrc-${idx}" onchange="currentStoryboardData.scenes[${idx}].video_source_url = this.value; renderStoryboardModal(currentStoryboardData);" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs">
+                                    <option value="">-- Choose a Video Asset --</option>
+                                    ${VIDEO_ASSETS_CACHE.map(a => `<option value="${a.video_url}" ${sc.video_source_url === a.video_url ? 'selected' : ''}>${a.filename} (${a.size_mb} MB)</option>`).join('')}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-slate-300 font-semibold mb-1">Or Upload Directly to This Scene</label>
+                                <div class="flex items-center space-x-2">
+                                    <label for="sb-upload-file-${idx}" id="sb-upload-btn-${idx}" class="w-full py-2 px-3 rounded-lg bg-indigo-600/30 border border-indigo-500/40 text-indigo-200 text-xs font-bold text-center cursor-pointer hover:bg-indigo-600/40 transition-all">
+                                        📁 Upload MP4 / WebM Clip
+                                    </label>
+                                    <input type="file" id="sb-upload-file-${idx}" class="hidden" accept="video/mp4,video/webm,video/quicktime" onchange="handleSceneVideoUpload(this, ${idx})">
+                                </div>
+                            </div>
+                        </div>
+                        ${sc.video_source_url ? `
+                        <div class="flex items-center space-x-3 p-2 rounded-lg bg-slate-950/80 border border-slate-800">
+                            <span class="text-emerald-400 text-xs font-bold">✔ Video Attached:</span>
+                            <span class="text-xs text-slate-300 font-mono truncate flex-1">${sc.video_source_url}</span>
+                            <a href="${sc.video_source_url}" target="_blank" class="text-xs text-brand-glow hover:underline">Preview</a>
+                        </div>
+                        ` : `
+                        <div class="text-[11px] text-amber-300/80 italic">⚠️ Please select or upload a video clip for this scene.</div>
+                        `}
+                    </div>
+                    ` : `
+                    <!-- AI Keyframe & Motion Prompts -->
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                         <div>
                             <label class="block text-slate-400 font-semibold mb-1">Visual Scene Prompt (AI Keyframe)</label>
-                            <textarea id="sb-visual-${idx}" rows="2" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs">${sc.visual_prompt}</textarea>
+                            <textarea id="sb-visual-${idx}" rows="2" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs">${sc.visual_prompt || ''}</textarea>
                         </div>
                         <div>
                             <label class="block text-slate-400 font-semibold mb-1">Motion Dynamics</label>
-                            <textarea id="sb-motion-${idx}" rows="2" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs">${sc.motion_prompt}</textarea>
+                            <textarea id="sb-motion-${idx}" rows="2" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs">${sc.motion_prompt || 'Slow cinematic push-in'}</textarea>
                         </div>
                     </div>
+                    `}
+
+                    <!-- Narration & Duration -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                         <div class="md:col-span-2">
                             <label class="block text-slate-400 font-semibold mb-1">Spoken Narration (Voice & Subtitles)</label>
-                            <input id="sb-narration-${idx}" type="text" value="${sc.narration || ''}" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs">
+                            <input id="sb-narration-${idx}" type="text" value="${sc.narration || ''}" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs" placeholder="Spoken voiceover for this shot...">
                         </div>
                         <div>
                             <label class="block text-slate-400 font-semibold mb-1">Duration (Seconds)</label>
-                            <input id="sb-duration-${idx}" type="number" value="${sc.duration_seconds || 4}" min="2" max="15" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs font-mono">
+                            <input id="sb-duration-${idx}" type="number" value="${sc.duration_seconds || 4}" min="2" max="30" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs font-mono">
                         </div>
                     </div>
                 `;
@@ -1641,7 +3627,9 @@ async def serve_dashboard():
                 visual_prompt: `Visual diagram and high-tech interface representing scene ${nextId}`,
                 motion_prompt: "Slow cinematic push-in with volumetric lighting",
                 narration: "Key lesson summary statement.",
-                duration_seconds: 4
+                duration_seconds: 4,
+                video_source_type: 'ai_generated',
+                video_source_url: ''
             });
             renderStoryboardModal(currentStoryboardData);
         }
@@ -1656,23 +3644,37 @@ async def serve_dashboard():
         async function renderFromStoryboard() {
             if (!currentStoryboardData) return;
 
-            const updatedScenes = currentStoryboardData.scenes.map((sc, idx) => ({
-                scene_id: idx + 1,
-                visual_prompt: document.getElementById(`sb-visual-${idx}`).value,
-                motion_prompt: document.getElementById(`sb-motion-${idx}`).value,
-                narration: document.getElementById(`sb-narration-${idx}`).value,
-                duration_seconds: parseFloat(document.getElementById(`sb-duration-${idx}`).value) || 4.0
-            }));
+            const updatedScenes = currentStoryboardData.scenes.map((sc, idx) => {
+                const isVideo = sc.video_source_type === 'uploaded_video';
+                return {
+                    scene_id: idx + 1,
+                    visual_prompt: (!isVideo && document.getElementById(`sb-visual-${idx}`)) ? document.getElementById(`sb-visual-${idx}`).value : (sc.visual_prompt || 'Visual presentation scene'),
+                    motion_prompt: (!isVideo && document.getElementById(`sb-motion-${idx}`)) ? document.getElementById(`sb-motion-${idx}`).value : (sc.motion_prompt || 'Cinematic pan'),
+                    narration: document.getElementById(`sb-narration-${idx}`) ? document.getElementById(`sb-narration-${idx}`).value : (sc.narration || ''),
+                    duration_seconds: parseFloat(document.getElementById(`sb-duration-${idx}`) ? document.getElementById(`sb-duration-${idx}`).value : sc.duration_seconds) || 4.0,
+                    video_source_type: sc.video_source_type || 'ai_generated',
+                    video_source_url: isVideo ? (document.getElementById(`sb-videosrc-${idx}`) ? document.getElementById(`sb-videosrc-${idx}`).value : sc.video_source_url) : ''
+                };
+            });
 
             const language = document.getElementById('language-select').value;
             const resolution = document.getElementById('resolution-select').value;
             const voice = document.getElementById('voice-select').value;
             const speech_rate = parseFloat(document.getElementById('speed-slider').value) || 1.0;
+            const pitchVal = parseInt(document.getElementById('pitch-slider').value) || 0;
+            const pitch = (pitchVal >= 0 ? '+' : '') + pitchVal + 'Hz';
+            const stability = (parseFloat(document.getElementById('stability-slider').value) || 75) / 100.0;
+            const similarity_boost = (parseFloat(document.getElementById('clarity-slider').value) || 75) / 100.0;
+            const elevenKey = document.getElementById('elevenlabs-api-key').value.trim();
+            const elevenVoice = document.getElementById('elevenlabs-voice-id').value;
+
             const compiler_engine = document.getElementById('engine-select').value;
             const avatar_persona = document.getElementById('avatar-persona-select').value;
             const avatar_layout = document.getElementById('avatar-layout-select').value;
             const burn_subtitles = document.getElementById('burn-subtitles-check').checked;
             const auto_clean = document.getElementById('auto-clean-check').checked;
+            const intro_video_url = document.getElementById('intro-bumper-select').value || null;
+            const outro_video_url = document.getElementById('outro-bumper-select').value || null;
 
             closeStoryboardModal();
 
@@ -1692,6 +3694,15 @@ async def serve_dashboard():
                         avatar_layout,
                         burn_subtitles,
                         auto_clean,
+                        intro_video_url,
+                        outro_video_url,
+                        pitch,
+                        volume: "+0%",
+                        voice_provider: CURRENT_VOICE_PROVIDER,
+                        elevenlabs_api_key: elevenKey,
+                        elevenlabs_voice_id: elevenVoice,
+                        stability,
+                        similarity_boost,
                         scenes: updatedScenes
                     })
                 });
@@ -1722,19 +3733,7 @@ async def serve_dashboard():
         }
 
         async function auditionVoice() {
-            const voice = document.getElementById('voice-select').value;
-            const rate = parseFloat(document.getElementById('speed-slider').value) || 1.0;
-            const btn = document.getElementById('audition-btn');
-            btn.innerText = '🔊 Auditioning...';
-            try {
-                const res = await fetch(`/api/v1/tts/preview?voice=${encodeURIComponent(voice)}&rate=${rate}`, { method: 'POST' });
-                const data = await res.json();
-                if (data.status === 'ok') {
-                    const audio = new Audio(data.audio_url);
-                    audio.play();
-                }
-            } catch(e) { alert("Audition failed: " + e); }
-            finally { btn.innerText = '🔊 Audition'; }
+            auditionVoiceDirector();
         }
 
         async function fetchIdentities() {
@@ -1849,8 +3848,18 @@ async def serve_dashboard():
             }
         };
 
+        const savedElevenKey = localStorage.getItem('neuroclips_eleven_key');
+        const savedElevenVoice = localStorage.getItem('neuroclips_eleven_voice');
+        if (savedElevenKey && document.getElementById('elevenlabs-api-key')) {
+            document.getElementById('elevenlabs-api-key').value = savedElevenKey;
+        }
+        if (savedElevenVoice && document.getElementById('elevenlabs-voice-id')) {
+            document.getElementById('elevenlabs-voice-id').value = savedElevenVoice;
+        }
+
         fetchGallery();
         fetchIdentities();
+        fetchVideoAssets();
         updateScriptMetrics();
     </script>
 </body>
