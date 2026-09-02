@@ -7,6 +7,9 @@ except ImportError:
     load_dotenv = None
 
 
+# Repository root. src/batch_manager.py imports this.
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 

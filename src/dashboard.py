@@ -1,9 +1,14 @@
 import os
+import re
+import subprocess
+import urllib.request
+import urllib.parse
 import time
 import json
 import uuid
 import zipfile
 import asyncio
+import threading
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, UploadFile, File
@@ -22,6 +27,7 @@ from src.pipeline import MediaGenerationEngine, VRAMGuard
 from src.compiler import compile_final_video, generate_srt_subtitles
 from src.quiz_engine import QuizEngine
 from src.scorm_packager import SCORMPackager, SCORMPackageRequest, SCORMModuleModel, SCORMLessonModel
+from src.scorm_upload import install_scorm_upload
 
 quiz_engine = QuizEngine()
 
@@ -31,6 +37,11 @@ app.mount("/static_renders", StaticFiles(directory=str(OUTPUT_DIR)), name="stati
 app.mount("/static_curriculum", StaticFiles(directory=str(CURRICULUM_OUTPUT_DIR)), name="static_curriculum")
 app.mount("/static_exports", StaticFiles(directory=str(EXPORTS_DIR)), name="static_exports")
 app.mount("/static_assets", StaticFiles(directory=str(ASSETS_DIR)), name="static_assets")
+
+# Build a SCORM package from an uploaded video or a .zip of videos.
+install_scorm_upload(app, output_dir=OUTPUT_DIR, exports_dir=EXPORTS_DIR,
+                     quiz_engine=quiz_engine)
+
 
 try:
     import psutil
@@ -242,16 +253,25 @@ def generate_voiceover_audio_sync(
             communicate = edge_tts.Communicate(formatted_text, voice, rate=rate_str, pitch=pitch, volume=volume)
             await communicate.save(str(output_path))
             
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import nest_asyncio
-                nest_asyncio.apply()
-                loop.run_until_complete(_save_tts())
-            else:
-                loop.run_until_complete(_save_tts())
-        except Exception:
-            asyncio.run(_save_tts())
+        # Run the coroutine in its own thread with its own event loop.
+        # uvicorn[standard] uses uvloop, which nest_asyncio cannot patch, and
+        # asyncio.run() refuses to nest - both previous paths raised, so no
+        # narration audio was ever produced.
+        _tts_err = {}
+
+        def _tts_runner():
+            try:
+                asyncio.run(_save_tts())
+            except Exception as exc:
+                _tts_err['err'] = exc
+
+        _t = threading.Thread(target=_tts_runner, daemon=True)
+        _t.start()
+        _t.join(timeout=180)
+        if _t.is_alive():
+            raise TimeoutError('edge-tts did not complete within 180s')
+        if 'err' in _tts_err:
+            raise _tts_err['err']
             
         if output_path.exists() and output_path.stat().st_size > 500:
             return True
@@ -329,7 +349,7 @@ def resolve_video_path(url_or_path: Optional[str]) -> Optional[str]:
         return str(alt)
     return None
 
-async def execute_tracked_generation(
+def execute_tracked_generation(
     job_id: str,
     topic: str,
     scene_count: int,
@@ -690,7 +710,7 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
         engine_type=req.compiler_engine
     )
 
-    async def _run_custom_storyboard():
+    def _run_custom_storyboard():
         job = JOBS_DB[job_id]
         engine = MediaGenerationEngine()
         res_info = RESOLUTION_PROFILES.get(req.resolution, RESOLUTION_PROFILES["16:9_hd"])
@@ -2486,6 +2506,32 @@ async def serve_dashboard():
                             </div>
                         </div>
 
+                        <!-- Upload-driven SCORM source -->
+                        <div class="rounded-xl border border-emerald-500/30 bg-emerald-950/10 p-3.5 space-y-2.5">
+                            <div class="flex items-center justify-between gap-2 flex-wrap">
+                                <label class="block text-xs font-semibold text-emerald-300">&#11014;&#65039; Or upload your own video / .zip of videos</label>
+                                <span class="text-[10px] text-slate-400 font-mono">MP4 &middot; MOV &middot; WEBM &middot; MKV &middot; ZIP</span>
+                            </div>
+                            <input type="file" id="scorm-upload-file" accept=".mp4,.mov,.webm,.mkv,.m4v,.zip"
+                                   class="w-full text-xs text-slate-300 rounded-xl bg-slate-900 border border-slate-700 p-2 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-emerald-600 file:text-white hover:file:brightness-110 cursor-pointer">
+                            <p class="text-[11px] text-slate-400 leading-relaxed">
+                                A single video becomes one SCORM lesson. A <span class="font-mono text-slate-300">.zip</span>
+                                of videos becomes a multi-lesson playlist package that reports
+                                <span class="font-mono text-slate-300">completed</span> once every clip has been watched.
+                            </p>
+                            <div class="flex items-center justify-between gap-3 flex-wrap">
+                                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                    <input type="checkbox" id="scorm-upload-quiz" checked class="accent-emerald-500 cursor-pointer">
+                                    Attach the assessment item bank selected below
+                                </label>
+                                <button onclick="buildScormFromUpload()" id="scorm-upload-btn"
+                                        class="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 font-bold text-xs text-white shadow-md shadow-emerald-500/20 transition-all flex items-center gap-2">
+                                    <span>&#128230;</span> <span>Build SCORM from Upload</span>
+                                </button>
+                            </div>
+                            <div id="scorm-upload-status" class="hidden text-xs rounded-lg p-2.5 font-mono"></div>
+                        </div>
+
                         <!-- Item Bank & Passing Score -->
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
@@ -2856,11 +2902,27 @@ async def serve_dashboard():
             select.innerHTML = voices.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
         }
 
+        // FastAPI returns 422 as {detail: [{loc, msg, type}, ...]}. Concatenating
+        // that object renders "[object Object]", which hides the actual cause.
+        function fmtApiError(data) {
+            var det = data && data.detail;
+            if (!det) return 'Unknown error';
+            if (typeof det === 'string') return det;
+            if (Array.isArray(det)) {
+                return det.map(function (e) {
+                    var where = Array.isArray(e.loc) ? e.loc.join('.') : (e.loc || '');
+                    return where ? where + ': ' + e.msg : e.msg;
+                }).join('; ');
+            }
+            try { return JSON.stringify(det); } catch (e) { return String(det); }
+        }
+
         async function auditionVoiceLab() {
             const text = document.getElementById('voice-lab-prompt').value.trim() || "Modular NeuroClips Voice Director Studio test.";
             const voice = document.getElementById('voice-lab-voice').value;
             const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
-            const pitch = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const pitchHz = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const pitch = (pitchHz >= 0 ? '+' : '') + pitchHz + 'Hz';
             const btn = document.getElementById('voice-lab-audition-btn');
             const badge = document.getElementById('voice-lab-player-badge');
             
@@ -2868,7 +2930,7 @@ async def serve_dashboard():
             btn.innerText = "⏳ Generating...";
             badge.innerText = "Synthesizing...";
             try {
-                const res = await fetch('/api/v1/preview-voice', {
+                const res = await fetch('/api/v1/voice-director/audition', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ voice: voice, speech_rate: speed, pitch: pitch, text: text.substring(0, 200) })
@@ -2880,7 +2942,7 @@ async def serve_dashboard():
                     player.play();
                     badge.innerText = "Playing 🎧";
                 } else {
-                    alert('Audition failed: ' + data.detail);
+                    alert('Audition failed: ' + fmtApiError(data));
                 }
             } catch (e) {
                 alert('Audition error: ' + e);
@@ -2898,7 +2960,8 @@ async def serve_dashboard():
             }
             const voice = document.getElementById('voice-lab-voice').value;
             const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
-            const pitch = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const pitchHz = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const pitch = (pitchHz >= 0 ? '+' : '') + pitchHz + 'Hz';
             const format = document.getElementById('voice-lab-format').value;
             const btn = document.getElementById('voice-lab-export-btn');
             
@@ -2926,7 +2989,7 @@ async def serve_dashboard():
                     
                     alert(`⚡ ${data.format.toUpperCase()} Audio Master generated (${data.size_mb} MB)!`);
                 } else {
-                    alert('Audio Export failed: ' + data.detail);
+                    alert('Audio Export failed: ' + fmtApiError(data));
                 }
             } catch (e) {
                 alert('Audio Export error: ' + e);
@@ -3029,6 +3092,57 @@ async def serve_dashboard():
 
             switchStudioMode('video');
             alert("🎨 Keyframe visual settings & character anchor applied to Director Studio!");
+        }
+
+
+        async function buildScormFromUpload() {
+            const input = document.getElementById('scorm-upload-file');
+            const box = document.getElementById('scorm-upload-status');
+            if (!input.files || !input.files.length) {
+                alert('Choose a video file or a .zip of videos first.');
+                return;
+            }
+            const fd = new FormData();
+            fd.append('file', input.files[0]);
+            fd.append('course_title', document.getElementById('scorm-gen-course-title').value.trim() || 'Untitled Course');
+            fd.append('course_id', document.getElementById('scorm-gen-course-id').value.trim() || 'COURSE');
+            fd.append('module_title', document.getElementById('scorm-gen-module-title').value.trim() || 'Module 1');
+            fd.append('topic', document.getElementById('scorm-gen-topic').value.trim());
+            fd.append('module_id', document.getElementById('scorm-gen-module-id').value || '1');
+            fd.append('pass_percentage', document.getElementById('scorm-gen-pass').value || '70');
+            fd.append('scorm_version', document.getElementById('scorm-gen-version').value || '1.2');
+            fd.append('include_quiz', document.getElementById('scorm-upload-quiz').checked ? 'true' : 'false');
+
+            const btn = document.getElementById('scorm-upload-btn');
+            const orig = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span>&#9203;</span> <span>Packaging...</span>';
+            box.className = 'text-xs rounded-lg p-2.5 font-mono bg-slate-900 border border-slate-700 text-slate-300';
+            box.innerText = 'Uploading and building the package. Large archives take a while.';
+
+            try {
+                const res = await fetch('/api/v1/scorm/build-from-upload', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    box.className = 'text-xs rounded-lg p-2.5 font-mono bg-emerald-950/30 border border-emerald-500/40 text-emerald-300';
+                    box.innerHTML = '&#9989; ' + data.package_name + ' &middot; ' + data.size_mb + ' MB &middot; ' +
+                        data.video_count + ' video(s)' +
+                        (data.questions_count ? ' &middot; ' + data.questions_count + ' questions' : '') +
+                        ' &nbsp; <a class="underline font-bold" href="' + data.download_url +
+                        '" download="' + data.package_name + '">Download</a>';
+                    if (typeof fetchScormPackagesTable === 'function') fetchScormPackagesTable();
+                } else {
+                    box.className = 'text-xs rounded-lg p-2.5 font-mono bg-rose-950/30 border border-rose-500/40 text-rose-300';
+                    box.innerText = '\u274c ' + fmtApiError(data);
+                }
+            } catch (e) {
+                box.className = 'text-xs rounded-lg p-2.5 font-mono bg-rose-950/30 border border-rose-500/40 text-rose-300';
+                box.innerText = '\u274c ' + e;
+            } finally {
+                box.classList.remove('hidden');
+                btn.disabled = false;
+                btn.innerHTML = orig;
+            }
         }
 
         // ================= CUSTOM SCORM GENERATOR LOGIC =================
