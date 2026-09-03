@@ -26,7 +26,8 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pydantic fastapi openpyxl edge-tts pillow pytest
+          pip install pydantic fastapi openpyxl edge-tts pillow pytest python-dotenv
+
 
       - name: Test Contract Imports & Agent Instantiation
         run: |
