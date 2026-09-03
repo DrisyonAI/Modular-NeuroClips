@@ -49,7 +49,7 @@ reviews:
       instructions: "Verify zero-dependency fallback (JSON loader), HTML5 SCORM player script safety, correct option parsing, and accurate CMI data model mapping (cmi.core.score.raw, cmi.core.lesson_status)."
 
     - path: "src/dashboard.py"
-      instructions: "Check FastAPI route signatures, background tasks safety, clean exception handling, and responsive Tailwind CSS layout integrity across all three studio workbenches."
+      instructions: "Check FastAPI route signatures, background tasks safety, clean exception handling, and responsive Tailwind CSS layout integrity across all four studio workbenches: Director Studio, Voice Director Studio, Image Director Studio, and SCORM & LMS Generator with external video upload."
 
 chat:
   auto_reply: true

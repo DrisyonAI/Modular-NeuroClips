@@ -40,3 +40,7 @@ jobs:
       - name: Test SCORM Package Generation
         run: |
           python -c "from src.quiz_engine import QuizEngine; qe = QuizEngine(); html = qe.generate_interactive_scorm_html('sample.mp4', 1, 70); assert 'cmi.core.lesson_status' in html, 'SCORM CMI tracking missing'; print('SCORM HTML5 Player validated.')"
+
+      - name: Run Quality & Multi-Studio Workflow Suite
+        run: |
+          python test_quality_workflows.py

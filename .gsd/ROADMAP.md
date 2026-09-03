@@ -15,8 +15,10 @@
 - [x] Hierarchical multi-agent topology (`DirectorAgent`, `ScriptwriterAgent`, `VoiceDirectorAgent`, `ImageGeneratorAgent`).
 - [x] Pydantic `PersonaIdentityContract` catalog (Maya, Alex, Elena, David, Rajesh).
 - [x] 224-question assessment engine (`QuizEngine`) across Modules 1–7 from Nipuna Course v3.
-- [x] Dedicated **Voice Director Studio** with AI Prompt Expansion and sample audition player.
-- [x] Dedicated **Custom SCORM & LMS Generator** with CMI data model inspector.
+- [x] Dedicated **Voice Director Studio** with AI Prompt Expansion, prosody controls, and multi-format audition player.
+- [x] Dedicated **Image Director Studio** with visual keyframe synthesis, style presets, and continuity anchors.
+- [x] Dedicated **Custom SCORM & LMS Generator** with external video ingestion, curriculum metadata mapping, and CMI data model inspector.
+- [x] Automated multi-agent workflow test suite (`test_quality_workflows.py`).
 
 ## Phase 4: Next-Horizon Features (In Progress 🚀)
 - [ ] **Interactive Branching Scenarios**: Decision-tree module execution based on learner quiz performance.
