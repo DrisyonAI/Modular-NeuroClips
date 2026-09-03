@@ -118,16 +118,22 @@ class VoiceDirectorAgent:
                 comm = edge_tts.Communicate(clean_text, voice, rate=rate_str, pitch=pitch, volume="+0%")
                 await comm.save(str(output_path))
 
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import nest_asyncio
-                    nest_asyncio.apply()
-                    loop.run_until_complete(_run_edge())
-                else:
-                    loop.run_until_complete(_run_edge())
-            except Exception:
-                asyncio.run(_run_edge())
+            _tts_err = {}
+
+            def _tts_runner():
+                try:
+                    asyncio.run(_run_edge())
+                except Exception as exc:
+                    _tts_err["err"] = exc
+
+            import threading
+            t = threading.Thread(target=_tts_runner, daemon=True)
+            t.start()
+            t.join(timeout=180)
+            if t.is_alive():
+                print("[VoiceDirector Error] edge-tts synthesis timed out after 180s")
+            elif "err" in _tts_err:
+                print(f"[Edge-TTS Error] {_tts_err['err']}")
 
             return output_path.exists() and output_path.stat().st_size > 500
         except Exception as e:
