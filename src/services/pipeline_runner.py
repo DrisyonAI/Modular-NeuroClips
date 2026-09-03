@@ -1,4 +1,4 @@
-﻿"""
+"""
 Unified pipeline execution runner.
 Deduplicates generation logic across direct prompt and custom storyboard workflows.
 """
@@ -41,6 +41,9 @@ def run_production_pipeline(
     stability: float = 0.75,
     similarity_boost: float = 0.75,
     topic: Optional[str] = None,
+    output_type: str = "video",
+    motion_graphics: bool = True,
+    background_music: bool = False,
 ) -> None:
     """Executes full production workflow for a given job and scene list."""
     job = job_manager.get_job(job_id)
@@ -83,6 +86,8 @@ def run_production_pipeline(
             vis_prompt = scene.get("visual_prompt", "")
             mot_prompt = scene.get("motion_prompt", "Slow cinematic camera pan")
             scene_id = scene.get("scene_id", idx)
+            scene_output_type = scene.get("output_type") or output_type
+            scene_motion = scene.get("motion_graphics", motion_graphics)
 
             resolved_v_path = resolve_video_path(v_url) if (v_type == "uploaded_video" and v_url) else None
 
@@ -105,6 +110,35 @@ def run_production_pipeline(
                 )
                 clip_paths.append(clip_path)
                 job["clip_paths"] = clip_paths
+
+            elif scene_output_type == "slide":
+                # Static instructional slide scene for educational/course content
+                base_p = 30 + int(((idx - 0.5) / total) * 35)
+                job_manager.log_milestone(
+                    job_id, "keyframes", f"Composing instructional slide {idx}/{total}...", base_p, f"Scene {idx}: Instructional Slide -> {vis_prompt[:50]}..."
+                )
+                kf_path = str(OUTPUT_DIR / f"scene_{scene_id}_{job_id}_slide.png")
+                slide_title = scene.get("title") or f"Concept #{scene_id}: {title[:30]}"
+                engine.generate_instructional_slide(
+                    title=slide_title,
+                    content=vis_prompt or scene.get("narration", "") or title,
+                    output_path=Path(kf_path),
+                    resolution=resolution
+                )
+                keyframe_paths.append(kf_path)
+                job["keyframe_paths"] = keyframe_paths
+
+                anim_p = 30 + int((idx / total) * 35)
+                job_manager.log_milestone(
+                    job_id, "animation", f"Rendering slide presentation {idx}/{total}...", anim_p, f"Scene {idx}: Static instructional slide ({dur}s)"
+                )
+                clip_path = engine.generate_video_clip(
+                    kf_path, mot_prompt, scene_id, job_id=job_id, width=width, height=height,
+                    force_refresh=True, motion_graphics=scene_motion, duration_sec=dur
+                )
+                clip_paths.append(clip_path)
+                job["clip_paths"] = clip_paths
+
             else:
                 base_p = 30 + int(((idx - 0.5) / total) * 35)
                 job_manager.log_milestone(
@@ -122,7 +156,8 @@ def run_production_pipeline(
                     job_id, "animation", f"Animating scene {idx}/{total}...", anim_p, f"Scene {idx}: Motion -> {mot_prompt[:50]}..."
                 )
                 clip_path = engine.generate_video_clip(
-                    kf_path, mot_prompt, scene_id, job_id=job_id, width=width, height=height, force_refresh=True
+                    kf_path, mot_prompt, scene_id, job_id=job_id, width=width, height=height,
+                    force_refresh=True, motion_graphics=scene_motion, duration_sec=dur
                 )
                 clip_paths.append(clip_path)
                 job["clip_paths"] = clip_paths
@@ -150,28 +185,38 @@ def run_production_pipeline(
         if tts_ok:
             job["audio_paths"] = [str(audio_file)]
             job_manager.log_milestone(
-                job_id, "voiceover", "Voiceover synthesized successfully", 80, f"Generated voice audio: {audio_file.name} ({audio_file.stat().st_size / 1024:.1f} KB)"
+                job_id,
+                "voiceover",
+                "Voiceover synthesized successfully",
+                80,
+                f"Generated voice audio: {audio_file.name} ({audio_file.stat().st_size / 1024:.1f} KB)",
             )
         else:
-            job_manager.log_milestone(job_id, "voiceover", "Audio generated (silent mode)", 80, "No TTS audio generated")
+            job_manager.log_milestone(
+                job_id, "voiceover", "Audio generated (silent mode)", 80, "No TTS audio generated"
+            )
 
         # SRT SUBTITLE GENERATION
         srt_file = OUTPUT_DIR / f"subtitles_{job_id}.srt"
         scenes_data = [
             {
-                "scene_id": sc.get("scene_id", i),
+                "scene_id": sc.get("scene_id", i + 1),
                 "narration": sc.get("narration", "") or sc.get("visual_prompt", ""),
                 "visual_prompt": sc.get("visual_prompt", ""),
                 "duration_seconds": sc.get("duration_seconds", 4),
             }
-            for i, sc in enumerate(scenes, start=1)
+            for i, sc in enumerate(scenes)
         ]
-        generate_srt_subtitles(scenes_data, srt_file, width=width, height=height)
+        generate_srt_subtitles(scenes_data, srt_file)
         job["srt_path"] = str(srt_file)
 
         # MILESTONE 5: COMPILATION
         job_manager.log_milestone(
-            job_id, "compilation", f"Compiling via {compiler_engine.upper()} engine...", 88, f"Executing multi-layer compositing (subtitles: {burn_subtitles}, avatar: {avatar_persona})"
+            job_id,
+            "compilation",
+            f"Compiling via {compiler_engine.upper()} engine...",
+            88,
+            f"Executing multi-layer compositing (subtitles: {burn_subtitles}, avatar: {avatar_persona}, bgm: {background_music})",
         )
         output_filename = f"prod_{job_id}_{int(time.time())}.mp4"
         audio_param = str(audio_file) if (audio_file.exists() and audio_file.stat().st_size > 100) else None
@@ -212,6 +257,7 @@ def run_production_pipeline(
             outro_video_path=resolve_video_path(outro_video_url),
             width=width,
             height=height,
+            background_music=background_music,
         )
 
         # MILESTONE 6: COMPLETE

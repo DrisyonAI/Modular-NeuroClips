@@ -106,6 +106,10 @@ def execute_tracked_generation(
     elevenlabs_voice_id: Optional[str] = None,
     stability: float = 0.75,
     similarity_boost: float = 0.75,
+    output_type: str = "video",
+    motion_graphics: bool = True,
+    background_music: bool = False,
+    chunking_mode: str = "auto",
 ):
     job = job_manager.get_job(job_id)
     if not job:
@@ -149,6 +153,8 @@ def execute_tracked_generation(
                 "duration_seconds": sc.duration_seconds,
                 "video_source_type": getattr(sc, "video_source_type", "ai_generated"),
                 "video_source_url": getattr(sc, "video_source_url", ""),
+                "output_type": getattr(sc, "output_type", output_type),
+                "title": getattr(sc, "title", f"Scene {sc.scene_id}"),
             }
             for sc in script.scenes
         ]
@@ -177,6 +183,9 @@ def execute_tracked_generation(
             stability=stability,
             similarity_boost=similarity_boost,
             topic=topic,
+            output_type=output_type,
+            motion_graphics=motion_graphics,
+            background_music=background_music,
         )
     except Exception as exc:
         job_manager.fail_job(job_id, str(exc))
@@ -207,6 +216,10 @@ class GenerationRequest(BaseModel):
     elevenlabs_voice_id: Optional[str] = None
     stability: Optional[float] = 0.75
     similarity_boost: Optional[float] = 0.75
+    output_type: Optional[str] = "video"
+    motion_graphics: Optional[bool] = True
+    background_music: Optional[bool] = False
+    chunking_mode: Optional[str] = "auto"
     speaker_script: Optional[str] = None
     trainee_reading_material: Optional[str] = None
     visuals_recommended: Optional[str] = None
@@ -247,6 +260,9 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         "compiler_engine": req.compiler_engine or "ffmpeg",
         "burn_subtitles": req.burn_subtitles,
         "auto_clean": req.auto_clean,
+        "output_type": req.output_type or "video",
+        "motion_graphics": req.motion_graphics if req.motion_graphics is not None else True,
+        "background_music": req.background_music if req.background_music is not None else False,
         "asset_status": "Synthesizing",
         "script_words": word_count,
         "spoken_min": spoken_min,
@@ -276,7 +292,11 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         elevenlabs_api_key=req.elevenlabs_api_key,
         elevenlabs_voice_id=req.elevenlabs_voice_id,
         stability=req.stability or 0.75,
-        similarity_boost=req.similarity_boost or 0.75
+        similarity_boost=req.similarity_boost or 0.75,
+        output_type=req.output_type or "video",
+        motion_graphics=req.motion_graphics if req.motion_graphics is not None else True,
+        background_music=req.background_music if req.background_music is not None else False,
+        chunking_mode=req.chunking_mode or "auto"
     )
     
     return {"status": "started", "job_id": job_id, "topic": req.topic, "scenes": req.scenes, "meta": job["curriculum_meta"]}
@@ -286,6 +306,8 @@ class StoryboardPreviewRequest(BaseModel):
     scenes: int = 3
     art_style: str = "Cinematic 35mm (Volumetric Lighting)"
     avatar_persona: str = "maya_fintech"
+    output_type: Optional[str] = "video"
+    chunking_mode: Optional[str] = "auto"
 
 @app.post("/api/v1/storyboard/preview")
 async def preview_storyboard_api(req: StoryboardPreviewRequest):
@@ -296,7 +318,11 @@ async def preview_storyboard_api(req: StoryboardPreviewRequest):
         art_style=req.art_style,
         avatar_persona=req.avatar_persona
     )
-    return {"status": "ok", "script": script.model_dump() if hasattr(script, "model_dump") else script.dict()}
+    script_dict = script.model_dump() if hasattr(script, "model_dump") else script.dict()
+    for sc in script_dict.get("scenes", []):
+        if "output_type" not in sc:
+            sc["output_type"] = req.output_type or "video"
+    return {"status": "ok", "script": script_dict}
 
 class FromStoryboardRequest(BaseModel):
     title: str
@@ -319,6 +345,9 @@ class FromStoryboardRequest(BaseModel):
     elevenlabs_voice_id: Optional[str] = None
     stability: Optional[float] = 0.75
     similarity_boost: Optional[float] = 0.75
+    output_type: Optional[str] = "video"
+    motion_graphics: Optional[bool] = True
+    background_music: Optional[bool] = False
     scenes: List[Dict[str, Any]]
 
 @app.post("/api/v1/generate/from-storyboard")
@@ -375,6 +404,9 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
             stability=req.stability or 0.75,
             similarity_boost=req.similarity_boost or 0.75,
             topic=full_narration or req.title,
+            output_type=req.output_type or "video",
+            motion_graphics=req.motion_graphics if req.motion_graphics is not None else True,
+            background_music=req.background_music if req.background_music is not None else False,
         )
 
     background_tasks.add_task(_run_custom_storyboard)
@@ -1200,27 +1232,35 @@ async def serve_dashboard():
 
             <!-- LEFT: Generation Studio (7 cols) -->
             <div class="lg:col-span-7 space-y-6">
-                <div class="glass-panel rounded-2xl p-6 space-y-5">
+                <div class="glass-panel rounded-2xl p-6 space-y-6">
                     <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-                        <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                            <span>🎬</span> Director Studio & Curriculum Matrix
-                        </h3>
-                        <span class="text-xs text-brand-glow bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/20">Prompt-to-Visual AI Synthesis</span>
+                        <div>
+                            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
+                                <span>🎬</span> Director Studio
+                            </h3>
+                            <p class="text-[11px] text-slate-400 mt-0.5">Central learning content production & configuration workspace</p>
+                        </div>
+                        <span class="text-xs text-brand-glow bg-brand-500/10 px-2.5 py-1 rounded-lg border border-brand-500/20 font-mono">
+                            AI Production Engine
+                        </span>
                     </div>
 
-                    <!-- Speaker Script Input with Director Toolbar & Document Ingestion -->
-                    <div class="space-y-1.5">
+                    <!-- STEP 1: SCRIPT INPUT / SCRIPT EDITOR -->
+                    <div class="space-y-2">
                         <div class="flex justify-between items-center">
-                            <label class="text-xs font-semibold text-slate-300">Speaker Script (Narration & Directorial Cues)</label>
+                            <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                <span class="w-4 h-4 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold">1</span>
+                                <span>Master Script Input</span>
+                            </label>
                             <div class="flex items-center space-x-3">
-                                <label for="script-file-upload" class="text-[10px] text-brand-glow hover:underline cursor-pointer flex items-center gap-1 font-sans">
+                                <label for="script-file-upload" class="text-[11px] text-brand-glow hover:underline cursor-pointer flex items-center gap-1 font-sans">
                                     <span>📁</span> <span>Upload Document (.txt, .md, .srt)</span>
                                 </label>
                                 <input type="file" id="script-file-upload" class="hidden" accept=".txt,.md,.srt,.vtt,.json" onchange="handleScriptDocumentUpload(this)">
-                                <span id="script-stats" class="text-[11px] font-mono text-brand-glow">0 words | ~0.0 min</span>
+                                <span id="script-stats" class="text-[11px] font-mono text-brand-glow bg-slate-900 px-2 py-0.5 rounded border border-slate-800">0 words | ~0.0 min</span>
                             </div>
                         </div>
-                        
+
                         <!-- Director Quick Insert Toolbar -->
                         <div class="flex items-center space-x-1.5 overflow-x-auto py-1 text-[11px]">
                             <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Director Cues:</span>
@@ -1238,26 +1278,75 @@ async def serve_dashboard():
                             </button>
                         </div>
 
-                        <textarea id="prompt-input" rows="4" oninput="updateScriptMetrics()" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all font-sans" placeholder="Enter lecture topic or upload a text file (e.g. In this session, [pause 500ms] we explore algorithmic liquidity and automated dispute settlement with AI agents)..."></textarea>
+                        <textarea id="prompt-input" rows="5" oninput="updateScriptMetrics()" class="w-full rounded-xl bg-slate-950/90 border border-slate-700/80 p-3.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all font-sans leading-relaxed shadow-inner" placeholder="Enter or paste your full production script here (e.g. In this session, [pause 500ms] we examine algorithmic liquidity and automated dispute settlement with AI agents)..."></textarea>
                     </div>
 
-                    <!-- Language, Resolution, Style, and Chunking Scenes -->
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div>
-                            <label class="block text-xs font-semibold text-slate-300 mb-1">🌐 Language & Dubbing</label>
-                            <select id="language-select" onchange="onLanguageChange()" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
-                                <option value="en-US" selected>🇺🇸 English (US)</option>
-                                <option value="te-IN">🇮🇳 Telugu (తెలుగు)</option>
-                                <option value="ta-IN">🇮🇳 Tamil (தமிழ்)</option>
-                                <option value="hi-IN">🇮🇳 Hindi (हिन्दी)</option>
-                                <option value="es-ES">🇪🇸 Spanish (Castilian)</option>
-                                <option value="fr-FR">🇫🇷 French (Standard)</option>
-                                <option value="de-DE">🇩🇪 German (Standard)</option>
-                                <option value="ja-JP">🇯🇵 Japanese (日本語)</option>
-                            </select>
+                    <!-- STEP 2: OUTPUT TYPE — VIDEO OR SLIDE -->
+                    <div class="p-3.5 rounded-xl bg-slate-950/80 border border-brand-500/20 space-y-2.5">
+                        <div class="flex items-center justify-between">
+                            <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                <span class="w-4 h-4 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold">2</span>
+                                <span>Output Type — Video or Instructional Slide</span>
+                            </label>
+                            <span class="text-[10px] text-slate-400">Can also be customized per scene in Storyboard</span>
                         </div>
-                        <div>
-                            <label class="block text-xs font-semibold text-slate-300 mb-1">Video Dimensions / Aspect Ratio</label>
+
+                        <!-- Segmented Output Selector Cards -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <div id="output-card-video" onclick="setDirectorOutputType('video')" class="p-3 rounded-xl bg-brand-500/15 border-2 border-brand-500 cursor-pointer transition-all hover:brightness-110">
+                                <div class="flex items-center justify-between mb-1">
+                                    <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                                        <span>🎬</span> <span>Video Scene Mode</span>
+                                    </span>
+                                    <span id="output-badge-video" class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-brand-500 text-white font-mono">ACTIVE</span>
+                                </div>
+                                <p class="text-[11px] text-slate-300 leading-snug">
+                                    Dynamic visuals, camera motion, and avatar presenter. Best for demonstrations, b-roll, and narrative visual sequences.
+                                </p>
+                            </div>
+
+                            <div id="output-card-slide" onclick="setDirectorOutputType('slide')" class="p-3 rounded-xl bg-slate-900 border-2 border-slate-800 cursor-pointer transition-all hover:border-slate-700 hover:brightness-110">
+                                <div class="flex items-center justify-between mb-1">
+                                    <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                                        <span>📊</span> <span>Instructional Slide Mode</span>
+                                    </span>
+                                    <span id="output-badge-slide" class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono hidden">ACTIVE</span>
+                                </div>
+                                <p class="text-[11px] text-slate-400 leading-snug">
+                                    Clean static instructional slide with key takeaway bullet points & diagrams while avatar explains the concept.
+                                </p>
+                            </div>
+                        </div>
+                        <input type="hidden" id="output-type-select" value="video">
+                    </div>
+
+                    <!-- STEP 3 & STEP 4: RESOLUTION / ASPECT RATIO & SCENE CHUNKING -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <!-- Step 3: Format & Aspect Ratio -->
+                        <div class="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                            <div class="flex items-center justify-between">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                    <span class="w-4 h-4 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold">3</span>
+                                    <span>Resolution & Aspect Ratio</span>
+                                </label>
+                            </div>
+
+                            <!-- Aspect Ratio Quick Switcher Pills -->
+                            <div class="grid grid-cols-4 gap-1.5 text-[11px]">
+                                <button type="button" onclick="setAspectPreset('16:9_hd')" id="aspect-btn-16-9" class="py-1 px-1.5 rounded-lg bg-brand-600 text-white font-bold text-center border border-brand-500 transition-all">
+                                    16:9 ▭
+                                </button>
+                                <button type="button" onclick="setAspectPreset('9:16_vertical')" id="aspect-btn-9-16" class="py-1 px-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 font-semibold text-center border border-slate-800 transition-all">
+                                    9:16 ▯
+                                </button>
+                                <button type="button" onclick="setAspectPreset('1:1_square')" id="aspect-btn-1-1" class="py-1 px-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 font-semibold text-center border border-slate-800 transition-all">
+                                    1:1 ▢
+                                </button>
+                                <button type="button" onclick="setAspectPreset('4:5_portrait')" id="aspect-btn-4-5" class="py-1 px-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 font-semibold text-center border border-slate-800 transition-all">
+                                    4:5 ▰
+                                </button>
+                            </div>
+
                             <select id="resolution-select" onchange="updateAspectPreview()" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
                                 <optgroup label="▭ Landscape — 16:9">
                                     <option value="16:9_hd" data-w="1280" data-h="720" data-orient="Landscape" selected>YouTube / Course Video — 16:9 HD (1280×720)</option>
@@ -1272,25 +1361,45 @@ async def serve_dashboard():
                                     <option value="1:1_square" data-w="720" data-h="720" data-orient="Square">Instagram / Social Feed Post — 1:1 (720×720)</option>
                                     <option value="1:1_hd" data-w="1080" data-h="1080" data-orient="Square">Instagram / Social Feed Post — 1:1 HD (1080×1080)</option>
                                 </optgroup>
+                                <optgroup label="▰ Portrait Feed — 4:5">
+                                    <option value="4:5_portrait" data-w="1080" data-h="1350" data-orient="Portrait">Instagram / LinkedIn Portrait Feed — 4:5 (1080×1350)</option>
+                                    <option value="4:5_sd" data-w="576" data-h="720" data-orient="Portrait">Fast Portrait Preview — 4:5 (576×720)</option>
+                                </optgroup>
                             </select>
-                            <div class="flex items-center gap-2.5 mt-1.5">
-                                <div class="flex items-center justify-center w-11 h-11 flex-shrink-0">
+
+                            <div class="flex items-center gap-2.5 mt-1">
+                                <div class="flex items-center justify-center w-10 h-10 flex-shrink-0 bg-slate-900 rounded-lg border border-slate-800">
                                     <div id="aspect-preview-box" class="border-2 border-brand-500/70 bg-brand-500/10 rounded-[3px] transition-all"
-                                         style="width:40px;height:22.5px;"></div>
+                                         style="width:36px;height:20.25px;"></div>
                                 </div>
                                 <p id="aspect-preview-label" class="text-[11px] text-slate-400 leading-snug">
-                                    <span class="font-mono text-brand-glow font-bold">1280×720</span>
-                                    · Landscape · every scene, caption and avatar is composed for this frame.
+                                    <span class="font-mono text-brand-glow font-bold">1280×720</span> · Landscape
                                 </p>
                             </div>
                         </div>
-                        <div>
-                            <div class="flex justify-between text-xs font-semibold text-slate-300 mb-1">
-                                <span>Scene Chunking (#)</span>
-                                <span id="scene-val" class="font-mono text-brand-glow font-bold">4 Scenes</span>
+
+                        <!-- Step 4: Scene Chunking -->
+                        <div class="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                            <div class="flex items-center justify-between">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                    <span class="w-4 h-4 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold">4</span>
+                                    <span>Scene Chunking</span>
+                                </label>
+                                <span id="scene-val" class="font-mono text-brand-glow font-bold text-xs">4 Scenes</span>
                             </div>
+
+                            <div class="flex rounded-lg bg-slate-900 p-0.5 border border-slate-800 text-[11px]">
+                                <button type="button" id="chunk-mode-auto" onclick="setChunkingMode('auto')" class="w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
+                                    🤖 AI Smart Chunking
+                                </button>
+                                <button type="button" id="chunk-mode-manual" onclick="setChunkingMode('manual')" class="w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all">
+                                    🎯 Target Scene Count
+                                </button>
+                            </div>
+                            <input type="hidden" id="chunking-mode-input" value="auto">
+
                             <input id="scene-slider" type="range" min="1" max="16" value="4" oninput="document.getElementById('scene-val').innerText = this.value + ' Scenes'" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
-                            <div class="flex items-center justify-between text-[10px] text-slate-400 mt-1">
+                            <div class="flex items-center justify-between text-[10px] text-slate-400">
                                 <button type="button" onclick="setSceneChunk(3)" class="hover:text-brand-glow">Shorts (3)</button>
                                 <button type="button" onclick="setSceneChunk(6)" class="hover:text-brand-glow">Standard (6)</button>
                                 <button type="button" onclick="setSceneChunk(10)" class="hover:text-brand-glow">Deep (10)</button>
@@ -1299,71 +1408,14 @@ async def serve_dashboard():
                         </div>
                     </div>
 
-                    <!-- Speaker Avatar Persona & Persistent Identity Row -->
-                    <div class="p-3.5 rounded-xl bg-slate-950/80 border border-brand-500/20 space-y-3">
-                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
-                            <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                                <span>👤</span> <span>Speaker Avatar & Persistent Identity</span>
-                            </span>
-                            <div class="flex items-center space-x-2">
-                                <select id="identity-load-select" onchange="loadSelectedIdentity(this.value)" class="rounded bg-slate-900 border border-slate-700 text-[10px] text-slate-300 p-1">
-                                    <option value="">📂 Load Identity Profile...</option>
-                                </select>
-                                <button onclick="saveCurrentIdentity()" class="text-[10px] px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow border border-brand-500/30 hover:bg-brand-500/30 transition-all">
-                                    💾 Save
-                                </button>
-                            </div>
-                        </div>
-
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                            <div>
-                                <div class="flex justify-between items-center mb-1">
-                                    <label class="text-xs font-semibold text-slate-300">Avatar Persona</label>
-                                    <label for="avatar-file-input" class="text-[10px] text-brand-glow hover:underline cursor-pointer flex items-center gap-0.5">
-                                        <span>📸</span> <span>Upload Photo</span>
-                                    </label>
-                                    <input type="file" id="avatar-file-input" class="hidden" accept="image/*" onchange="uploadAvatar(this)">
-                                </div>
-                                <select id="avatar-persona-select" onchange="onPersonaSelectChange(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                    <option value="maya_fintech" selected>Maya (Senior FinTech Lead)</option>
-                                    <option value="alex_ai">Alex (Enterprise AI Architect)</option>
-                                    <option value="elena_compliance">Elena (Risk & Governance Director)</option>
-                                    <option value="david_trainer">David (Global LMS Instructor)</option>
-                                    <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
-                                    <option value="custom_upload">Custom Uploaded Portrait</option>
-                                </select>
-                                <span id="persona-meta-badge" class="text-[10px] text-brand-glow font-mono block mt-1">🇮🇳 South Asian | en-IN (Neerja) | FinTech</span>
-                            </div>
-
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Avatar Display Layout</label>
-                                <select id="avatar-layout-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                    <option value="pip_bottom_right">PiP Floating Glass Card (Bottom Right)</option>
-                                    <option value="pip_top_right">PiP Floating Bubble (Top Right)</option>
-                                    <option value="split_screen">Split Screen (60% Diagram / 40% Avatar)</option>
-                                    <option value="full_anchor">Full Anchor (100% Presenter)</option>
-                                    <option value="none">None (B-roll Only)</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Compiler Engine</label>
-                                <select id="engine-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                    <option value="ffmpeg">Standard FFmpeg (Fast)</option>
-                                    <option value="remotion">Remotion React (Broadcast Motion)</option>
-                                </select>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 🎙️ NEURAL VOICE DIRECTOR STUDIO (ELEVENLABS-STYLE CONTROL DECK) -->
+                    <!-- STEP 5: VOICE SELECTION & DIRECTORIAL PROSODY -->
                     <div class="p-4 rounded-xl bg-slate-950/90 border border-brand-500/30 space-y-3.5 shadow-lg shadow-brand-500/5">
                         <div class="flex items-center justify-between border-b border-slate-800 pb-2">
                             <div class="flex items-center space-x-2">
-                                <span class="text-sm">🎙️</span>
+                                <span class="w-4 h-4 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold">5</span>
                                 <div>
-                                    <span class="text-xs font-bold text-white">Neural Voice Director Studio</span>
-                                    <span class="text-[10px] text-slate-400 block">Prosody, emotion tuning & dual-engine synthesis</span>
+                                    <span class="text-xs font-bold text-white uppercase tracking-wider">Voice Selection & Prosody</span>
+                                    <span class="text-[10px] text-slate-400 block">Select instructional voice, pacing, pitch, and stability</span>
                                 </div>
                             </div>
                             
@@ -1404,14 +1456,28 @@ async def serve_dashboard():
                             </div>
                         </div>
 
-                        <!-- Voice Profile & Archetype Selection -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                        <!-- Language & Voice Profile -->
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🌐 Language Filter</label>
+                                <select id="language-select" onchange="onLanguageChange()" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                                    <option value="en-US" selected>🇺🇸 English (US)</option>
+                                    <option value="te-IN">🇮🇳 Telugu (తెలుగు)</option>
+                                    <option value="ta-IN">🇮🇳 Tamil (தமிழ்)</option>
+                                    <option value="hi-IN">🇮🇳 Hindi (हिन्दी)</option>
+                                    <option value="es-ES">🇪🇸 Spanish (Castilian)</option>
+                                    <option value="fr-FR">🇫🇷 French (Standard)</option>
+                                    <option value="de-DE">🇩🇪 German (Standard)</option>
+                                    <option value="ja-JP">🇯🇵 Japanese (日本語)</option>
+                                </select>
+                            </div>
+
                             <div id="edgetts-voice-container">
                                 <div class="flex justify-between items-center mb-1">
-                                    <label class="text-xs font-semibold text-slate-300">Voice Profile</label>
-                                    <span class="text-[10px] text-brand-glow">HD Neural</span>
+                                    <label class="text-xs font-semibold text-slate-300">Selected Voice</label>
+                                    <span id="active-voice-badge" class="text-[10px] text-brand-glow font-mono">en-IN Neerja</span>
                                 </div>
-                                <select id="voice-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
+                                <select id="voice-select" onchange="updateActiveVoiceBadge()" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
                                     <option value="en-IN-NeerjaNeural" selected>Neerja (en-IN, Female - Instructional)</option>
                                     <option value="en-US-GuyNeural">Guy (en-US, Male - Executive)</option>
                                     <option value="en-US-AriaNeural">Aria (en-US, Female - Presenter)</option>
@@ -1429,7 +1495,7 @@ async def serve_dashboard():
                             </div>
 
                             <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">🎭 Emotion & Prosody Archetype</label>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🎭 Emotion & Prosody</label>
                                 <select id="archetype-select" onchange="applyVoiceArchetype(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
                                     <option value="technical" selected>Technical Instructor (Clear & Measured)</option>
                                     <option value="executive">Executive & Boardroom (Deep & Authoritative)</option>
@@ -1485,13 +1551,13 @@ async def serve_dashboard():
                             <audio id="director-audio-player" controls class="h-7 w-full sm:w-64 accent-brand-500" style="filter: invert(1) hue-rotate(180deg) brightness(0.85);"></audio>
                         </div>
 
-                        <!-- 🎧 Standalone Audio Master & Subtitle Export -->
+                        <!-- Standalone Audio Master & Subtitle Export -->
                         <div class="p-3 rounded-lg bg-slate-900/95 border border-emerald-500/30 space-y-2.5 text-xs">
                             <div class="flex items-center justify-between">
                                 <span class="text-emerald-400 font-bold flex items-center gap-1.5">
                                     <span>🎧</span> <span>Export Standalone Audio Master</span>
                                 </span>
-                                <span class="text-[10px] text-slate-400">Generate high-fidelity audio + subtitles without video</span>
+                                <span class="text-[10px] text-slate-400">High-fidelity audio + subtitles without video</span>
                             </div>
                             <div class="flex flex-col md:flex-row items-center justify-between gap-2.5">
                                 <div class="flex items-center space-x-2 w-full md:w-auto">
@@ -1506,7 +1572,7 @@ async def serve_dashboard():
                                 </div>
                                 <div class="flex items-center space-x-2 w-full md:w-auto justify-end">
                                     <button type="button" onclick="exportStandaloneAudio()" id="export-audio-btn" class="w-full md:w-auto px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-bold hover:brightness-110 transition-all flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20">
-                                        <span>⚡</span> <span>Generate & Download Audio Master</span>
+                                        <span>⚡</span> <span>Generate Audio Master</span>
                                     </button>
                                 </div>
                             </div>
@@ -1520,33 +1586,130 @@ async def serve_dashboard():
                         </div>
                     </div>
 
-                    <!-- Video Bumpers: Intro & Outro (Optional Pre-recorded Clips) -->
-                    <div class="p-3.5 rounded-xl bg-slate-950/80 border border-indigo-500/20 space-y-2.5">
-                        <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
-                            <label class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                                <span>🎞️</span> <span>Branded Video Bumpers (Intro / Outro)</span>
+                    <!-- STEP 6: VISUALS & AUDIO PRODUCTION FX -->
+                    <div class="p-4 rounded-xl bg-slate-950/80 border border-indigo-500/20 space-y-3.5">
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                            <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                <span class="w-4 h-4 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold">6</span>
+                                <span>Visuals & Audio Production FX</span>
                             </label>
-                            <button onclick="openAssetVaultModal()" class="text-[10px] text-indigo-400 hover:underline">
-                                Manage Video Library ↗
-                            </button>
+                            <span class="text-[10px] text-slate-400">Motion, background music, avatar, & bumpers</span>
                         </div>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+
+                        <!-- Motion Graphics & Background Music Toggles -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                            <div class="p-3 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5">
+                                <div class="flex justify-between items-center">
+                                    <label class="font-semibold text-slate-300 flex items-center gap-1">
+                                        <span>🎥</span> <span>Motion Graphics</span>
+                                    </label>
+                                    <span id="motion-status-badge" class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-glow">ON</span>
+                                </div>
+                                <div class="flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
+                                    <button type="button" id="motion-btn-on" onclick="setMotionGraphics(true)" class="w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
+                                        ✨ ON (Dynamic)
+                                    </button>
+                                    <button type="button" id="motion-btn-off" onclick="setMotionGraphics(false)" class="w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all">
+                                        🛑 OFF (Static)
+                                    </button>
+                                </div>
+                                <input type="hidden" id="motion-graphics-check" value="true">
+                                <p class="text-[10px] text-slate-400 leading-tight">Camera motion zoom & pan. Disable for static diagrams.</p>
+                            </div>
+
+                            <div class="p-3 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5">
+                                <div class="flex justify-between items-center">
+                                    <label class="font-semibold text-slate-300 flex items-center gap-1">
+                                        <span>🎵</span> <span>Background Music</span>
+                                    </label>
+                                    <span id="bgm-status-badge" class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">OFF</span>
+                                </div>
+                                <div class="flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
+                                    <button type="button" id="bgm-btn-on" onclick="setBackgroundMusic(true)" class="w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all">
+                                        🎵 ON (Ambient)
+                                    </button>
+                                    <button type="button" id="bgm-btn-off" onclick="setBackgroundMusic(false)" class="w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
+                                        🔇 OFF (Clean Voice)
+                                    </button>
+                                </div>
+                                <input type="hidden" id="bgm-check" value="false">
+                                <p class="text-[10px] text-slate-400 leading-tight">Subtle ambient music ducked behind narration (-18dB).</p>
+                            </div>
+                        </div>
+
+                        <!-- Speaker Avatar Persona & Layout -->
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                             <div>
-                                <label class="block text-[11px] text-slate-400 mb-1">Intro Opener Clip</label>
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="text-xs font-semibold text-slate-300">Avatar Persona</label>
+                                    <label for="avatar-file-input" class="text-[10px] text-brand-glow hover:underline cursor-pointer flex items-center gap-0.5">
+                                        <span>📸</span> <span>Upload Photo</span>
+                                    </label>
+                                    <input type="file" id="avatar-file-input" class="hidden" accept="image/*" onchange="uploadAvatar(this)">
+                                </div>
+                                <select id="avatar-persona-select" onchange="onPersonaSelectChange(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="maya_fintech" selected>Maya (Senior FinTech Lead)</option>
+                                    <option value="alex_ai">Alex (Enterprise AI Architect)</option>
+                                    <option value="elena_compliance">Elena (Risk & Governance Director)</option>
+                                    <option value="david_trainer">David (Global LMS Instructor)</option>
+                                    <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
+                                    <option value="custom_upload">Custom Uploaded Portrait</option>
+                                </select>
+                                <span id="persona-meta-badge" class="text-[10px] text-brand-glow font-mono block mt-1">🇮🇳 South Asian | en-IN (Neerja) | FinTech</span>
+                            </div>
+
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Avatar Display Layout</label>
+                                <select id="avatar-layout-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="pip_bottom_right">PiP Floating Glass Card (Bottom Right)</option>
+                                    <option value="pip_top_right">PiP Floating Bubble (Top Right)</option>
+                                    <option value="split_screen">Split Screen (60% Diagram / 40% Avatar)</option>
+                                    <option value="full_anchor">Full Anchor (100% Presenter)</option>
+                                    <option value="none">None (B-roll Only)</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Compiler Engine</label>
+                                <select id="engine-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="ffmpeg">Standard FFmpeg (Fast)</option>
+                                    <option value="remotion">Remotion React (Broadcast Motion)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Bumpers & Identity Persistence -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs pt-1">
+                            <div>
+                                <label class="block text-[11px] text-slate-400 mb-1">Intro Opener Clip (Optional)</label>
                                 <select id="intro-bumper-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
                                     <option value="">None (Direct start)</option>
                                 </select>
                             </div>
                             <div>
-                                <label class="block text-[11px] text-slate-400 mb-1">Outro Closer Clip</label>
+                                <label class="block text-[11px] text-slate-400 mb-1">Outro Closer Clip (Optional)</label>
                                 <select id="outro-bumper-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
                                     <option value="">None (Direct finish)</option>
                                 </select>
                             </div>
                         </div>
+
+                        <div class="flex items-center justify-between pt-1 border-t border-slate-900 text-xs">
+                            <div class="flex items-center space-x-2">
+                                <select id="identity-load-select" onchange="loadSelectedIdentity(this.value)" class="rounded bg-slate-900 border border-slate-700 text-[10px] text-slate-300 p-1">
+                                    <option value="">📂 Load Identity Profile...</option>
+                                </select>
+                                <button onclick="saveCurrentIdentity()" class="text-[10px] px-2 py-1 rounded bg-brand-500/20 text-brand-glow border border-brand-500/30 hover:bg-brand-500/30 transition-all">
+                                    💾 Save Identity
+                                </button>
+                            </div>
+                            <button onclick="openAssetVaultModal()" class="text-[10px] text-indigo-400 hover:underline">
+                                Video Asset Library ↗
+                            </button>
+                        </div>
                     </div>
 
-                    <!-- Toggles & Action Buttons -->
+                    <!-- STEP 7: PRODUCTION EXECUTION -->
                     <div class="space-y-3 pt-1">
                         <div class="flex items-center space-x-4 px-1">
                             <div class="flex items-center space-x-2">
@@ -1563,14 +1726,14 @@ async def serve_dashboard():
                             </div>
                         </div>
 
-                        <div class="grid grid-cols-2 gap-3">
-                            <button id="storyboard-btn" onclick="openStoryboardPreview()" class="py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 font-bold text-sm text-slate-200 transition-all flex items-center justify-center space-x-2">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <button id="storyboard-btn" onclick="openStoryboardPreview()" class="py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 font-bold text-sm text-slate-200 transition-all flex items-center justify-center space-x-2 shadow-md">
                                 <span>🎬</span>
-                                <span>Storyboard Preview</span>
+                                <span>Storyboard & Scene Breakdown</span>
                             </button>
                             <button id="generate-btn" onclick="startGeneration()" class="py-3.5 rounded-xl bg-gradient-to-r from-brand-600 via-indigo-600 to-brand-500 hover:from-brand-500 hover:to-indigo-500 font-bold text-sm text-white shadow-lg shadow-brand-500/20 active:scale-[0.99] transition-all flex items-center justify-center space-x-2">
                                 <span>🚀</span>
-                                <span>Direct Render</span>
+                                <span>Generate Content</span>
                             </button>
                         </div>
                     </div>
@@ -3321,14 +3484,145 @@ async def serve_dashboard():
             const orient = opt.getAttribute('data-orient') || 'Landscape';
 
             const box = document.getElementById('aspect-preview-box');
-            const cap = 40;
-            const scale = cap / Math.max(w, h);
-            box.style.width = (w * scale) + 'px';
-            box.style.height = (h * scale) + 'px';
+            if (box) {
+                const cap = 40;
+                const scale = cap / Math.max(w, h);
+                box.style.width = (w * scale) + 'px';
+                box.style.height = (h * scale) + 'px';
+            }
 
-            document.getElementById('aspect-preview-label').innerHTML =
-                '<span class="font-mono text-brand-glow font-bold">' + w + '×' + h + '</span>' +
-                ' · ' + orient + ' · every scene, caption and avatar is composed for this frame.';
+            const label = document.getElementById('aspect-preview-label');
+            if (label) {
+                label.innerHTML =
+                    '<span class="font-mono text-brand-glow font-bold">' + w + '×' + h + '</span>' +
+                    ' · ' + orient + ' · every scene, caption and avatar is composed for this frame.';
+            }
+        }
+
+        function setDirectorOutputType(type) {
+            const input = document.getElementById('output-type-select');
+            if (input) input.value = type;
+
+            const cardVideo = document.getElementById('output-card-video');
+            const cardSlide = document.getElementById('output-card-slide');
+            const badgeVideo = document.getElementById('output-badge-video');
+            const badgeSlide = document.getElementById('output-badge-slide');
+
+            if (type === 'slide') {
+                if (cardSlide) {
+                    cardSlide.classList.add('bg-brand-500/15', 'border-brand-500');
+                    cardSlide.classList.remove('bg-slate-900', 'border-slate-800');
+                }
+                if (cardVideo) {
+                    cardVideo.classList.remove('bg-brand-500/15', 'border-brand-500');
+                    cardVideo.classList.add('bg-slate-900', 'border-slate-800');
+                }
+                if (badgeSlide) badgeSlide.classList.remove('hidden');
+                if (badgeVideo) badgeVideo.classList.add('hidden');
+            } else {
+                if (cardVideo) {
+                    cardVideo.classList.add('bg-brand-500/15', 'border-brand-500');
+                    cardVideo.classList.remove('bg-slate-900', 'border-slate-800');
+                }
+                if (cardSlide) {
+                    cardSlide.classList.remove('bg-brand-500/15', 'border-brand-500');
+                    cardSlide.classList.add('bg-slate-900', 'border-slate-800');
+                }
+                if (badgeVideo) badgeVideo.classList.remove('hidden');
+                if (badgeSlide) badgeSlide.classList.add('hidden');
+            }
+        }
+
+        function setAspectPreset(val) {
+            const sel = document.getElementById('resolution-select');
+            if (sel) {
+                sel.value = val;
+                updateAspectPreview();
+            }
+            const pillMap = {
+                '16:9_hd': 'aspect-btn-16-9',
+                '9:16_vertical': 'aspect-btn-9-16',
+                '1:1_square': 'aspect-btn-1-1',
+                '4:5_portrait': 'aspect-btn-4-5'
+            };
+            Object.keys(pillMap).forEach(key => {
+                const btn = document.getElementById(pillMap[key]);
+                if (btn) {
+                    if (key === val) {
+                        btn.className = "py-1 px-1.5 rounded-lg bg-brand-600 text-white font-bold text-center border border-brand-500 transition-all";
+                    } else {
+                        btn.className = "py-1 px-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 font-semibold text-center border border-slate-800 transition-all";
+                    }
+                }
+            });
+        }
+
+        function setChunkingMode(mode) {
+            const input = document.getElementById('chunking-mode-input');
+            if (input) input.value = mode;
+
+            const btnAuto = document.getElementById('chunk-mode-auto');
+            const btnManual = document.getElementById('chunk-mode-manual');
+
+            if (mode === 'manual') {
+                if (btnManual) btnManual.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnAuto) btnAuto.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            } else {
+                if (btnAuto) btnAuto.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnManual) btnManual.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            }
+        }
+
+        function setMotionGraphics(enabled) {
+            const input = document.getElementById('motion-graphics-check');
+            if (input) input.value = enabled ? 'true' : 'false';
+
+            const badge = document.getElementById('motion-status-badge');
+            if (badge) {
+                badge.innerText = enabled ? 'ON' : 'OFF';
+                badge.className = enabled ? 'text-[9px] font-mono px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-glow' : 'text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400';
+            }
+
+            const btnOn = document.getElementById('motion-btn-on');
+            const btnOff = document.getElementById('motion-btn-off');
+            if (enabled) {
+                if (btnOn) btnOn.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnOff) btnOff.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            } else {
+                if (btnOff) btnOff.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnOn) btnOn.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            }
+        }
+
+        function setBackgroundMusic(enabled) {
+            const input = document.getElementById('bgm-check');
+            if (input) input.value = enabled ? 'true' : 'false';
+
+            const badge = document.getElementById('bgm-status-badge');
+            if (badge) {
+                badge.innerText = enabled ? 'ON' : 'OFF';
+                badge.className = enabled ? 'text-[9px] font-mono px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-glow' : 'text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400';
+            }
+
+            const btnOn = document.getElementById('bgm-btn-on');
+            const btnOff = document.getElementById('bgm-btn-off');
+            if (enabled) {
+                if (btnOn) btnOn.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnOff) btnOff.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            } else {
+                if (btnOff) btnOff.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnOn) btnOn.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            }
+        }
+
+        function updateActiveVoiceBadge() {
+            const sel = document.getElementById('voice-select');
+            const badge = document.getElementById('active-voice-badge');
+            if (sel && badge) {
+                const optText = sel.options[sel.selectedIndex]?.text || '';
+                const shortName = optText.split('(')[0].trim();
+                badge.innerText = shortName || sel.value;
+            }
         }
 
         function insertScriptTag(tag) {
@@ -3494,7 +3788,7 @@ async def serve_dashboard():
         async function startGeneration() {
             const topic = document.getElementById('prompt-input').value.trim();
             if (!topic) {
-                alert('Please enter a concept or Speaker Script.');
+                alert('Please enter a concept or Master Script.');
                 return;
             }
 
@@ -3517,6 +3811,11 @@ async def serve_dashboard():
             const auto_clean = document.getElementById('auto-clean-check').checked;
             const intro_video_url = document.getElementById('intro-bumper-select').value || null;
             const outro_video_url = document.getElementById('outro-bumper-select').value || null;
+
+            const output_type = document.getElementById('output-type-select') ? document.getElementById('output-type-select').value : 'video';
+            const motion_graphics = document.getElementById('motion-graphics-check') ? (document.getElementById('motion-graphics-check').value === 'true') : true;
+            const background_music = document.getElementById('bgm-check') ? (document.getElementById('bgm-check').value === 'true') : false;
+            const chunking_mode = document.getElementById('chunking-mode-input') ? document.getElementById('chunking-mode-input').value : 'auto';
 
             const btn = document.getElementById('generate-btn');
             btn.disabled = true;
@@ -3547,7 +3846,11 @@ async def serve_dashboard():
                         elevenlabs_api_key: elevenKey,
                         elevenlabs_voice_id: elevenVoice,
                         stability,
-                        similarity_boost
+                        similarity_boost,
+                        output_type,
+                        motion_graphics,
+                        background_music,
+                        chunking_mode
                     })
                 });
                 const data = await res.json();
@@ -3570,21 +3873,30 @@ async def serve_dashboard():
         async function openStoryboardPreview() {
             const topic = document.getElementById('prompt-input').value.trim();
             if (!topic) {
-                alert('Please enter a concept or Speaker Script first.');
+                alert('Please enter a concept or Master Script first.');
                 return;
             }
             const scenes = parseInt(document.getElementById('scene-slider').value);
             const avatar_persona = document.getElementById('avatar-persona-select').value;
+            const output_type = document.getElementById('output-type-select') ? document.getElementById('output-type-select').value : 'video';
+            const chunking_mode = document.getElementById('chunking-mode-input') ? document.getElementById('chunking-mode-input').value : 'auto';
 
             const btn = document.getElementById('storyboard-btn');
-            btn.innerHTML = '<span>⏳</span> <span>Directing...</span>';
+            btn.innerHTML = '<span>⏳</span> <span>Directing Scenes...</span>';
 
             try {
                 await fetchVideoAssets();
                 const res = await fetch('/api/v1/storyboard/preview', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ topic, scenes, art_style: 'Cinematic 35mm (Volumetric Lighting)', avatar_persona })
+                    body: JSON.stringify({
+                        topic,
+                        scenes,
+                        art_style: 'Cinematic 35mm (Volumetric Lighting)',
+                        avatar_persona,
+                        output_type,
+                        chunking_mode
+                    })
                 });
                 const data = await res.json();
                 currentStoryboardData = data.script;
@@ -3593,22 +3905,39 @@ async def serve_dashboard():
             } catch(err) {
                 alert('Storyboard generation failed: ' + err);
             } finally {
-                btn.innerHTML = '<span>🎬</span> <span>Storyboard Preview</span>';
+                btn.innerHTML = '<span>🎬</span> <span>Storyboard & Scene Breakdown</span>';
             }
+        }
+
+        function onSceneModeSelect(idx, mode) {
+            if (!currentStoryboardData || !currentStoryboardData.scenes[idx]) return;
+            if (mode === 'slide') {
+                currentStoryboardData.scenes[idx].output_type = 'slide';
+                currentStoryboardData.scenes[idx].video_source_type = 'ai_generated';
+            } else if (mode === 'uploaded_video') {
+                currentStoryboardData.scenes[idx].output_type = 'video';
+                currentStoryboardData.scenes[idx].video_source_type = 'uploaded_video';
+            } else {
+                currentStoryboardData.scenes[idx].output_type = 'video';
+                currentStoryboardData.scenes[idx].video_source_type = 'ai_generated';
+            }
+            renderStoryboardModal(currentStoryboardData);
         }
 
         function renderStoryboardModal(script) {
             const container = document.getElementById('storyboard-scenes-list');
             container.innerHTML = `
                 <div class="p-3 rounded-xl bg-brand-500/10 border border-brand-500/20 text-xs text-brand-glow flex items-center justify-between">
-                    <span class="font-bold">Production: ${script.title}</span>
-                    <span class="font-mono text-[11px] text-slate-400">${script.scenes.length} Scenes Drafted</span>
+                    <span class="font-bold">Screenplay: ${script.title}</span>
+                    <span class="font-mono text-[11px] text-slate-400">${script.scenes.length} Pedagogical Scenes</span>
                 </div>
             `;
 
             script.scenes.forEach((sc, idx) => {
                 const card = document.createElement('div');
-                const isVideo = sc.video_source_type === 'uploaded_video';
+                const isSlide = (sc.output_type === 'slide');
+                const isVideoClip = (sc.video_source_type === 'uploaded_video');
+                const isAIVideo = (!isSlide && !isVideoClip);
                 card.className = "p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-3";
                 
                 card.innerHTML = `
@@ -3617,19 +3946,43 @@ async def serve_dashboard():
                             <span class="text-xs font-bold text-white font-mono">
                                 <span class="px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow">Scene #${sc.scene_id}</span>
                             </span>
+                            <!-- 3-Way Scene Mode Switcher -->
                             <div class="flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
-                                <button onclick="onSceneSourceToggle(${idx}, 'ai_generated')" class="px-2.5 py-1 rounded-md transition-all ${!isVideo ? 'bg-brand-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
-                                    ✨ AI Diffusion
+                                <button onclick="onSceneModeSelect(${idx}, 'ai_generated')" class="px-2.5 py-1 rounded-md transition-all ${isAIVideo ? 'bg-brand-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
+                                    🎬 AI Video
                                 </button>
-                                <button onclick="onSceneSourceToggle(${idx}, 'uploaded_video')" class="px-2.5 py-1 rounded-md transition-all ${isVideo ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
-                                    📼 Video Clip
+                                <button onclick="onSceneModeSelect(${idx}, 'slide')" class="px-2.5 py-1 rounded-md transition-all ${isSlide ? 'bg-emerald-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
+                                    📊 Slide
+                                </button>
+                                <button onclick="onSceneModeSelect(${idx}, 'uploaded_video')" class="px-2.5 py-1 rounded-md transition-all ${isVideoClip ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
+                                    📼 Clip
                                 </button>
                             </div>
                         </div>
                         <button onclick="removeStoryboardScene(${idx})" class="text-red-400 hover:text-red-300 text-xs">🗑️ Remove</button>
                     </div>
 
-                    ${isVideo ? `
+                    ${isSlide ? `
+                    <!-- Instructional Slide Editor -->
+                    <div class="p-3 rounded-xl bg-emerald-950/20 border border-emerald-500/30 space-y-2.5">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                                <span>📊</span> <span>Instructional Slide Content</span>
+                            </span>
+                            <span class="text-[10px] text-slate-400">Renders high-contrast educational graphic + avatar</span>
+                        </div>
+                        <div class="space-y-2 text-xs">
+                            <div>
+                                <label class="block text-slate-400 font-semibold mb-1">Slide Title / Framework Header</label>
+                                <input id="sb-slidetitle-${idx}" type="text" value="${sc.title || ('Key Concept #' + sc.scene_id)}" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs" placeholder="e.g. Algorithmic Liquidity Mechanisms">
+                            </div>
+                            <div>
+                                <label class="block text-slate-400 font-semibold mb-1">Slide Key Takeaways / Framework Details (bulleted or structured text)</label>
+                                <textarea id="sb-slidecontent-${idx}" rows="2" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs font-mono" placeholder="• Key principle 1&#10;• Operational rule 2&#10;• Core risk metric 3">${sc.visual_prompt || sc.narration || ''}</textarea>
+                            </div>
+                        </div>
+                    </div>
+                    ` : (isVideoClip ? `
                     <!-- Video Source Selector & Upload Box -->
                     <div class="p-3 rounded-xl bg-indigo-950/20 border border-indigo-500/30 space-y-3">
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
@@ -3672,7 +4025,7 @@ async def serve_dashboard():
                             <textarea id="sb-motion-${idx}" rows="2" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs">${sc.motion_prompt || 'Slow cinematic push-in'}</textarea>
                         </div>
                     </div>
-                    `}
+                    `)}
 
                     <!-- Narration & Duration -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
@@ -3697,8 +4050,11 @@ async def serve_dashboard():
         function addStoryboardScene() {
             if (!currentStoryboardData) return;
             const nextId = currentStoryboardData.scenes.length + 1;
+            const defaultType = document.getElementById('output-type-select') ? document.getElementById('output-type-select').value : 'video';
             currentStoryboardData.scenes.push({
                 scene_id: nextId,
+                title: `Scene ${nextId}`,
+                output_type: defaultType,
                 visual_prompt: `Visual diagram and high-tech interface representing scene ${nextId}`,
                 motion_prompt: "Slow cinematic push-in with volumetric lighting",
                 narration: "Key lesson summary statement.",
@@ -3720,15 +4076,26 @@ async def serve_dashboard():
             if (!currentStoryboardData) return;
 
             const updatedScenes = currentStoryboardData.scenes.map((sc, idx) => {
-                const isVideo = sc.video_source_type === 'uploaded_video';
+                const isVideoClip = sc.video_source_type === 'uploaded_video';
+                const isSlide = sc.output_type === 'slide';
+                let visPrompt = sc.visual_prompt || '';
+                if (isSlide && document.getElementById(`sb-slidecontent-${idx}`)) {
+                    visPrompt = document.getElementById(`sb-slidecontent-${idx}`).value;
+                } else if (!isVideoClip && document.getElementById(`sb-visual-${idx}`)) {
+                    visPrompt = document.getElementById(`sb-visual-${idx}`).value;
+                }
+                const slideTitle = (isSlide && document.getElementById(`sb-slidetitle-${idx}`)) ? document.getElementById(`sb-slidetitle-${idx}`).value : (sc.title || `Scene ${idx+1}`);
+
                 return {
                     scene_id: idx + 1,
-                    visual_prompt: (!isVideo && document.getElementById(`sb-visual-${idx}`)) ? document.getElementById(`sb-visual-${idx}`).value : (sc.visual_prompt || 'Visual presentation scene'),
-                    motion_prompt: (!isVideo && document.getElementById(`sb-motion-${idx}`)) ? document.getElementById(`sb-motion-${idx}`).value : (sc.motion_prompt || 'Cinematic pan'),
+                    title: slideTitle,
+                    output_type: sc.output_type || (isSlide ? 'slide' : 'video'),
+                    visual_prompt: visPrompt || 'Visual presentation scene',
+                    motion_prompt: (!isVideoClip && document.getElementById(`sb-motion-${idx}`)) ? document.getElementById(`sb-motion-${idx}`).value : (sc.motion_prompt || 'Cinematic pan'),
                     narration: document.getElementById(`sb-narration-${idx}`) ? document.getElementById(`sb-narration-${idx}`).value : (sc.narration || ''),
                     duration_seconds: parseFloat(document.getElementById(`sb-duration-${idx}`) ? document.getElementById(`sb-duration-${idx}`).value : sc.duration_seconds) || 4.0,
                     video_source_type: sc.video_source_type || 'ai_generated',
-                    video_source_url: isVideo ? (document.getElementById(`sb-videosrc-${idx}`) ? document.getElementById(`sb-videosrc-${idx}`).value : sc.video_source_url) : ''
+                    video_source_url: isVideoClip ? (document.getElementById(`sb-videosrc-${idx}`) ? document.getElementById(`sb-videosrc-${idx}`).value : sc.video_source_url) : ''
                 };
             });
 
@@ -3750,6 +4117,10 @@ async def serve_dashboard():
             const auto_clean = document.getElementById('auto-clean-check').checked;
             const intro_video_url = document.getElementById('intro-bumper-select').value || null;
             const outro_video_url = document.getElementById('outro-bumper-select').value || null;
+
+            const output_type = document.getElementById('output-type-select') ? document.getElementById('output-type-select').value : 'video';
+            const motion_graphics = document.getElementById('motion-graphics-check') ? (document.getElementById('motion-graphics-check').value === 'true') : true;
+            const background_music = document.getElementById('bgm-check') ? (document.getElementById('bgm-check').value === 'true') : false;
 
             closeStoryboardModal();
 
@@ -3778,6 +4149,9 @@ async def serve_dashboard():
                         elevenlabs_voice_id: elevenVoice,
                         stability,
                         similarity_boost,
+                        output_type,
+                        motion_graphics,
+                        background_music,
                         scenes: updatedScenes
                     })
                 });

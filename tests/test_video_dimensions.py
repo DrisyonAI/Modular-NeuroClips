@@ -206,6 +206,10 @@ check("surrounding words survive cue removal",
 check("ordinary bracketed text is left alone",
       strip_director_cues("See figure [3] for detail") == "See figure [3] for detail")
 
-print()
-print("FAILURES:", fails if fails else "none")
-sys.exit(1 if fails else 0)
+def test_video_dimensions_all():
+    assert not fails, f"Failures: {fails}"
+
+if __name__ == "__main__":
+    print()
+    print("FAILURES:", fails if fails else "none")
+    sys.exit(1 if fails else 0)

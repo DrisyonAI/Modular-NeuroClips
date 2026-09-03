@@ -59,7 +59,11 @@ RESOLUTION_PROFILES = {
     "1:1_square": {"name": "1:1 Square (720x720)", "width": 720, "height": 720, "aspect": "1:1",
                    "use_case": "Instagram / Social Feed Post", "orientation": "square"},
     "1:1_hd": {"name": "1:1 Square HD (1080x1080)", "width": 1080, "height": 1080, "aspect": "1:1",
-               "use_case": "Instagram / Social Feed Post", "orientation": "square"}
+               "use_case": "Instagram / Social Feed Post", "orientation": "square"},
+    "4:5_portrait": {"name": "4:5 Portrait Feed (1080x1350)", "width": 1080, "height": 1350, "aspect": "4:5",
+                     "use_case": "Instagram / LinkedIn Portrait Post", "orientation": "portrait"},
+    "4:5_sd": {"name": "4:5 Portrait Preview (576x720)", "width": 576, "height": 720, "aspect": "4:5",
+               "use_case": "Fast Portrait Preview", "orientation": "portrait"}
 }
 
 RENDER_WIDTH = 1280

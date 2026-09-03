@@ -2,7 +2,7 @@ import re
 from typing import List, Optional, Dict, Any
 import subprocess
 from pathlib import Path
-from src.config import OUTPUT_DIR, RENDER_WIDTH, RENDER_HEIGHT
+from src.config import OUTPUT_DIR, ASSETS_DIR, RENDER_WIDTH, RENDER_HEIGHT
 from src.remotion_renderer import is_remotion_available, render_with_remotion
 
 def format_srt_time(seconds: float) -> str:
@@ -291,6 +291,30 @@ def build_subtitle_filter(subtitle_path: str, in_label: str,
     return f"{in_label}ass='{escaped}'{out_label}"
 
 
+def ensure_ambient_bgm_track() -> Optional[Path]:
+    """Ensures a subtle, warm ambient background music track exists in ASSETS_DIR."""
+    bgm_file = ASSETS_DIR / "ambient_bed.mp3"
+    if bgm_file.exists() and bgm_file.stat().st_size > 1000:
+        return bgm_file
+    try:
+        ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi",
+            "-i", "sine=frequency=216:beep_factor=0,volume=0.06",
+            "-t", "120",
+            "-c:a", "libmp3lame",
+            "-b:a", "128k",
+            str(bgm_file)
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode == 0 and bgm_file.exists():
+            return bgm_file
+    except Exception:
+        pass
+    return None
+
+
 def compile_final_video(
     clip_paths: List[str],
     output_filename: str = "final_production_sd.mp4",
@@ -304,17 +328,13 @@ def compile_final_video(
     intro_video_path: Optional[str] = None,
     outro_video_path: Optional[str] = None,
     width: int = RENDER_WIDTH,
-    height: int = RENDER_HEIGHT
+    height: int = RENDER_HEIGHT,
+    background_music: bool = False,
+    bgm_path: Optional[str] = None
 ) -> str:
     """
     Unified compiler supporting Remotion React and FFmpeg PiP Multi-Layer Compositing
-    with Subtitle Burning and optional Intro / Outro Video Bumpers.
-
-    `width`/`height` are the dimensions of the finished file. They must be passed
-    through from the caller's RESOLUTION_PROFILES entry: this stage previously
-    scaled unconditionally to RENDER_WIDTH x RENDER_HEIGHT, so a 9:16 or 1:1 job
-    produced correctly-shaped scene clips and then squashed them back into 16:9 on
-    the way out, and the aspect-ratio choice never reached the exported file.
+    with Subtitle Burning, optional Intro / Outro Video Bumpers, and Background Music.
     """
     final_output_path = OUTPUT_DIR / output_filename
 
@@ -366,26 +386,53 @@ def compile_final_video(
     has_avatar = avatar_image_path and Path(avatar_image_path).exists() and avatar_layout != "none"
     has_srt = burn_subtitles and srt_path and Path(srt_path).exists()
 
+    # Background music resolution
+    bgm_file = None
+    if background_music and has_audio:
+        if bgm_path and Path(bgm_path).exists():
+            bgm_file = Path(bgm_path)
+        else:
+            bgm_file = ensure_ambient_bgm_track()
+
+    has_bgm = bgm_file is not None and bgm_file.exists()
+
     try:
         filter_parts = []
-        # Letterbox rather than stretch. The scene clips already arrive at the target
-        # size, but bumpers and user-supplied footage need not, and a bare
-        # scale=W:H would distort them.
         filter_parts.append(
             f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[bg]"
         )
         last_v = "[bg]"
 
+        inputs = ["-f", "concat", "-safe", "0", "-i", str(concat_list_path)]
+        input_count = 1
+
+        voice_idx = None
+        if has_audio:
+            inputs.extend(["-stream_loop", "-1", "-i", str(Path(audio_path).resolve())])
+            voice_idx = input_count
+            input_count += 1
+
+        avatar_idx = None
         if has_avatar:
-            avatar_parts = build_avatar_layers(avatar_layout, width, height, base_label=last_v)
+            inputs.extend(["-loop", "1", "-i", str(Path(avatar_image_path).resolve())])
+            avatar_idx = input_count
+            input_count += 1
+
+        bgm_idx = None
+        if has_bgm:
+            inputs.extend(["-stream_loop", "-1", "-i", str(bgm_file.resolve())])
+            bgm_idx = input_count
+            input_count += 1
+
+        if has_avatar:
+            avatar_parts = build_avatar_layers(
+                avatar_layout, width, height, input_label=f"[{avatar_idx}:v]", base_label=last_v
+            )
             filter_parts.extend(avatar_parts)
             last_v = "[v_avatar]"
 
         if has_srt:
-            # Burn ASS, not the SRT: only ASS lets the script resolution be pinned to
-            # the frame, which is what makes caption size and margins correct at any
-            # aspect ratio. The .srt is still written for download and for SCORM.
             ass_file = srt_to_ass(
                 srt_path,
                 OUTPUT_DIR / f"subs_{Path(output_filename).stem}.ass",
@@ -396,13 +443,18 @@ def compile_final_video(
                 filter_parts.append(build_subtitle_filter(ass_file, last_v))
                 last_v = "[v_sub]"
 
-        filter_complex_str = ";".join(filter_parts)
+        # Audio mixing if background music is active
+        audio_map = None
+        if has_bgm and voice_idx is not None:
+            filter_parts.append(
+                f"[{voice_idx}:a]volume=1.0[a_voice];[{bgm_idx}:a]volume=0.10[a_bgm];"
+                f"[a_voice][a_bgm]amix=inputs=2:duration=first:dropout_transition=2[a_out]"
+            )
+            audio_map = "[a_out]"
+        elif voice_idx is not None:
+            audio_map = f"{voice_idx}:a:0"
 
-        inputs = ["-f", "concat", "-safe", "0", "-i", str(concat_list_path)]
-        if has_audio:
-            inputs.extend(["-stream_loop", "-1", "-i", str(Path(audio_path).resolve())])
-        if has_avatar:
-            inputs.extend(["-loop", "1", "-i", str(Path(avatar_image_path).resolve())])
+        filter_complex_str = ";".join(filter_parts)
 
         cmd = [
             "ffmpeg", "-y",
@@ -411,8 +463,8 @@ def compile_final_video(
             "-map", last_v
         ]
 
-        if has_audio:
-            cmd.extend(["-map", "1:a:0", "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-shortest"])
+        if audio_map:
+            cmd.extend(["-map", audio_map, "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-shortest"])
 
         cmd.extend([
             "-c:v", "libx264",
