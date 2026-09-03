@@ -1,9 +1,14 @@
 import os
+import re
+import subprocess
+import urllib.request
+import urllib.parse
 import time
 import json
 import uuid
 import zipfile
 import asyncio
+import threading
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, UploadFile, File
@@ -22,6 +27,7 @@ from src.pipeline import MediaGenerationEngine, VRAMGuard
 from src.compiler import compile_final_video, generate_srt_subtitles
 from src.quiz_engine import QuizEngine
 from src.scorm_packager import SCORMPackager, SCORMPackageRequest, SCORMModuleModel, SCORMLessonModel
+from src.scorm_upload import install_scorm_upload
 
 quiz_engine = QuizEngine()
 
@@ -32,304 +38,52 @@ app.mount("/static_curriculum", StaticFiles(directory=str(CURRICULUM_OUTPUT_DIR)
 app.mount("/static_exports", StaticFiles(directory=str(EXPORTS_DIR)), name="static_exports")
 app.mount("/static_assets", StaticFiles(directory=str(ASSETS_DIR)), name="static_assets")
 
-try:
-    import psutil
-except ImportError:
-    psutil = None
+# Build a SCORM package from an uploaded video or a .zip of videos.
+install_scorm_upload(app, output_dir=OUTPUT_DIR, exports_dir=EXPORTS_DIR,
+                     quiz_engine=quiz_engine)
 
-try:
-    import pynvml
-    pynvml.nvmlInit()
-    GPU_AVAILABLE = True
-except Exception:
-    pynvml = None
-    GPU_AVAILABLE = False
 
-def get_system_telemetry():
-    vram_used = 0
-    vram_total = 0
-    gpu_util = 0
-    gpu_name = "NVIDIA GeForce (CUDA)" if GPU_AVAILABLE else "CPU / Virtual Mode"
-    
-    if GPU_AVAILABLE:
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            name = pynvml.nvmlDeviceGetName(handle)
-            gpu_name = name.decode("utf-8") if isinstance(name, bytes) else str(name)
-            vram_used = round(info.used / (1024 ** 2), 2)
-            vram_total = round(info.total / (1024 ** 2), 2)
-            gpu_util = util.gpu
-        except Exception:
-            pass
-    
-    cpu_percent = psutil.cpu_percent(interval=None) if hasattr(psutil, 'cpu_percent') else 0
-    ram = psutil.virtual_memory() if hasattr(psutil, 'virtual_memory') else None
-    
-    return {
-        "gpu": {
-            "name": gpu_name,
-            "used_mb": vram_used,
-            "total_mb": vram_total,
-            "utilization": gpu_util,
-            "available": GPU_AVAILABLE
-        },
-        "system": {
-            "cpu_percent": cpu_percent,
-            "ram_used_gb": round(ram.used / (1024 ** 3), 2) if ram else 0,
-            "ram_total_gb": round(ram.total / (1024 ** 3), 2) if ram else 0,
-            "ram_percent": ram.percent if ram else 0
-        },
-        "timestamp": time.time()
-    }
+from src.services.telemetry import get_system_telemetry, GPU_AVAILABLE
+from src.services.audio_service import (
+    generate_voiceover_audio_sync,
+    convert_audio_format,
+    translate_narration_text,
+    resolve_video_path,
+)
+from src.services.job_manager import job_manager, MILESTONES
+from src.services.pipeline_runner import run_production_pipeline
 
-MILESTONES = [
-    {"id": "init", "name": "Initialization", "description": "Setting up generation pipeline & allocating VRAM"},
-    {"id": "scripting", "name": "Llama 3 Scripting", "description": "Generating directorial multi-scene screenplay"},
-    {"id": "keyframes", "name": "Keyframe Synthesis", "description": "Generating image keyframes matching prompt"},
-    {"id": "animation", "name": "Motion Dynamics", "description": "Rendering camera motion video clips"},
-    {"id": "voiceover", "name": "Edge-TTS Voiceover", "description": "Synthesizing neural voice narration audio"},
-    {"id": "compilation", "name": "Engine Compilation", "description": "Stitching scenes, subtitles & audio sync"},
-    {"id": "complete", "name": "Completed", "description": "Production ready for playback, SRT & SCORM export"}
-]
+# Backward-compatible state proxies
+JOBS_DB: Dict[str, Dict[str, Any]] = job_manager.jobs
+ACTIVE_JOB_ID: Optional[str] = job_manager.active_job_id
+PIPELINE_STATE: Dict[str, Any] = job_manager.pipeline_state
 
-JOBS_DB: Dict[str, Dict[str, Any]] = {}
-ACTIVE_JOB_ID: Optional[str] = None
 
-PIPELINE_STATE = {
-    "status": "Idle",
-    "current_step": "Ready for jobs",
-    "last_error": None,
-    "model_load_latency": 0.0,
-    "processed_scenes": 0,
-    "total_scenes": 0,
-    "current_milestone": "init",
-    "progress_percent": 0
-}
-
-def create_tracked_job(topic: str, scene_count: int, art_style: str, resolution: str, voice: str, engine_type: str = "ffmpeg") -> str:
+def create_tracked_job(
+    topic: str,
+    scene_count: int,
+    art_style: str,
+    resolution: str,
+    voice: str,
+    engine_type: str = "ffmpeg",
+) -> str:
     global ACTIVE_JOB_ID
-    job_id = str(uuid.uuid4())[:8]
-    job = {
-        "job_id": job_id,
-        "topic": topic,
-        "scene_count": scene_count,
-        "art_style": art_style,
-        "resolution": resolution,
-        "voice": voice,
-        "engine_type": engine_type,
-        "status": "in_progress",
-        "current_milestone": "init",
-        "current_step": "Initializing pipeline",
-        "progress_percent": 5,
-        "processed_scenes": 0,
-        "total_scenes": scene_count,
-        "script": None,
-        "clip_paths": [],
-        "keyframe_paths": [],
-        "audio_paths": [],
-        "srt_path": None,
-        "output_path": None,
-        "created_at": time.time(),
-        "updated_at": time.time(),
-        "logs": [f"[{time.strftime('%H:%M:%S')}] Job #{job_id} initiated: '{topic[:40]}...' ({resolution}, {engine_type})"],
-        "milestones": {m["id"]: "pending" for m in MILESTONES}
-    }
-    job["milestones"]["init"] = "in_progress"
-    JOBS_DB[job_id] = job
+    job_id = job_manager.create_job(topic, scene_count, art_style, resolution, voice, engine_type)
     ACTIVE_JOB_ID = job_id
-    
-    PIPELINE_STATE["status"] = "Generating Script"
-    PIPELINE_STATE["current_step"] = "Job queued and initializing"
-    PIPELINE_STATE["current_milestone"] = "init"
-    PIPELINE_STATE["progress_percent"] = 5
-    PIPELINE_STATE["total_scenes"] = scene_count
-    PIPELINE_STATE["processed_scenes"] = 0
     return job_id
 
-def log_job_milestone(job_id: str, milestone_id: str, step_msg: str, progress: int, log_text: Optional[str] = None):
-    if job_id not in JOBS_DB:
-        return
-    job = JOBS_DB[job_id]
-    job["current_milestone"] = milestone_id
-    job["current_step"] = step_msg
-    job["progress_percent"] = progress
-    job["updated_at"] = time.time()
-    
-    found = False
-    for m in MILESTONES:
-        if m["id"] == milestone_id:
-            job["milestones"][m["id"]] = "in_progress"
-            found = True
-        elif not found:
-            job["milestones"][m["id"]] = "completed"
-        else:
-            job["milestones"][m["id"]] = "pending"
-            
-    if log_text:
-        job["logs"].append(f"[{time.strftime('%H:%M:%S')}] {log_text}")
-        
-    PIPELINE_STATE["status"] = f"Milestone: {milestone_id.capitalize()}"
-    PIPELINE_STATE["current_step"] = step_msg
-    PIPELINE_STATE["current_milestone"] = milestone_id
-    PIPELINE_STATE["progress_percent"] = progress
 
-def generate_voiceover_audio_sync(
-    text: str,
-    voice: str,
-    speech_rate: float,
-    output_path: Path,
-    pitch: str = "+0Hz",
-    volume: str = "+0%",
-    voice_provider: str = "edge_tts",
-    elevenlabs_api_key: Optional[str] = None,
-    elevenlabs_voice_id: Optional[str] = "21m00Tcm4TlvDq8ikWAM",
-    stability: float = 0.75,
-    similarity_boost: float = 0.75
-) -> bool:
-    """
-    Generates voiceover narration supporting Edge-TTS with pitch/rate/volume prosody
-    and ElevenLabs multilingual neural synthesis with stability/similarity control.
-    """
-    clean_text = text.strip()
-    if not clean_text:
-        return False
+def log_job_milestone(
+    job_id: str,
+    milestone_id: str,
+    step_msg: str,
+    progress: int,
+    log_text: Optional[str] = None,
+):
+    job_manager.log_milestone(job_id, milestone_id, step_msg, progress, log_text)
 
-    # 1. ElevenLabs Neural Provider
-    if voice_provider == "elevenlabs" and elevenlabs_api_key and elevenlabs_api_key.strip():
-        try:
-            voice_id = elevenlabs_voice_id or "21m00Tcm4TlvDq8ikWAM"
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-            headers = {
-                "xi-api-key": elevenlabs_api_key.strip(),
-                "Content-Type": "application/json",
-                "Accept": "audio/mpeg"
-            }
-            # Clean director tags for ElevenLabs input
-            raw_script = re.sub(r"\[pause\s+\w+\]", " ... ", clean_text, flags=re.IGNORECASE)
-            raw_script = re.sub(r"\[emphasis\]", "", raw_script, flags=re.IGNORECASE)
-            payload = {
-                "text": raw_script,
-                "model_id": "eleven_multilingual_v2",
-                "voice_settings": {
-                    "stability": float(stability),
-                    "similarity_boost": float(similarity_boost),
-                    "style": 0.0,
-                    "use_speaker_boost": True
-                }
-            }
-            req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                audio_data = resp.read()
-                if audio_data and len(audio_data) > 500:
-                    with open(output_path, "wb") as f:
-                        f.write(audio_data)
-                    return True
-        except Exception as e:
-            print(f"[ElevenLabs Warning] Synthesis error ({e}). Falling back to Edge-TTS.")
 
-    # 2. Edge-TTS High-Definition Neural Voice with Prosody Pitch & Speed
-    try:
-        import edge_tts
-        rate_str = f"{int((speech_rate - 1.0) * 100):+d}%"
-        # Parse natural pauses: replace [pause 500ms] with brief ellipses
-        formatted_text = re.sub(r"\[pause\s+(\d+)m?s?\]", r" ... ", clean_text, flags=re.IGNORECASE)
-        formatted_text = re.sub(r"\[emphasis\]", "", formatted_text, flags=re.IGNORECASE)
-        formatted_text = re.sub(r"\[protip\]", "Pro tip: ", formatted_text, flags=re.IGNORECASE)
-        
-        async def _save_tts():
-            communicate = edge_tts.Communicate(formatted_text, voice, rate=rate_str, pitch=pitch, volume=volume)
-            await communicate.save(str(output_path))
-            
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import nest_asyncio
-                nest_asyncio.apply()
-                loop.run_until_complete(_save_tts())
-            else:
-                loop.run_until_complete(_save_tts())
-        except Exception:
-            asyncio.run(_save_tts())
-            
-        if output_path.exists() and output_path.stat().st_size > 500:
-            return True
-    except Exception as e:
-        print(f"[TTS Error] Edge-TTS error ({e}). Trying local fallback.")
-
-    # 3. pyttsx3 Local Fallback
-    try:
-        import pyttsx3
-        tts_engine = pyttsx3.init()
-        tts_engine.save_to_file(clean_text, str(output_path))
-        tts_engine.runAndWait()
-        if output_path.exists() and output_path.stat().st_size > 100:
-            return True
-    except Exception:
-        pass
-
-def convert_audio_format(input_path: Path, target_format: str, output_path: Path) -> bool:
-    """Converts synthesized audio to target format (MP3, WAV, M4A/AAC, OGG, FLAC) using ffmpeg."""
-    target_format = target_format.lower().replace(".", "").strip()
-    cmd = ["ffmpeg", "-y", "-i", str(input_path)]
-    if target_format == "wav":
-        cmd.extend(["-c:a", "pcm_s16le", "-ar", "44100"])
-    elif target_format in ["m4a", "aac"]:
-        cmd.extend(["-c:a", "aac", "-b:a", "256k"])
-    elif target_format == "ogg":
-        cmd.extend(["-c:a", "libvorbis", "-q:a", "6"])
-    elif target_format == "flac":
-        cmd.extend(["-c:a", "flac"])
-    elif target_format == "mp3":
-        cmd.extend(["-c:a", "libmp3lame", "-b:a", "256k"])
-    else:
-        cmd.extend(["-c:a", "copy"])
-    cmd.append(str(output_path))
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return res.returncode == 0 and output_path.exists()
-
-def translate_narration_text(text: str, target_lang: str) -> str:
-    """Translates narration text into the target dubbing language using lightweight translation endpoint."""
-    if target_lang == "en-US" or not text.strip():
-        return text
-
-    target_code = target_lang.split("-")[0]
-    encoded = urllib.parse.quote(text[:450])
-    try:
-        url = f"https://api.mymemory.translated.net/get?q={encoded}&langpair=en|{target_code}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            translated = data.get("responseData", {}).get("translatedText")
-            if translated and len(translated) > 3:
-                return translated
-    except Exception as e:
-        print(f"[Translation Notice] Using source text ({e})")
-    return text
-
-def resolve_video_path(url_or_path: Optional[str]) -> Optional[str]:
-    """Resolves a video URL (static asset or render) to an absolute local filesystem path."""
-    if not url_or_path:
-        return None
-    s = str(url_or_path).strip()
-    if not s:
-        return None
-    if s.startswith("/static_assets/"):
-        p = ASSETS_DIR / s.replace("/static_assets/", "")
-        return str(p) if p.exists() else None
-    if s.startswith("/static_renders/"):
-        p = OUTPUT_DIR / s.replace("/static_renders/", "")
-        return str(p) if p.exists() else None
-    p = Path(s)
-    if p.exists():
-        return str(p)
-    alt = ASSETS_DIR / p.name
-    if alt.exists():
-        return str(alt)
-    return None
-
-async def execute_tracked_generation(
+def execute_tracked_generation(
     job_id: str,
     topic: str,
     scene_count: int,
@@ -351,188 +105,81 @@ async def execute_tracked_generation(
     elevenlabs_api_key: Optional[str] = None,
     elevenlabs_voice_id: Optional[str] = None,
     stability: float = 0.75,
-    similarity_boost: float = 0.75
+    similarity_boost: float = 0.75,
 ):
-    job = JOBS_DB.get(job_id)
+    job = job_manager.get_job(job_id)
     if not job:
         return
 
-    if auto_clean:
-        for old_f in list(OUTPUT_DIR.glob("scene_*.*")) + list(OUTPUT_DIR.glob("audio_*.*")):
-            try:
-                old_f.unlink(missing_ok=True)
-            except Exception:
-                pass
-        
-    res_info = RESOLUTION_PROFILES.get(resolution, RESOLUTION_PROFILES["16:9_hd"])
-    width, height = res_info["width"], res_info["height"]
-
-    engine = MediaGenerationEngine()
     orchestrator = ScriptOrchestrator()
-    
     try:
-        # MILESTONE 1: SCRIPTING & PROMPT DISTILLATION
-        log_job_milestone(job_id, "scripting", "Director composing visual screenplay...", 15, f"Distilling visual scene prompts from user content ({width}x{height}, {art_style})")
+        job_manager.log_milestone(
+            job_id,
+            "scripting",
+            "Director composing visual screenplay...",
+            15,
+            f"Distilling visual scene prompts from user content ({resolution}, {art_style})",
+        )
         t0 = time.time()
-        
         script = orchestrator.generate_script(
             topic=topic,
             scene_count=scene_count,
             art_style=art_style,
-            avatar_persona=avatar_persona
+            avatar_persona=avatar_persona,
         )
-            
         latency = time.time() - t0
         job["script"] = script.model_dump() if hasattr(script, "model_dump") else script.dict()
         job["total_scenes"] = len(script.scenes)
-        PIPELINE_STATE["model_load_latency"] = latency
-        PIPELINE_STATE["total_scenes"] = len(script.scenes)
-        log_job_milestone(job_id, "scripting", f"Script ready ({len(script.scenes)} scenes, {latency:.2f}s)", 30, f"Directorial screenplay composed: '{script.title}'")
-        
-        # Multi-Language Dubbing: Translate Narration if target language != en-US
-        if language != "en-US":
-            log_job_milestone(job_id, "scripting", f"Translating script into {language}...", 32, f"Dubbing narration into {language}")
-            translated_topic = translate_narration_text(topic, language)
-            topic = translated_topic
-            for sc in script.scenes:
-                if getattr(sc, "narration", ""):
-                    sc.narration = translate_narration_text(sc.narration, language)
+        job_manager.pipeline_state["model_load_latency"] = latency
+        job_manager.pipeline_state["total_scenes"] = len(script.scenes)
+        job_manager.log_milestone(
+            job_id,
+            "scripting",
+            f"Script ready ({len(script.scenes)} scenes, {latency:.2f}s)",
+            30,
+            f"Directorial screenplay composed: '{script.title}'",
+        )
 
-        # MILESTONES 2 & 3: KEYFRAMES & ANIMATION
-        clip_paths, keyframe_paths = [], []
-        total = len(script.scenes)
-        
-        for idx, scene in enumerate(script.scenes, start=1):
-            job["processed_scenes"] = idx
-            PIPELINE_STATE["processed_scenes"] = idx
-            
-            v_type = getattr(scene, "video_source_type", "ai_generated")
-            v_url = getattr(scene, "video_source_url", "")
-            dur = getattr(scene, "duration_seconds", 4)
-            vis_prompt = getattr(scene, "visual_prompt", "")
-            mot_prompt = getattr(scene, "motion_prompt", "")
-            resolved_v_path = resolve_video_path(v_url) if (v_type == "uploaded_video" and v_url) else None
+        scenes_dicts = [
+            {
+                "scene_id": sc.scene_id,
+                "visual_prompt": sc.visual_prompt,
+                "motion_prompt": sc.motion_prompt,
+                "narration": getattr(sc, "narration", "") or sc.visual_prompt,
+                "duration_seconds": sc.duration_seconds,
+                "video_source_type": getattr(sc, "video_source_type", "ai_generated"),
+                "video_source_url": getattr(sc, "video_source_url", ""),
+            }
+            for sc in script.scenes
+        ]
 
-            if resolved_v_path:
-                base_p = 30 + int(((idx - 0.5) / total) * 35)
-                log_job_milestone(job_id, "keyframes", f"Extracting frame from video asset {idx}/{total}...", base_p, f"Scene {idx}: Using user video clip -> {Path(resolved_v_path).name}")
-                kf_path = str(OUTPUT_DIR / f"scene_{scene.scene_id}_{job_id}_keyframe.png")
-                engine.extract_video_thumbnail(resolved_v_path, Path(kf_path), width=width, height=height)
-                keyframe_paths.append(kf_path)
-                job["keyframe_paths"] = keyframe_paths
-
-                anim_p = 30 + int((idx / total) * 35)
-                log_job_milestone(job_id, "animation", f"Normalizing video clip {idx}/{total}...", anim_p, f"Scene {idx}: Conforming video ({dur}s, {width}x{height})")
-                clip_path = engine.prepare_existing_video_clip(resolved_v_path, scene.scene_id, job_id=job_id, target_duration=float(dur), width=width, height=height)
-                clip_paths.append(clip_path)
-                job["clip_paths"] = clip_paths
-            else:
-                base_p = 30 + int(((idx - 0.5) / total) * 35)
-                log_job_milestone(job_id, "keyframes", f"Synthesizing keyframe {idx}/{total}...", base_p, f"Scene {idx}: Visual Prompt -> {vis_prompt[:60]}...")
-                full_prompt = f"{script.art_style_preset}, {vis_prompt}"
-                kf_path = engine.generate_image_keyframe(full_prompt, scene.scene_id, job_id=job_id, width=width, height=height, force_refresh=True)
-                keyframe_paths.append(kf_path)
-                job["keyframe_paths"] = keyframe_paths
-                
-                anim_p = 30 + int((idx / total) * 35)
-                log_job_milestone(job_id, "animation", f"Animating scene {idx}/{total}...", anim_p, f"Scene {idx}: Motion -> {mot_prompt[:50]}...")
-                clip_path = engine.generate_video_clip(kf_path, mot_prompt, scene.scene_id, job_id=job_id, width=width, height=height, force_refresh=True)
-                clip_paths.append(clip_path)
-                job["clip_paths"] = clip_paths
-
-        # MILESTONE 4: VOICEOVER / TTS
-        audio_file = OUTPUT_DIR / f"audio_{job_id}.mp3"
-        log_job_milestone(job_id, "voiceover", f"Synthesizing voiceover ({voice}, {speech_rate}x, {voice_provider})...", 75, f"Generating neural voice narration for '{script.title}'")
-        
-        tts_ok = generate_voiceover_audio_sync(
-            text=topic,
+        run_production_pipeline(
+            job_id=job_id,
+            title=script.title,
+            art_style=script.art_style_preset,
+            scenes=scenes_dicts,
+            resolution=resolution,
+            language=language,
             voice=voice,
             speech_rate=speech_rate,
-            output_path=audio_file,
+            compiler_engine=compiler_engine,
+            avatar_persona=avatar_persona,
+            avatar_layout=avatar_layout,
+            burn_subtitles=burn_subtitles,
+            auto_clean=auto_clean,
+            intro_video_url=intro_video_url,
+            outro_video_url=outro_video_url,
             pitch=pitch,
             volume=volume,
             voice_provider=voice_provider,
             elevenlabs_api_key=elevenlabs_api_key,
             elevenlabs_voice_id=elevenlabs_voice_id,
             stability=stability,
-            similarity_boost=similarity_boost
+            similarity_boost=similarity_boost,
+            topic=topic,
         )
-        if tts_ok:
-            job["audio_paths"] = [str(audio_file)]
-            log_job_milestone(job_id, "voiceover", "Voiceover synthesized successfully", 80, f"Generated voice audio: {audio_file.name} ({audio_file.stat().st_size / 1024:.1f} KB)")
-        else:
-            log_job_milestone(job_id, "voiceover", "Audio generated (silent mode)", 80, "No TTS audio generated")
-
-        # SRT SUBTITLE GENERATION
-        srt_file = OUTPUT_DIR / f"subtitles_{job_id}.srt"
-        scenes_data = [
-            {
-                "scene_id": sc.scene_id,
-                "narration": getattr(sc, "narration", "") or sc.visual_prompt,
-                "visual_prompt": sc.visual_prompt,
-                "duration_seconds": sc.duration_seconds
-            }
-            for sc in script.scenes
-        ]
-        generate_srt_subtitles(scenes_data, srt_file)
-        job["srt_path"] = str(srt_file)
-
-        # MILESTONE 5: COMPILATION
-        log_job_milestone(job_id, "compilation", f"Compiling via {compiler_engine.upper()} engine...", 88, f"Executing multi-layer compositing (subtitles: {burn_subtitles}, avatar: {avatar_persona})")
-        output_filename = f"prod_{job_id}_{int(time.time())}.mp4"
-        audio_param = str(audio_file) if (audio_file.exists() and audio_file.stat().st_size > 100) else None
-        
-        avatar_img_path = None
-        if avatar_persona == "custom_upload":
-            custom_p = OUTPUT_DIR / "custom_avatar.png"
-            if custom_p.exists():
-                avatar_img_path = str(custom_p)
-        
-        remotion_meta = {
-            "title": script.title,
-            "art_style_preset": script.art_style_preset,
-            "scenes": [
-                {
-                    "scene_id": sc.scene_id,
-                    "keyframe_path": keyframe_paths[i] if i < len(keyframe_paths) else "",
-                    "visual_prompt": sc.visual_prompt,
-                    "motion_prompt": sc.motion_prompt,
-                    "narration": getattr(sc, "narration", "") or sc.visual_prompt,
-                    "duration_seconds": sc.duration_seconds
-                }
-                for i, sc in enumerate(script.scenes)
-            ]
-        }
-        
-        final_video = compile_final_video(
-            clip_paths,
-            output_filename=output_filename,
-            audio_path=audio_param,
-            engine=compiler_engine,
-            avatar_image_path=avatar_img_path,
-            avatar_layout=avatar_layout,
-            burn_subtitles=burn_subtitles,
-            srt_path=str(srt_file),
-            remotion_metadata=remotion_meta,
-            intro_video_path=resolve_video_path(intro_video_url),
-            outro_video_path=resolve_video_path(outro_video_url)
-        )
-        
-        # MILESTONE 6: COMPLETE
-        job["status"] = "complete"
-        job["output_path"] = final_video
-        job["progress_percent"] = 100
-        job["milestones"] = {m["id"]: "completed" for m in MILESTONES}
-        log_job_milestone(job_id, "complete", f"Video ready: {Path(final_video).name}", 100, f"[SUCCESS] Production finished: {final_video}")
-        PIPELINE_STATE["status"] = "Complete"
-        PIPELINE_STATE["current_step"] = f"Saved: {Path(final_video).name}"
-        
     except Exception as exc:
-        job["status"] = "failed"
-        job["logs"].append(f"[{time.strftime('%H:%M:%S')}] [ERROR] Pipeline failed: {str(exc)}")
-        PIPELINE_STATE["status"] = "Failed"
-        PIPELINE_STATE["last_error"] = str(exc)
-        PIPELINE_STATE["current_step"] = f"Error: {str(exc)}"
+        job_manager.fail_job(job_id, str(exc))
         VRAMGuard.cleanup()
 
 # -------------------------------------------------------------
@@ -690,134 +337,45 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
         engine_type=req.compiler_engine
     )
 
-    async def _run_custom_storyboard():
-        job = JOBS_DB[job_id]
-        engine = MediaGenerationEngine()
-        res_info = RESOLUTION_PROFILES.get(req.resolution, RESOLUTION_PROFILES["16:9_hd"])
-        width, height = res_info["width"], res_info["height"]
+    def _run_custom_storyboard():
+        job = job_manager.get_job(job_id)
+        if not job:
+            return
+        job_manager.log_milestone(
+            job_id,
+            "scripting",
+            "Ingesting refined storyboard scenes...",
+            20,
+            f"Screenplay: '{req.title}' ({len(req.scenes)} scenes)",
+        )
+        job["script"] = {"title": req.title, "art_style_preset": req.art_style, "scenes": req.scenes}
+        job["total_scenes"] = len(req.scenes)
 
-        try:
-            log_job_milestone(job_id, "scripting", "Ingesting refined storyboard scenes...", 20, f"Screenplay: '{req.title}' ({len(req.scenes)} scenes)")
-            job["script"] = {"title": req.title, "art_style_preset": req.art_style, "scenes": req.scenes}
-            job["total_scenes"] = len(req.scenes)
-
-            clip_paths, keyframe_paths = [], []
-            total = len(req.scenes)
-
-            for idx, scene in enumerate(req.scenes, start=1):
-                job["processed_scenes"] = idx
-                PIPELINE_STATE["processed_scenes"] = idx
-
-                v_type = scene.get("video_source_type", "ai_generated")
-                v_url = scene.get("video_source_url", "")
-                dur = float(scene.get("duration_seconds", 4))
-                vis_prompt = scene.get("visual_prompt", "")
-                mot_prompt = scene.get("motion_prompt", "")
-
-                resolved_v_path = resolve_video_path(v_url) if (v_type == "uploaded_video" and v_url) else None
-
-                if resolved_v_path:
-                    base_p = 25 + int(((idx - 0.5) / total) * 40)
-                    log_job_milestone(job_id, "keyframes", f"Extracting frame from video asset {idx}/{total}...", base_p, f"Scene {idx}: Using user video asset -> {Path(resolved_v_path).name}")
-                    kf_path = str(OUTPUT_DIR / f"scene_{scene.get('scene_id', idx)}_{job_id}_keyframe.png")
-                    engine.extract_video_thumbnail(resolved_v_path, Path(kf_path), width=width, height=height)
-                    keyframe_paths.append(kf_path)
-                    job["keyframe_paths"] = keyframe_paths
-
-                    anim_p = 25 + int((idx / total) * 40)
-                    log_job_milestone(job_id, "animation", f"Normalizing video clip {idx}/{total}...", anim_p, f"Scene {idx}: Conforming video ({dur}s, {width}x{height})")
-                    clip_path = engine.prepare_existing_video_clip(resolved_v_path, scene.get("scene_id", idx), job_id=job_id, target_duration=dur, width=width, height=height)
-                    clip_paths.append(clip_path)
-                    job["clip_paths"] = clip_paths
-                else:
-                    base_p = 25 + int(((idx - 0.5) / total) * 40)
-                    log_job_milestone(job_id, "keyframes", f"Synthesizing keyframe {idx}/{total}...", base_p, f"Scene {idx}: Visual -> {vis_prompt[:50]}...")
-                    full_prompt = f"{req.art_style}, {vis_prompt}"
-                    kf_path = engine.generate_image_keyframe(full_prompt, scene.get("scene_id", idx), job_id=job_id, width=width, height=height, force_refresh=True)
-                    keyframe_paths.append(kf_path)
-                    job["keyframe_paths"] = keyframe_paths
-
-                    anim_p = 25 + int((idx / total) * 40)
-                    log_job_milestone(job_id, "animation", f"Animating scene {idx}/{total}...", anim_p, f"Scene {idx}: Motion -> {mot_prompt[:50]}...")
-                    clip_path = engine.generate_video_clip(kf_path, mot_prompt, scene.get("scene_id", idx), job_id=job_id, width=width, height=height, force_refresh=True)
-                    clip_paths.append(clip_path)
-                    job["clip_paths"] = clip_paths
-
-            audio_file = OUTPUT_DIR / f"audio_{job_id}.mp3"
-            log_job_milestone(job_id, "voiceover", f"Generating voiceover for refined storyboard ({req.voice_provider})...", 75, "Synthesizing audio")
-            generate_voiceover_audio_sync(
-                text=full_narration or req.title,
-                voice=req.voice,
-                speech_rate=req.speech_rate,
-                output_path=audio_file,
-                pitch=req.pitch or "+0Hz",
-                volume=req.volume or "+0%",
-                voice_provider=req.voice_provider or "edge_tts",
-                elevenlabs_api_key=req.elevenlabs_api_key,
-                elevenlabs_voice_id=req.elevenlabs_voice_id,
-                stability=req.stability or 0.75,
-                similarity_boost=req.similarity_boost or 0.75
-            )
-            job["audio_paths"] = [str(audio_file)]
-
-            srt_file = OUTPUT_DIR / f"subtitles_{job_id}.srt"
-            generate_srt_subtitles(req.scenes, srt_file)
-            job["srt_path"] = str(srt_file)
-
-            avatar_img_path = None
-            if req.avatar_persona == "custom_upload":
-                custom_p = OUTPUT_DIR / "custom_avatar.png"
-                if custom_p.exists():
-                    avatar_img_path = str(custom_p)
-
-            log_job_milestone(job_id, "compilation", f"Compiling via {req.compiler_engine.upper()}...", 88, "Stitching clips & audio sync")
-            output_filename = f"prod_{job_id}_{int(time.time())}.mp4"
-            audio_param = str(audio_file) if (audio_file.exists() and audio_file.stat().st_size > 100) else None
-
-            remotion_meta = {
-                "title": req.title,
-                "art_style_preset": req.art_style,
-                "scenes": [
-                    {
-                        "scene_id": sc.get("scene_id", i+1),
-                        "keyframe_path": keyframe_paths[i],
-                        "visual_prompt": sc.get("visual_prompt", ""),
-                        "motion_prompt": sc.get("motion_prompt", ""),
-                        "narration": sc.get("narration", ""),
-                        "duration_seconds": sc.get("duration_seconds", 4)
-                    }
-                    for i, sc in enumerate(req.scenes)
-                ]
-            }
-
-            final_video = compile_final_video(
-                clip_paths,
-                output_filename=output_filename,
-                audio_path=audio_param,
-                engine=req.compiler_engine,
-                avatar_image_path=avatar_img_path,
-                avatar_layout=req.avatar_layout,
-                burn_subtitles=req.burn_subtitles,
-                srt_path=str(srt_file),
-                remotion_metadata=remotion_meta,
-                intro_video_path=resolve_video_path(req.intro_video_url),
-                outro_video_path=resolve_video_path(req.outro_video_url)
-            )
-
-            job["status"] = "complete"
-            job["output_path"] = final_video
-            job["progress_percent"] = 100
-            job["milestones"] = {m["id"]: "completed" for m in MILESTONES}
-            log_job_milestone(job_id, "complete", f"Video ready: {Path(final_video).name}", 100, f"[SUCCESS] Storyboard production finished: {final_video}")
-            PIPELINE_STATE["status"] = "Complete"
-            PIPELINE_STATE["current_step"] = f"Saved: {Path(final_video).name}"
-
-        except Exception as exc:
-            job["status"] = "failed"
-            job["logs"].append(f"[{time.strftime('%H:%M:%S')}] [ERROR] Storyboard pipeline failed: {str(exc)}")
-            PIPELINE_STATE["status"] = "Failed"
-            PIPELINE_STATE["last_error"] = str(exc)
-            VRAMGuard.cleanup()
+        run_production_pipeline(
+            job_id=job_id,
+            title=req.title,
+            art_style=req.art_style,
+            scenes=req.scenes,
+            resolution=req.resolution,
+            language=req.language,
+            voice=req.voice,
+            speech_rate=req.speech_rate,
+            compiler_engine=req.compiler_engine,
+            avatar_persona=req.avatar_persona,
+            avatar_layout=req.avatar_layout,
+            burn_subtitles=req.burn_subtitles,
+            auto_clean=req.auto_clean,
+            intro_video_url=req.intro_video_url,
+            outro_video_url=req.outro_video_url,
+            pitch=req.pitch or "+0Hz",
+            volume=req.volume or "+0%",
+            voice_provider=req.voice_provider or "edge_tts",
+            elevenlabs_api_key=req.elevenlabs_api_key,
+            elevenlabs_voice_id=req.elevenlabs_voice_id,
+            stability=req.stability or 0.75,
+            similarity_boost=req.similarity_boost or 0.75,
+            topic=full_narration or req.title,
+        )
 
     background_tasks.add_task(_run_custom_storyboard)
     return {"status": "started", "job_id": job_id, "title": req.title, "scenes_count": len(req.scenes)}
@@ -2486,6 +2044,32 @@ async def serve_dashboard():
                             </div>
                         </div>
 
+                        <!-- Upload-driven SCORM source -->
+                        <div class="rounded-xl border border-emerald-500/30 bg-emerald-950/10 p-3.5 space-y-2.5">
+                            <div class="flex items-center justify-between gap-2 flex-wrap">
+                                <label class="block text-xs font-semibold text-emerald-300">&#11014;&#65039; Or upload your own video / .zip of videos</label>
+                                <span class="text-[10px] text-slate-400 font-mono">MP4 &middot; MOV &middot; WEBM &middot; MKV &middot; ZIP</span>
+                            </div>
+                            <input type="file" id="scorm-upload-file" accept=".mp4,.mov,.webm,.mkv,.m4v,.zip"
+                                   class="w-full text-xs text-slate-300 rounded-xl bg-slate-900 border border-slate-700 p-2 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-emerald-600 file:text-white hover:file:brightness-110 cursor-pointer">
+                            <p class="text-[11px] text-slate-400 leading-relaxed">
+                                A single video becomes one SCORM lesson. A <span class="font-mono text-slate-300">.zip</span>
+                                of videos becomes a multi-lesson playlist package that reports
+                                <span class="font-mono text-slate-300">completed</span> once every clip has been watched.
+                            </p>
+                            <div class="flex items-center justify-between gap-3 flex-wrap">
+                                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                    <input type="checkbox" id="scorm-upload-quiz" checked class="accent-emerald-500 cursor-pointer">
+                                    Attach the assessment item bank selected below
+                                </label>
+                                <button onclick="buildScormFromUpload()" id="scorm-upload-btn"
+                                        class="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 font-bold text-xs text-white shadow-md shadow-emerald-500/20 transition-all flex items-center gap-2">
+                                    <span>&#128230;</span> <span>Build SCORM from Upload</span>
+                                </button>
+                            </div>
+                            <div id="scorm-upload-status" class="hidden text-xs rounded-lg p-2.5 font-mono"></div>
+                        </div>
+
                         <!-- Item Bank & Passing Score -->
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
@@ -2856,11 +2440,27 @@ async def serve_dashboard():
             select.innerHTML = voices.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
         }
 
+        // FastAPI returns 422 as {detail: [{loc, msg, type}, ...]}. Concatenating
+        // that object renders "[object Object]", which hides the actual cause.
+        function fmtApiError(data) {
+            var det = data && data.detail;
+            if (!det) return 'Unknown error';
+            if (typeof det === 'string') return det;
+            if (Array.isArray(det)) {
+                return det.map(function (e) {
+                    var where = Array.isArray(e.loc) ? e.loc.join('.') : (e.loc || '');
+                    return where ? where + ': ' + e.msg : e.msg;
+                }).join('; ');
+            }
+            try { return JSON.stringify(det); } catch (e) { return String(det); }
+        }
+
         async function auditionVoiceLab() {
             const text = document.getElementById('voice-lab-prompt').value.trim() || "Modular NeuroClips Voice Director Studio test.";
             const voice = document.getElementById('voice-lab-voice').value;
             const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
-            const pitch = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const pitchHz = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const pitch = (pitchHz >= 0 ? '+' : '') + pitchHz + 'Hz';
             const btn = document.getElementById('voice-lab-audition-btn');
             const badge = document.getElementById('voice-lab-player-badge');
             
@@ -2868,7 +2468,7 @@ async def serve_dashboard():
             btn.innerText = "⏳ Generating...";
             badge.innerText = "Synthesizing...";
             try {
-                const res = await fetch('/api/v1/preview-voice', {
+                const res = await fetch('/api/v1/voice-director/audition', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ voice: voice, speech_rate: speed, pitch: pitch, text: text.substring(0, 200) })
@@ -2880,7 +2480,7 @@ async def serve_dashboard():
                     player.play();
                     badge.innerText = "Playing 🎧";
                 } else {
-                    alert('Audition failed: ' + data.detail);
+                    alert('Audition failed: ' + fmtApiError(data));
                 }
             } catch (e) {
                 alert('Audition error: ' + e);
@@ -2898,7 +2498,8 @@ async def serve_dashboard():
             }
             const voice = document.getElementById('voice-lab-voice').value;
             const speed = parseFloat(document.getElementById('voice-lab-rate').value) || 1.0;
-            const pitch = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const pitchHz = parseInt(document.getElementById('voice-lab-pitch').value) || 0;
+            const pitch = (pitchHz >= 0 ? '+' : '') + pitchHz + 'Hz';
             const format = document.getElementById('voice-lab-format').value;
             const btn = document.getElementById('voice-lab-export-btn');
             
@@ -2926,7 +2527,7 @@ async def serve_dashboard():
                     
                     alert(`⚡ ${data.format.toUpperCase()} Audio Master generated (${data.size_mb} MB)!`);
                 } else {
-                    alert('Audio Export failed: ' + data.detail);
+                    alert('Audio Export failed: ' + fmtApiError(data));
                 }
             } catch (e) {
                 alert('Audio Export error: ' + e);
@@ -3029,6 +2630,57 @@ async def serve_dashboard():
 
             switchStudioMode('video');
             alert("🎨 Keyframe visual settings & character anchor applied to Director Studio!");
+        }
+
+
+        async function buildScormFromUpload() {
+            const input = document.getElementById('scorm-upload-file');
+            const box = document.getElementById('scorm-upload-status');
+            if (!input.files || !input.files.length) {
+                alert('Choose a video file or a .zip of videos first.');
+                return;
+            }
+            const fd = new FormData();
+            fd.append('file', input.files[0]);
+            fd.append('course_title', document.getElementById('scorm-gen-course-title').value.trim() || 'Untitled Course');
+            fd.append('course_id', document.getElementById('scorm-gen-course-id').value.trim() || 'COURSE');
+            fd.append('module_title', document.getElementById('scorm-gen-module-title').value.trim() || 'Module 1');
+            fd.append('topic', document.getElementById('scorm-gen-topic').value.trim());
+            fd.append('module_id', document.getElementById('scorm-gen-module-id').value || '1');
+            fd.append('pass_percentage', document.getElementById('scorm-gen-pass').value || '70');
+            fd.append('scorm_version', document.getElementById('scorm-gen-version').value || '1.2');
+            fd.append('include_quiz', document.getElementById('scorm-upload-quiz').checked ? 'true' : 'false');
+
+            const btn = document.getElementById('scorm-upload-btn');
+            const orig = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span>&#9203;</span> <span>Packaging...</span>';
+            box.className = 'text-xs rounded-lg p-2.5 font-mono bg-slate-900 border border-slate-700 text-slate-300';
+            box.innerText = 'Uploading and building the package. Large archives take a while.';
+
+            try {
+                const res = await fetch('/api/v1/scorm/build-from-upload', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    box.className = 'text-xs rounded-lg p-2.5 font-mono bg-emerald-950/30 border border-emerald-500/40 text-emerald-300';
+                    box.innerHTML = '&#9989; ' + data.package_name + ' &middot; ' + data.size_mb + ' MB &middot; ' +
+                        data.video_count + ' video(s)' +
+                        (data.questions_count ? ' &middot; ' + data.questions_count + ' questions' : '') +
+                        ' &nbsp; <a class="underline font-bold" href="' + data.download_url +
+                        '" download="' + data.package_name + '">Download</a>';
+                    if (typeof fetchScormPackagesTable === 'function') fetchScormPackagesTable();
+                } else {
+                    box.className = 'text-xs rounded-lg p-2.5 font-mono bg-rose-950/30 border border-rose-500/40 text-rose-300';
+                    box.innerText = '\u274c ' + fmtApiError(data);
+                }
+            } catch (e) {
+                box.className = 'text-xs rounded-lg p-2.5 font-mono bg-rose-950/30 border border-rose-500/40 text-rose-300';
+                box.innerText = '\u274c ' + e;
+            } finally {
+                box.classList.remove('hidden');
+                btn.disabled = false;
+                btn.innerHTML = orig;
+            }
         }
 
         // ================= CUSTOM SCORM GENERATOR LOGIC =================

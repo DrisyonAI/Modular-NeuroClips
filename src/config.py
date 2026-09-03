@@ -1,11 +1,19 @@
 import os
 from pathlib import Path
+
+# Prevent libiomp5md.dll clash on Windows / Anaconda environments
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     load_dotenv = None
 
+
+
+# Repository root. src/batch_manager.py imports this.
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
@@ -39,6 +47,32 @@ RESOLUTION_PROFILES = {
 
 RENDER_WIDTH = 1280
 RENDER_HEIGHT = 720
+
+
+def get_resolution_dimensions(resolution: str) -> tuple[int, int]:
+    """
+    Safely resolves a resolution profile key (e.g. '16:9_hd') or raw dimension
+    string (e.g. '1280x720') into (width, height). Defaults to 1280x720.
+    """
+    if not resolution:
+        return (RENDER_WIDTH, RENDER_HEIGHT)
+    
+    clean = str(resolution).strip().lower()
+    if clean in RESOLUTION_PROFILES:
+        prof = RESOLUTION_PROFILES[clean]
+        return (prof["width"], prof["height"])
+    
+    if "x" in clean:
+        parts = clean.split("x")
+        try:
+            w, h = int(parts[0]), int(parts[1])
+            if w > 0 and h > 0:
+                return (w, h)
+        except (ValueError, IndexError):
+            pass
+            
+    return (RENDER_WIDTH, RENDER_HEIGHT)
+
 
 LANGUAGE_PROFILES = {
     "en-US": {
