@@ -166,7 +166,7 @@ def run_production_pipeline(
             }
             for i, sc in enumerate(scenes, start=1)
         ]
-        generate_srt_subtitles(scenes_data, srt_file)
+        generate_srt_subtitles(scenes_data, srt_file, width=width, height=height)
         job["srt_path"] = str(srt_file)
 
         # MILESTONE 5: COMPILATION
@@ -210,6 +210,8 @@ def run_production_pipeline(
             remotion_metadata=remotion_meta,
             intro_video_path=resolve_video_path(intro_video_url),
             outro_video_path=resolve_video_path(outro_video_url),
+            width=width,
+            height=height,
         )
 
         # MILESTONE 6: COMPLETE

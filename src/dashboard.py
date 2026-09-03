@@ -1257,14 +1257,32 @@ async def serve_dashboard():
                             </select>
                         </div>
                         <div>
-                            <label class="block text-xs font-semibold text-slate-300 mb-1">Resolution & Format</label>
-                            <select id="resolution-select" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
-                                <option value="16:9_hd" selected>16:9 HD Broadcast (1280x720)</option>
-                                <option value="16:9_sd">16:9 SD Fast Preview (576x320)</option>
-                                <option value="16:9_fhd">16:9 Full HD (1920x1080)</option>
-                                <option value="9:16_vertical">9:16 Mobile Shorts (720x1280)</option>
-                                <option value="1:1_square">1:1 LMS Widget / Square (720x720)</option>
+                            <label class="block text-xs font-semibold text-slate-300 mb-1">Video Dimensions / Aspect Ratio</label>
+                            <select id="resolution-select" onchange="updateAspectPreview()" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                                <optgroup label="▭ Landscape — 16:9">
+                                    <option value="16:9_hd" data-w="1280" data-h="720" data-orient="Landscape" selected>YouTube / Course Video — 16:9 HD (1280×720)</option>
+                                    <option value="16:9_fhd" data-w="1920" data-h="1080" data-orient="Landscape">YouTube / Course Video — 16:9 Full HD (1920×1080)</option>
+                                    <option value="16:9_sd" data-w="576" data-h="324" data-orient="Landscape">Fast Draft Preview — 16:9 SD (576×324)</option>
+                                </optgroup>
+                                <optgroup label="▯ Portrait — 9:16">
+                                    <option value="9:16_vertical" data-w="720" data-h="1280" data-orient="Portrait">Instagram Reels / YouTube Shorts — 9:16 (720×1280)</option>
+                                    <option value="9:16_fhd" data-w="1080" data-h="1920" data-orient="Portrait">Instagram Reels / YouTube Shorts — 9:16 Full HD (1080×1920)</option>
+                                </optgroup>
+                                <optgroup label="▢ Square — 1:1">
+                                    <option value="1:1_square" data-w="720" data-h="720" data-orient="Square">Instagram / Social Feed Post — 1:1 (720×720)</option>
+                                    <option value="1:1_hd" data-w="1080" data-h="1080" data-orient="Square">Instagram / Social Feed Post — 1:1 HD (1080×1080)</option>
+                                </optgroup>
                             </select>
+                            <div class="flex items-center gap-2.5 mt-1.5">
+                                <div class="flex items-center justify-center w-11 h-11 flex-shrink-0">
+                                    <div id="aspect-preview-box" class="border-2 border-brand-500/70 bg-brand-500/10 rounded-[3px] transition-all"
+                                         style="width:40px;height:22.5px;"></div>
+                                </div>
+                                <p id="aspect-preview-label" class="text-[11px] text-slate-400 leading-snug">
+                                    <span class="font-mono text-brand-glow font-bold">1280×720</span>
+                                    · Landscape · every scene, caption and avatar is composed for this frame.
+                                </p>
+                            </div>
                         </div>
                         <div>
                             <div class="flex justify-between text-xs font-semibold text-slate-300 mb-1">
@@ -3292,6 +3310,27 @@ async def serve_dashboard():
             }
         }
 
+        // Draws the chosen frame to scale (longest edge pinned to 40px) so the
+        // orientation is obvious before a render is started, not after.
+        function updateAspectPreview() {
+            const sel = document.getElementById('resolution-select');
+            if (!sel) return;
+            const opt = sel.options[sel.selectedIndex];
+            const w = parseInt(opt.getAttribute('data-w')) || 1280;
+            const h = parseInt(opt.getAttribute('data-h')) || 720;
+            const orient = opt.getAttribute('data-orient') || 'Landscape';
+
+            const box = document.getElementById('aspect-preview-box');
+            const cap = 40;
+            const scale = cap / Math.max(w, h);
+            box.style.width = (w * scale) + 'px';
+            box.style.height = (h * scale) + 'px';
+
+            document.getElementById('aspect-preview-label').innerHTML =
+                '<span class="font-mono text-brand-glow font-bold">' + w + '×' + h + '</span>' +
+                ' · ' + orient + ' · every scene, caption and avatar is composed for this frame.';
+        }
+
         function insertScriptTag(tag) {
             const textarea = document.getElementById('prompt-input');
             const start = textarea.selectionStart || textarea.value.length;
@@ -3897,6 +3936,7 @@ async def serve_dashboard():
         fetchIdentities();
         fetchVideoAssets();
         updateScriptMetrics();
+        updateAspectPreview();
     </script>
 </body>
 </html>
