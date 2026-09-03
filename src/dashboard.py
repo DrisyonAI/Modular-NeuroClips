@@ -66,9 +66,10 @@ def create_tracked_job(
     resolution: str,
     voice: str,
     engine_type: str = "ffmpeg",
+    output_type: str = "video",
 ) -> str:
     global ACTIVE_JOB_ID
-    job_id = job_manager.create_job(topic, scene_count, art_style, resolution, voice, engine_type)
+    job_id = job_manager.create_job(topic, scene_count, art_style, resolution, voice, engine_type, output_type=output_type)
     ACTIVE_JOB_ID = job_id
     return job_id
 
@@ -238,7 +239,8 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         art_style=req.art_style,
         resolution=req.resolution,
         voice=req.voice,
-        engine_type=req.compiler_engine
+        engine_type=req.compiler_engine,
+        output_type=req.output_type or "video"
     )
     
     job = JOBS_DB[job_id]
@@ -363,7 +365,8 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
         art_style=req.art_style,
         resolution=req.resolution,
         voice=req.voice,
-        engine_type=req.compiler_engine
+        engine_type=req.compiler_engine,
+        output_type=req.output_type or "video"
     )
 
     def _run_custom_storyboard():
@@ -974,6 +977,7 @@ async def get_active_job_api():
 async def list_gallery_videos(session_job_id: Optional[str] = None):
     videos = []
     if OUTPUT_DIR.exists():
+        # 1. Rendered MP4 Videos
         for file in sorted(OUTPUT_DIR.glob("*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True):
             if session_job_id and session_job_id not in file.name:
                 continue
@@ -998,6 +1002,7 @@ async def list_gallery_videos(session_job_id: Optional[str] = None):
                     srt_filename = potential_srt.name
             
             videos.append({
+                "media_type": "video",
                 "filename": file.name,
                 "url": f"/static_renders/{file.name}",
                 "audio_url": audio_url,
@@ -1008,6 +1013,54 @@ async def list_gallery_videos(session_job_id: Optional[str] = None):
                 "created_at": stat.st_mtime,
                 "time_str": time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime))
             })
+
+        # 2. Rendered Instructional Slides
+        slide_patterns = ["slide_*.png", "*_slide.png"]
+        seen_slides = set()
+        for pat in slide_patterns:
+            for file in OUTPUT_DIR.glob(pat):
+                if file.name in seen_slides:
+                    continue
+                seen_slides.add(file.name)
+                if session_job_id and session_job_id not in file.name:
+                    continue
+
+                stat = file.stat()
+                audio_url = None
+                audio_filename = None
+                srt_url = None
+                srt_filename = None
+
+                # Check if audio/subtitles match job ID
+                parts = file.stem.split("_")
+                for p in parts:
+                    if len(p) == 8:
+                        potential_audio = OUTPUT_DIR / f"audio_{p}.mp3"
+                        if potential_audio.exists():
+                            audio_url = f"/static_renders/{potential_audio.name}"
+                            audio_filename = potential_audio.name
+                        potential_srt = OUTPUT_DIR / f"subtitles_{p}.srt"
+                        if potential_srt.exists():
+                            srt_url = f"/static_renders/{potential_srt.name}"
+                            srt_filename = potential_srt.name
+                        break
+
+                videos.append({
+                    "media_type": "slide",
+                    "filename": file.name,
+                    "url": f"/static_renders/{file.name}",
+                    "audio_url": audio_url,
+                    "audio_filename": audio_filename,
+                    "srt_url": srt_url,
+                    "srt_filename": srt_filename,
+                    "size_mb": round(stat.st_size / (1024 ** 2), 2),
+                    "created_at": stat.st_mtime,
+                    "time_str": time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime))
+                })
+
+        # Sort all production media by mtime descending
+        videos.sort(key=lambda x: x["created_at"], reverse=True)
+
     return {"videos": videos}
 
 @app.post("/api/v1/gallery/clear")
@@ -3070,24 +3123,266 @@ async def serve_dashboard():
             fetchGallery();
         }
 
+        // =========================================================================
+        // 🎞️ PRODUCTION MEDIA VAULT: VIDEO STATE MACHINE & LIFECYCLE MANAGEMENT
+        // =========================================================================
+        // State Model:
+        // 1. RENDERING: Backend is currently synthesizing video/audio.
+        // 2. READY: Backend render finished & valid MP4 exists on disk. Video element ready.
+        // 3. LOADING_VIDEO: MP4 exists, browser is actively buffering data.
+        // 4. PLAYABLE: Browser has loaded enough data for seamless playback.
+        // 5. ERROR: MP4 cannot be loaded or played.
+
+        window.VIDEO_STATES = window.VIDEO_STATES || {};
+        let LAST_FETCHED_COMPLETED_JOB_ID = null;
+        let CACHED_GALLERY_FINGERPRINT = "";
+
+        function setVideoCardState(safeId, state, message = "") {
+            window.VIDEO_STATES[safeId] = state;
+            const badge = document.getElementById(`badge-${safeId}`);
+            const overlay = document.getElementById(`overlay-${safeId}`);
+            const spinner = document.getElementById(`spinner-${safeId}`);
+            const statusText = document.getElementById(`status-text-${safeId}`);
+            const video = document.getElementById(`video-${safeId}`);
+
+            if (!badge) return;
+
+            if (state === 'READY') {
+                badge.innerText = 'READY';
+                badge.className = 'px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-slate-900/80 text-cyan-300 border border-cyan-500/30';
+                if (overlay) overlay.classList.add('hidden');
+            } else if (state === 'LOADING_VIDEO') {
+                badge.innerText = 'BUFFERING';
+                badge.className = 'px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-slate-900/80 text-amber-300 border border-amber-500/30';
+                if (overlay) {
+                    overlay.classList.remove('hidden');
+                    if (spinner) spinner.classList.remove('hidden');
+                    if (statusText) statusText.innerText = message || 'Buffering video data...';
+                }
+            } else if (state === 'PLAYABLE') {
+                badge.innerText = 'PLAYABLE';
+                badge.className = 'px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-slate-900/80 text-emerald-300 border border-emerald-500/30';
+                if (overlay) overlay.classList.add('hidden');
+            } else if (state === 'ERROR') {
+                badge.innerText = 'ERROR';
+                badge.className = 'px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-red-950/80 text-red-400 border border-red-500/40';
+                if (overlay) {
+                    overlay.classList.remove('hidden');
+                    if (spinner) spinner.classList.add('hidden');
+                    if (statusText) statusText.innerHTML = `<span>⚠️ ${message || 'Failed to load video.'}</span> <button onclick="retryVideoLoad('${safeId}')" class="underline text-xs text-brand-glow ml-1 cursor-pointer pointer-events-auto">Retry</button>`;
+                }
+            }
+        }
+
+        function retryVideoLoad(safeId) {
+            const video = document.getElementById(`video-${safeId}`);
+            if (video) {
+                setVideoCardState(safeId, 'LOADING_VIDEO', 'Retrying video load...');
+                video.load();
+            }
+        }
+
+        function onVideoLifecycleEvent(safeId, eventName) {
+            const video = document.getElementById(`video-${safeId}`);
+            if (!video) return;
+
+            switch (eventName) {
+                case 'loadedmetadata':
+                    if (video.readyState >= 2) {
+                        setVideoCardState(safeId, 'PLAYABLE');
+                    } else {
+                        setVideoCardState(safeId, 'READY');
+                    }
+                    break;
+                case 'loadeddata':
+                case 'canplay':
+                case 'canplaythrough':
+                    setVideoCardState(safeId, 'PLAYABLE');
+                    break;
+                case 'waiting':
+                    // Genuine buffering during playback
+                    if (video.currentTime > 0 && !video.paused) {
+                        setVideoCardState(safeId, 'LOADING_VIDEO', 'Buffering...');
+                    }
+                    break;
+                case 'playing':
+                    setVideoCardState(safeId, 'PLAYABLE');
+                    break;
+                case 'error':
+                    const errCode = (video.error && video.error.code) ? `Code ${video.error.code}` : 'Network error';
+                    setVideoCardState(safeId, 'ERROR', errCode);
+                    break;
+            }
+        }
+
+        function updateVaultRenderingCard(activeJob) {
+            const container = document.getElementById('gallery-grid');
+            if (!container) return;
+            let card = document.getElementById('rendering-job-card');
+            const progress = activeJob.progress_percent || 10;
+            const milestone = activeJob.current_milestone || 'processing';
+            const label = (activeJob.output_type === 'slide') ? 'Instructional Slide Generating' : 'Video Rendering in Progress';
+
+            if (!card) {
+                const temp = document.createElement('div');
+                temp.innerHTML = `
+                <div id="rendering-job-card" class="glass-panel p-3.5 rounded-xl space-y-3 border border-brand-500/40 bg-brand-500/5 flex flex-col justify-between">
+                    <div class="space-y-2">
+                        <div class="relative w-full h-44 rounded-lg bg-slate-950 flex flex-col items-center justify-center p-4 border border-brand-500/20 text-center">
+                            <div class="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin mb-3"></div>
+                            <span class="text-xs font-bold text-white tracking-wide" id="rendering-job-title">${label}</span>
+                            <span class="text-[11px] font-mono text-brand-glow mt-1 capitalize" id="rendering-job-milestone">Milestone: ${milestone}</span>
+                            <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden mt-3 max-w-[200px]">
+                                <div id="rendering-job-bar" class="h-full bg-gradient-to-r from-brand-500 to-emerald-400 transition-all duration-300" style="width: ${progress}%"></div>
+                            </div>
+                            <div class="absolute top-2 left-2 pointer-events-none">
+                                <span class="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-brand-500/20 text-brand-glow border border-brand-500/30 animate-pulse">
+                                    RENDERING
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="pt-2 border-t border-slate-800 text-xs text-slate-400 flex justify-between">
+                        <span class="font-mono truncate">Job #${activeJob.job_id}</span>
+                        <span class="font-mono text-brand-glow" id="rendering-job-percent">${progress}%</span>
+                    </div>
+                </div>`;
+                card = temp.firstElementChild;
+                container.prepend(card);
+            } else {
+                const titleEl = document.getElementById('rendering-job-title');
+                const msEl = document.getElementById('rendering-job-milestone');
+                const barEl = document.getElementById('rendering-job-bar');
+                const pctEl = document.getElementById('rendering-job-percent');
+                if (titleEl) titleEl.innerText = label;
+                if (msEl) msEl.innerText = `Milestone: ${milestone}`;
+                if (barEl) barEl.style.width = `${progress}%`;
+                if (pctEl) pctEl.innerText = `${progress}%`;
+            }
+        }
+
+        function removeVaultRenderingCard() {
+            const card = document.getElementById('rendering-job-card');
+            if (card) {
+                card.remove();
+            }
+        }
+
         async function fetchGallery() {
             const container = document.getElementById('gallery-grid');
             try {
                 const url = (currentSessionOnly && activeSessionJobId) ? `/api/v1/gallery?session_job_id=${activeSessionJobId}` : '/api/v1/gallery';
                 const res = await fetch(url);
                 const data = await res.json();
+                const items = data.videos || [];
                 
-                if (data.videos.length === 0) {
+                const renderingCard = document.getElementById('rendering-job-card');
+                const hasRendering = !!renderingCard;
+
+                if (items.length === 0 && !hasRendering) {
+                    CACHED_GALLERY_FINGERPRINT = "";
                     container.innerHTML = `<div class="col-span-3 text-center text-xs text-slate-500 py-8 bg-slate-900/40 rounded-xl border border-slate-800/80">
-                        ${currentSessionOnly ? 'No videos rendered in this active session yet. Click Direct Render or Storyboard to create.' : 'Media Vault is empty.'}
+                        ${currentSessionOnly ? 'No media rendered in this active session yet. Click Direct Render or Storyboard to create.' : 'Media Vault is empty.'}
                     </div>`;
                     return;
                 }
 
-                container.innerHTML = data.videos.map(v => `
-                    <div class="glass-panel p-3.5 rounded-xl space-y-2.5 border border-slate-800/90 flex flex-col justify-between">
+                // Avoid wiping DOM if contents have not changed
+                const fingerprint = (currentSessionOnly ? 's_' : 'all_') + items.map(v => v.filename + '_' + v.size_mb).join('|');
+                if (fingerprint === CACHED_GALLERY_FINGERPRINT && !hasRendering) {
+                    return;
+                }
+                CACHED_GALLERY_FINGERPRINT = fingerprint;
+
+                const cardsHtml = items.map(v => {
+                    const isSlide = (v.media_type === 'slide' || v.filename.endsWith('.png'));
+                    const safeId = v.filename.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+                    if (isSlide) {
+                        return `
+                        <div class="glass-panel p-3.5 rounded-xl space-y-2.5 border border-slate-800/90 flex flex-col justify-between" id="card-${safeId}">
+                            <div class="space-y-2">
+                                <div class="relative w-full h-44 rounded-lg bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center group">
+                                    <img src="${v.url}" alt="${v.filename}" class="w-full h-full object-contain p-1" />
+                                    <div class="absolute top-2 left-2 pointer-events-none">
+                                        <span class="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-brand-500/20 text-brand-glow border border-brand-500/30">
+                                            SLIDE
+                                        </span>
+                                    </div>
+                                    <a href="${v.url}" target="_blank" class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                        <span class="px-2.5 py-1 rounded bg-black/80 text-xs text-white border border-slate-700">🔍 View High-Res Slide</span>
+                                    </a>
+                                </div>
+                                ${v.audio_url ? `
+                                <div class="p-2 rounded-lg bg-slate-950/80 border border-slate-800 space-y-1">
+                                    <div class="flex justify-between items-center text-[10px] text-slate-400">
+                                        <span>🎙️ Voiceover Audio Track</span>
+                                        <a href="${v.audio_url}" download class="text-brand-glow hover:underline">Download MP3</a>
+                                    </div>
+                                    <audio controls class="w-full h-6" src="${v.audio_url}"></audio>
+                                </div>
+                                ` : ''}
+                            </div>
+
+                            <div class="space-y-2 pt-1 border-t border-slate-800">
+                                <div class="flex items-center justify-between text-xs">
+                                    <span class="font-mono text-slate-300 truncate w-36" title="${v.filename}">${v.filename}</span>
+                                    <span class="text-slate-500 font-mono text-[11px]">${v.size_mb} MB</span>
+                                </div>
+
+                                <div class="flex justify-between items-center pt-1 border-t border-slate-800/60 text-xs">
+                                    <span class="text-[10px] text-slate-500">${v.time_str}</span>
+                                    <div class="flex items-center space-x-1.5">
+                                        ${v.srt_url ? `
+                                        <a href="${v.srt_url}" download="${v.srt_filename}" title="Download Subtitles (.srt)" class="px-2 py-0.5 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-mono transition-all">
+                                            📝 SRT
+                                        </a>` : ''}
+                                        <a href="${v.url}" download title="Download Slide Image" class="px-2 py-0.5 rounded bg-brand-500/10 hover:bg-brand-500/20 text-brand-glow text-[11px]">
+                                            PNG
+                                        </a>
+                                        <button onclick="deleteGalleryItem('${v.filename}')" title="Delete Slide" class="text-red-400 hover:text-red-300 p-1 text-[11px]">
+                                            🗑️
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>`;
+                    }
+
+                    return `
+                    <div class="glass-panel p-3.5 rounded-xl space-y-2.5 border border-slate-800/90 flex flex-col justify-between" id="card-${safeId}">
                         <div class="space-y-2">
-                            <video controls class="w-full h-40 rounded-lg bg-black object-cover" src="${v.url}"></video>
+                            <div class="relative w-full h-44 rounded-lg bg-black overflow-hidden group">
+                                <video
+                                    id="video-${safeId}"
+                                    controls
+                                    preload="metadata"
+                                    playsinline
+                                    class="w-full h-full object-cover"
+                                    src="${v.url}"
+                                    onloadedmetadata="onVideoLifecycleEvent('${safeId}', 'loadedmetadata')"
+                                    onloadeddata="onVideoLifecycleEvent('${safeId}', 'loadeddata')"
+                                    oncanplay="onVideoLifecycleEvent('${safeId}', 'canplay')"
+                                    oncanplaythrough="onVideoLifecycleEvent('${safeId}', 'canplaythrough')"
+                                    onwaiting="onVideoLifecycleEvent('${safeId}', 'waiting')"
+                                    onplaying="onVideoLifecycleEvent('${safeId}', 'playing')"
+                                    onerror="onVideoLifecycleEvent('${safeId}', 'error')"
+                                ></video>
+
+                                <!-- Video State Overlay: Hidden once ready/playable -->
+                                <div id="overlay-${safeId}" class="hidden absolute inset-0 bg-slate-950/70 backdrop-blur-[2px] flex flex-col items-center justify-center space-y-2 pointer-events-none transition-opacity duration-200">
+                                    <div id="spinner-${safeId}" class="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin"></div>
+                                    <span id="status-text-${safeId}" class="text-[11px] font-mono text-slate-300">Loading video data...</span>
+                                </div>
+
+                                <!-- State Badge Top-Left -->
+                                <div class="absolute top-2 left-2 pointer-events-none">
+                                    <span id="badge-${safeId}" class="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-slate-900/80 text-cyan-300 border border-cyan-500/30">
+                                        READY
+                                    </span>
+                                </div>
+                            </div>
+
                             ${v.audio_url ? `
                             <div class="p-2 rounded-lg bg-slate-950/80 border border-slate-800 space-y-1">
                                 <div class="flex justify-between items-center text-[10px] text-slate-400">
@@ -3128,8 +3423,26 @@ async def serve_dashboard():
                                 </div>
                             </div>
                         </div>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
+
+                container.innerHTML = cardsHtml;
+
+                // Immediately check if any videos are already ready/cached by the browser
+                items.forEach(v => {
+                    if (v.media_type !== 'slide' && !v.filename.endsWith('.png')) {
+                        const safeId = v.filename.replace(/[^a-zA-Z0-9_-]/g, '_');
+                        const vid = document.getElementById(`video-${safeId}`);
+                        if (vid) {
+                            if (vid.readyState >= 2) {
+                                setVideoCardState(safeId, 'PLAYABLE');
+                            } else {
+                                setVideoCardState(safeId, 'READY');
+                            }
+                        }
+                    }
+                });
+
             } catch (err) {
                 container.innerHTML = '<div class="col-span-3 text-center text-xs text-red-400 py-4">Failed to load media vault.</div>';
             }
@@ -4289,10 +4602,23 @@ async def serve_dashboard():
                     term.innerHTML = activeJob.logs.map(l => `<div class="leading-relaxed">${l}</div>`).join('');
                     term.scrollTop = term.scrollHeight;
                 }
+
+                // 1. Live RENDERING state representation in Media Vault
+                if (activeJob.status !== 'complete' && activeJob.status !== 'failed') {
+                    updateVaultRenderingCard(activeJob);
+                } else {
+                    removeVaultRenderingCard();
+                }
+
+                // 2. Fetch gallery ONCE upon completion (prevents infinite re-fetching and DOM wiping)
                 if (activeJob.status === 'complete' && activeJob.output_path) {
-                    fetchGallery();
+                    if (LAST_FETCHED_COMPLETED_JOB_ID !== activeJob.job_id) {
+                        LAST_FETCHED_COMPLETED_JOB_ID = activeJob.job_id;
+                        fetchGallery();
+                    }
                 }
             } else {
+                removeVaultRenderingCard();
                 renderMilestones(data.state.current_milestone || 'init');
             }
         };
