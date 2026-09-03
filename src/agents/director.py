@@ -17,6 +17,7 @@ from src.agents.voice_director import VoiceDirectorAgent
 from src.agents.image_generator import ImageGeneratorAgent
 from src.pipeline import MediaGenerationEngine
 from src.compiler import compile_final_video
+from src.config import get_resolution_dimensions
 
 
 class DirectorAgent:
@@ -200,6 +201,12 @@ class DirectorAgent:
         
         avatar_img_path = visual_contract.scene_visuals[0].avatar_overlay_path if visual_contract.scene_visuals else None
 
+        # `resolution` is threaded through scripting, voice and image generation
+        # above (see the ImageGeneratorAgent call) but was not reaching the
+        # compositor, so the aspect ratio chosen for this job never reached the
+        # exported file - the same defect fixed in the direct-prompt pipeline.
+        comp_width, comp_height = get_resolution_dimensions(resolution)
+
         final_video_path = compile_final_video(
             clip_paths=clip_paths,
             output_filename=output_filename,
@@ -210,7 +217,9 @@ class DirectorAgent:
             burn_subtitles=burn_subtitles,
             srt_path=voice_contract.subtitles_srt_path,
             intro_video_path=self.image_generator.resolve_video_source(intro_video_url),
-            outro_video_path=self.image_generator.resolve_video_source(outro_video_url)
+            outro_video_path=self.image_generator.resolve_video_source(outro_video_url),
+            width=comp_width,
+            height=comp_height
         )
 
         self.log("complete", "Video production complete", 100, f"[SUCCESS] Course video compiled: {Path(final_video_path).name}")

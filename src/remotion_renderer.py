@@ -20,10 +20,16 @@ def render_with_remotion(
     art_style_preset: str,
     scenes: List[Dict[str, Any]],
     output_filename: str = "final_production_remotion.mp4",
-    audio_path: Optional[str] = None
+    audio_path: Optional[str] = None,
+    width: int = RENDER_WIDTH,
+    height: int = RENDER_HEIGHT
 ) -> str:
     """
     Renders dynamic multi-layer scene sequences using Remotion React video engine.
+
+    `width`/`height` come from the job's resolution profile. They were previously
+    fixed at RENDER_WIDTH x RENDER_HEIGHT, so this engine ignored the requested
+    aspect ratio exactly as the FFmpeg path did.
     """
     final_output_path = OUTPUT_DIR / output_filename
 
@@ -31,7 +37,11 @@ def render_with_remotion(
         "title": title,
         "artStylePreset": art_style_preset,
         "scenes": scenes,
-        "audioPath": str(Path(audio_path).resolve()) if audio_path else ""
+        "audioPath": str(Path(audio_path).resolve()) if audio_path else "",
+        # The composition needs the canvas too, so React layers lay out against the
+        # real frame instead of assuming 16:9.
+        "width": width,
+        "height": height
     }
 
     props_file = OUTPUT_DIR / f"remotion_props_{Path(output_filename).stem}.json"
@@ -44,8 +54,8 @@ def render_with_remotion(
         "MainVideo",
         str(final_output_path.resolve()),
         f"--props={props_file.resolve()}",
-        f"--width={RENDER_WIDTH}",
-        f"--height={RENDER_HEIGHT}",
+        f"--width={width}",
+        f"--height={height}",
         "--overwrite"
     ]
 
