@@ -207,7 +207,11 @@ def run_production_pipeline(
             }
             for i, sc in enumerate(scenes)
         ]
-        generate_srt_subtitles(scenes_data, srt_file)
+        # Dimensions matter here too, not only at compile time: the caption chunker
+        # sizes each cue to the frame. Without them a 9:16 job gets the landscape
+        # character budget (~153 vs ~86), so cues wrap to five or six lines at
+        # portrait font size and run off the top of the frame.
+        generate_srt_subtitles(scenes_data, srt_file, width=width, height=height)
         job["srt_path"] = str(srt_file)
 
         # MILESTONE 5: COMPILATION
