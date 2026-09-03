@@ -117,7 +117,7 @@ def run_production_pipeline(
                 job_manager.log_milestone(
                     job_id, "keyframes", f"Composing instructional slide {idx}/{total}...", base_p, f"Scene {idx}: Instructional Slide -> {vis_prompt[:50]}..."
                 )
-                kf_path = str(OUTPUT_DIR / f"scene_{scene_id}_{job_id}_slide.png")
+                kf_path = str(OUTPUT_DIR / f"slide_{job_id}_scene_{scene_id}.png")
                 slide_title = scene.get("title") or f"Concept #{scene_id}: {title[:30]}"
                 engine.generate_instructional_slide(
                     title=slide_title,
@@ -129,15 +129,22 @@ def run_production_pipeline(
                 job["keyframe_paths"] = keyframe_paths
 
                 anim_p = 30 + int((idx / total) * 35)
-                job_manager.log_milestone(
-                    job_id, "animation", f"Rendering slide presentation {idx}/{total}...", anim_p, f"Scene {idx}: Static instructional slide ({dur}s)"
-                )
-                clip_path = engine.generate_video_clip(
-                    kf_path, mot_prompt, scene_id, job_id=job_id, width=width, height=height,
-                    force_refresh=True, motion_graphics=scene_motion, duration_sec=dur
-                )
-                clip_paths.append(clip_path)
-                job["clip_paths"] = clip_paths
+                if output_type == "slide":
+                    # Pure slide mode: do NOT generate video clips
+                    job_manager.log_milestone(
+                        job_id, "animation", f"Formatted slide presentation {idx}/{total}...", anim_p, f"Scene {idx}: Static instructional slide card ready"
+                    )
+                else:
+                    # Video mode containing a slide scene: render video clip for compositor
+                    job_manager.log_milestone(
+                        job_id, "animation", f"Rendering slide presentation {idx}/{total}...", anim_p, f"Scene {idx}: Static instructional slide ({dur}s)"
+                    )
+                    clip_path = engine.generate_video_clip(
+                        kf_path, mot_prompt, scene_id, job_id=job_id, width=width, height=height,
+                        force_refresh=True, motion_graphics=scene_motion, duration_sec=dur
+                    )
+                    clip_paths.append(clip_path)
+                    job["clip_paths"] = clip_paths
 
             else:
                 base_p = 30 + int(((idx - 0.5) / total) * 35)
@@ -214,7 +221,22 @@ def run_production_pipeline(
         generate_srt_subtitles(scenes_data, srt_file, width=width, height=height)
         job["srt_path"] = str(srt_file)
 
-        # MILESTONE 5: COMPILATION
+        # MILESTONE 5: COMPILATION & FINALIZATION
+        if output_type == "slide":
+            # Pure slide mode: skip video/MP4 compilation
+            job_manager.log_milestone(
+                job_id,
+                "compilation",
+                "Instructional slides finalized",
+                95,
+                f"Generated {len(keyframe_paths)} instructional slides with synchronized audio ({language}). Video compilation skipped per Slide mode.",
+            )
+            primary_slide = keyframe_paths[0] if keyframe_paths else str(OUTPUT_DIR / f"slide_{job_id}_deck.png")
+            job["slide_paths"] = keyframe_paths
+            job["output_type"] = "slide"
+            job_manager.complete_job(job_id, primary_slide)
+            return
+
         job_manager.log_milestone(
             job_id,
             "compilation",

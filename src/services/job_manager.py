@@ -1,10 +1,11 @@
-﻿"""
+"""
 Thread-safe job and pipeline state management service.
 Coordinates background production jobs, milestone progression, and SSE telemetry streams.
 """
 import time
 import uuid
 import threading
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 MILESTONES = [
@@ -45,6 +46,7 @@ class JobManager:
         resolution: str,
         voice: str,
         engine_type: str = "ffmpeg",
+        output_type: str = "video",
     ) -> str:
         """Initializes a new tracked job."""
         with self._lock:
@@ -62,6 +64,7 @@ class JobManager:
                 "resolution": resolution,
                 "voice": voice,
                 "engine_type": engine_type,
+                "output_type": output_type,
                 "status": "in_progress",
                 "current_milestone": "init",
                 "current_step": "Initializing pipeline",
@@ -71,13 +74,14 @@ class JobManager:
                 "script": None,
                 "clip_paths": [],
                 "keyframe_paths": [],
+                "slide_paths": [],
                 "audio_paths": [],
                 "srt_path": None,
                 "output_path": None,
                 "created_at": time.time(),
                 "updated_at": time.time(),
                 "logs": [
-                    f"[{time.strftime('%H:%M:%S')}] Job #{job_id} initiated: '{topic[:40]}...' ({resolution}, {engine_type})"
+                    f"[{time.strftime('%H:%M:%S')}] Job #{job_id} initiated: '{topic[:40]}...' ({resolution}, {output_type})"
                 ],
                 "milestones": {m["id"]: "pending" for m in MILESTONES},
             }
@@ -140,16 +144,20 @@ class JobManager:
                 job["output_path"] = output_path
                 job["progress_percent"] = 100
                 job["milestones"] = {m["id"]: "completed" for m in MILESTONES}
+                is_slide = (job.get("output_type") == "slide")
+                clean_name = Path(output_path).name if output_path else ("output.png" if is_slide else "output.mp4")
+                output_label = "Slide presentation ready" if is_slide else "Video ready"
                 self.log_milestone(
                     job_id,
                     "complete",
-                    f"Video ready: {output_path.split('/')[-1].split('\\')[-1]}",
+                    f"{output_label}: {clean_name}",
                     100,
-                    f"[SUCCESS] Production finished: {output_path}",
+                    f"[SUCCESS] Production finished ({job.get('output_type', 'video')}): {output_path}",
                 )
 
             self.pipeline_state["status"] = "Complete"
-            self.pipeline_state["current_step"] = f"Saved: {output_path.split('/')[-1].split('\\')[-1]}"
+            clean_name = Path(output_path).name if output_path else "output"
+            self.pipeline_state["current_step"] = f"Saved: {clean_name}"
 
     def fail_job(self, job_id: str, error_msg: str):
         """Marks job and pipeline as failed."""
