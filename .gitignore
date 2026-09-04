@@ -19,3 +19,9 @@ exports/
 *.zip
 *.log
 .DS_Store
+.agents/
+graphify-out/
+test_tmp/
+!wire_frames/*.jpeg
+!wire_frames/*.png
+!wire_frames/*.webp
