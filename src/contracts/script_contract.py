@@ -1,12 +1,86 @@
 """
 Script Contract defining multi-scene educational structure and directorial cues.
 """
-from typing import List, Optional
+from enum import Enum
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 try:
     from .persona import RegionLocaleEnum
 except ImportError:
     from src.contracts.persona import RegionLocaleEnum
+
+
+class CourseSegmentEnum(str, Enum):
+    """
+    Pedagogical course segment classifications defining instructional screen treatments.
+    """
+    LESSON_OPENING = "lesson_opening"           # Presenter/avatar, 15–30 sec: Establishes authority & topic context
+    CORE_EXPLANATION = "core_explanation"       # Full-screen deck visuals: Learners read framework, diagram or case
+    WORKED_CASE = "worked_case"                 # Animated cards, timelines, charts & diagrams: Stepwise reveal
+    TOOL_WORKFLOW = "tool_workflow"             # Screen capture + visual callouts: Focuses on action, not presenter
+    RISK_CONTROLS = "risk_controls"             # Diagram plus highlighted control points: Explicit control boundaries
+    ACTIVITY_BRIEFING = "activity_briefing"     # Presenter/avatar + screen walkthrough: Human touch for lab briefing
+    CLOSING_SUMMARY = "closing_summary"         # Presenter/avatar, 20–45 sec: Reinforces key takeaway & quiz handoff
+
+
+SEGMENT_SCREEN_TREATMENTS: Dict[CourseSegmentEnum, Dict[str, Any]] = {
+    CourseSegmentEnum.LESSON_OPENING: {
+        "suggested_treatment": "Presenter/avatar, 15–30 sec",
+        "why": "Establishes authority and topic context",
+        "default_avatar_layout": "full_anchor",
+        "default_output_type": "video",
+        "min_duration_sec": 15.0,
+        "max_duration_sec": 30.0,
+    },
+    CourseSegmentEnum.CORE_EXPLANATION: {
+        "suggested_treatment": "Full-screen deck visuals",
+        "why": "Learners need to read the framework, diagram or case",
+        "default_avatar_layout": "none",
+        "default_output_type": "slide",
+        "min_duration_sec": 20.0,
+        "max_duration_sec": 60.0,
+    },
+    CourseSegmentEnum.WORKED_CASE: {
+        "suggested_treatment": "Animated cards, timelines, charts and diagrams",
+        "why": "Financial cases need stepwise reveal",
+        "default_avatar_layout": "none",
+        "default_output_type": "video",
+        "min_duration_sec": 15.0,
+        "max_duration_sec": 45.0,
+    },
+    CourseSegmentEnum.TOOL_WORKFLOW: {
+        "suggested_treatment": "Screen capture + visual callouts",
+        "why": "Learners must see the action, not the presenter",
+        "default_avatar_layout": "pip_top_right",
+        "default_output_type": "video",
+        "min_duration_sec": 20.0,
+        "max_duration_sec": 60.0,
+    },
+    CourseSegmentEnum.RISK_CONTROLS: {
+        "suggested_treatment": "Diagram plus highlighted control points",
+        "why": "Keeps the control boundary visually explicit",
+        "default_avatar_layout": "none",
+        "default_output_type": "slide",
+        "min_duration_sec": 15.0,
+        "max_duration_sec": 45.0,
+    },
+    CourseSegmentEnum.ACTIVITY_BRIEFING: {
+        "suggested_treatment": "Presenter/avatar + screen walkthrough",
+        "why": "Gives instructions a human touch",
+        "default_avatar_layout": "split_screen",
+        "default_output_type": "video",
+        "min_duration_sec": 15.0,
+        "max_duration_sec": 40.0,
+    },
+    CourseSegmentEnum.CLOSING_SUMMARY: {
+        "suggested_treatment": "Presenter/avatar, 20–45 sec",
+        "why": "Reinforces key takeaway and quiz handoff",
+        "default_avatar_layout": "pip_bottom_right",
+        "default_output_type": "video",
+        "min_duration_sec": 20.0,
+        "max_duration_sec": 45.0,
+    },
+}
 
 
 class ScriptScene(BaseModel):
@@ -15,12 +89,22 @@ class ScriptScene(BaseModel):
     """
     scene_id: int = Field(..., description="1-indexed sequence identifier")
     title: str = Field(..., description="Pedagogical scene concept title")
+    segment_type: Optional[CourseSegmentEnum] = Field(
+        default=CourseSegmentEnum.CORE_EXPLANATION,
+        description="Pedagogical segment role governing visual screen treatment"
+    )
+    suggested_screen_treatment: Optional[str] = Field(
+        default=None,
+        description="Screen treatment rationale (e.g. Full-screen deck visuals, Avatar, Animated cards)"
+    )
     narration: str = Field(..., description="Spoken script with optional director cues [pause 500ms], [emphasis], etc.")
     visual_description: str = Field(..., description="High-detail scene visual prompt for image/video synthesis")
     motion_prompt: str = Field(default="Slow cinematic tracking shot", description="Camera motion instructions")
     estimated_duration_sec: float = Field(default=6.0, description="Estimated duration in seconds")
     video_source_type: str = Field(default="ai_generated", description="'ai_generated' or 'uploaded_video'")
     video_source_url: Optional[str] = Field(default=None, description="Static URL if using uploaded video asset")
+    avatar_layout: Optional[str] = Field(default=None, description="Per-scene layout override, e.g. 'full_anchor', 'split_screen'")
+    output_type: Optional[str] = Field(default="video", description="'video' or 'slide'")
 
 
 class ScriptContract(BaseModel):
@@ -34,3 +118,4 @@ class ScriptContract(BaseModel):
     total_word_count: int
     estimated_total_runtime_sec: float
     scenes: List[ScriptScene] = Field(..., min_length=1)
+

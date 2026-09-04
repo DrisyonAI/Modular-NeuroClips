@@ -851,6 +851,67 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
     }
 
 
+class ScenarioGenerateRequest(BaseModel):
+    topic: str
+    domain: Optional[str] = "FinTech & Enterprise Risk"
+    presenter_persona: Optional[str] = "srinivas_cloud"
+    depth: Optional[int] = 2
+
+
+@app.post("/api/v1/scenario/generate")
+async def generate_scenario_api(req: ScenarioGenerateRequest):
+    """Generates an adaptive NeuroBranch™ branching scenario decision DAG."""
+    try:
+        from src.scenario_orchestrator import ScenarioOrchestrator
+        orchestrator = ScenarioOrchestrator()
+        dag = orchestrator.generate_scenario_dag(
+            topic=req.topic,
+            domain=req.domain or "FinTech & Enterprise Risk",
+            presenter_persona=req.presenter_persona or "srinivas_cloud",
+            depth=req.depth or 2,
+        )
+        return {
+            "status": "ok",
+            "scenario": dag.model_dump() if hasattr(dag, "model_dump") else dag.dict()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate scenario: {e}")
+
+
+class ScenarioExportRequest(BaseModel):
+    scenario_dag: Dict[str, Any]
+    pass_percentage: Optional[int] = 70
+
+
+@app.post("/api/v1/scenario/export-scorm")
+async def export_scenario_scorm_api(req: ScenarioExportRequest):
+    """Exports a generated scenario DAG into a ready-to-deploy SCORM 1.2 / 2004 ZIP package."""
+    try:
+        from src.contracts.scenario_contract import ScenarioDAGContract
+        from src.scorm_packager import SCORMPackager
+
+        dag = ScenarioDAGContract(**req.scenario_dag)
+        errors = dag.validate_graph_integrity()
+        if errors:
+            raise HTTPException(status_code=400, detail=f"Invalid DAG: {'; '.join(errors)}")
+
+        packager = SCORMPackager(course_id=dag.scenario_id, course_title=dag.title)
+        zip_path = packager.export_scenario_zip(dag, pass_percentage=req.pass_percentage or 70)
+
+        return {
+            "status": "ok",
+            "package_name": zip_path.name,
+            "download_url": f"/static_exports/{zip_path.name}",
+            "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
+            "title": dag.title,
+            "total_nodes": len(dag.nodes)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to export SCORM simulation: {e}")
+
+
 @app.get("/api/v1/scorm/packages")
 async def list_scorm_packages():
     """Lists all available SCORM zip packages in the exports directory."""
