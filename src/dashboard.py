@@ -1738,8 +1738,8 @@ async def serve_dashboard():
                                     <label class="block text-[10px] text-slate-300 mb-1">Voice ID (or Cloned ID)</label>
                                     <select id="elevenlabs-voice-id" onchange="localStorage.setItem('neuroclips_eleven_voice', this.value)" class="w-full rounded bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
                                         <option value="21m00Tcm4TlvDq8ikWAM" selected>Rachel (Female - Warm & Professional)</option>
+                                        <option value="ErXwobaYiN019PkySvjV">Srinivas / Antoni (Male - Engaging Instructor)</option>
                                         <option value="pNInz6obpgDQGcFmaJgB">Adam (Male - Deep & Executive)</option>
-                                        <option value="ErXwobaYiN019PkySvjV">Antoni (Male - Engaging Narrator)</option>
                                         <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female - Crisp Educational)</option>
                                         <option value="TxGEqnHWrfWFTfGW9XjX">Josh (Male - Conversational Host)</option>
                                     </select>
@@ -1769,6 +1769,7 @@ async def serve_dashboard():
                                     <span id="active-voice-badge" class="text-[10px] text-brand-glow font-mono">en-IN Neerja</span>
                                 </div>
                                 <select id="voice-select" onchange="updateActiveVoiceBadge()" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
+                                    <option value="en-IN-PrabhatNeural">Srinivas (en-IN, Male - Cloud & AI Lead)</option>
                                     <option value="en-IN-NeerjaNeural" selected>Neerja (en-IN, Female - Instructional)</option>
                                     <option value="en-US-GuyNeural">Guy (en-US, Male - Executive)</option>
                                     <option value="en-US-AriaNeural">Aria (en-US, Female - Presenter)</option>
@@ -1943,7 +1944,8 @@ async def serve_dashboard():
                                     <option value="alex_ai">Alex (Enterprise AI Architect)</option>
                                     <option value="elena_compliance">Elena (Risk & Governance Director)</option>
                                     <option value="david_trainer">David (Global LMS Instructor)</option>
-                                    <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
+                                    <option value="srinivas_cloud">Srinivas (Lead AI & Cloud Architect)</option>
+                                    <option value="rajesh_cloud" style="display:none;">Rajesh (Legacy)</option>
                                     <option value="custom_upload">Custom Uploaded Portrait</option>
                                 </select>
                                 <span id="persona-meta-badge" class="text-[10px] text-brand-glow font-mono block mt-1">🇮🇳 South Asian | en-IN (Neerja) | FinTech</span>
@@ -4568,7 +4570,8 @@ async def serve_dashboard():
             "alex_ai": { voice: "en-US-GuyNeural", eleven_voice: "pNInz6obpgDQGcFmaJgB", pitch: "-2Hz", speed: 1.0, badge: "🇺🇸 Caucasian | en-US (Guy) | AI Architect" },
             "elena_compliance": { voice: "en-US-AriaNeural", eleven_voice: "EXAVITQu4vr4xnSDxMaL", pitch: "+0Hz", speed: 0.95, badge: "🇪🇸 Latina | en-US (Aria) | Governance" },
             "david_trainer": { voice: "en-US-ChristopherNeural", eleven_voice: "TxGEqnHWrfWFTfGW9XjX", pitch: "+0Hz", speed: 1.0, badge: "🇺🇸 Global LMS | en-US (Christopher)" },
-            "rajesh_cloud": { voice: "en-IN-PrabhatNeural", eleven_voice: "ErXwobaYiN019PkySvjV", pitch: "-1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Prabhat) | Cloud" }
+            "srinivas_cloud": { voice: "en-IN-PrabhatNeural", eleven_voice: "ErXwobaYiN019PkySvjV", pitch: "-1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Prabhat) | Cloud & AI" },
+            "rajesh_cloud": { voice: "en-IN-PrabhatNeural", eleven_voice: "ErXwobaYiN019PkySvjV", pitch: "-1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Prabhat) | Cloud & AI" }
         };
 
         function onPersonaSelectChange(val) {
