@@ -48,14 +48,16 @@ class ScriptOrchestrator:
         topic: str,
         scene_count: int = 4,
         art_style: str = "Photorealistic 8K (Architectural / Corporate)",
-        avatar_persona: str = "maya_fintech"
+        avatar_persona: str = "maya_fintech",
+        voiceover_script: Optional[str] = None
     ) -> VideoScript:
         persona = get_persona_contract(avatar_persona)
         contract = self.scriptwriter.generate_script(
             topic=topic,
             scene_count=scene_count,
             persona=persona,
-            art_style=art_style
+            art_style=art_style,
+            voiceover_script=voiceover_script
         )
         
         legacy_scenes = [

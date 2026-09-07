@@ -1,0 +1,309 @@
+{
+  "schemaVersion": "1.0",
+  "course": {
+    "id": "course-ai-hr-001",
+    "version": "1.0.0",
+    "title": "AI-Powered HR",
+    "description": "A practical, interactive introduction to AI-assisted recruitment, talent intelligence, and automated onboarding workflows.",
+    "thumbnail": "assets/images/course.jpg",
+    "durationMinutes": 150,
+    "audience": "HR professionals, recruiters, talent acquisition specialists, and people managers",
+    "learningObjectives": [
+      "Explain where generative and agentic AI realistically supports HR workflows",
+      "Apply structured screening, sourcing, and evaluation rubrics",
+      "Evaluate AI recommendations with human judgment and governance standards",
+      "Master the modern AI Recruiter's Toolkit for day-to-day operations"
+    ],
+    "settings": {
+      "sequentialModules": false,
+      "sequentialLessons": false,
+      "showResumePrompt": true,
+      "courseCompletion": "all_lessons",
+      "autosaveSeconds": 10
+    },
+    "modules": [
+      {
+        "id": "module-1",
+        "number": 1,
+        "title": "Introduction to AI in Enterprise People Operations",
+        "description": "Foundational concepts, generative models, and responsible adoption.",
+        "durationMinutes": 45,
+        "lessons": [
+          {
+            "id": "lesson-1-1",
+            "number": "1.1",
+            "title": "What is AI in People Operations?",
+            "description": "Core concepts and the transition from manual HR tasks to intelligent workflows.",
+            "durationMinutes": "15 Min",
+            "learningMode": "Concept + Reading",
+            "objectives": [
+              "Define artificial intelligence in practical HR terms",
+              "Identify high-friction manual operational bottlenecks"
+            ],
+            "targetAudience": "HR Professionals, People Managers, Talent Acquisition",
+            "content": [
+              {
+                "type": "heading",
+                "level": 2,
+                "text": "The Evolution of People Operations"
+              },
+              {
+                "type": "paragraph",
+                "text": "Artificial Intelligence in enterprise HR is not about replacing human connections—it is about removing administrative friction so HR leaders can focus on culture, candidate experience, and strategic alignment."
+              },
+              {
+                "type": "callout",
+                "variant": "key",
+                "title": "KEY LEARNING",
+                "text": "AI augments people; it does not remove human accountability or ethical decision-making."
+              }
+            ],
+            "quiz": {
+              "id": "quiz-1-1",
+              "title": "Module 1 Knowledge Check",
+              "passingScore": 70,
+              "maxAttempts": 3,
+              "allowRetry": true,
+              "questions": [
+                {
+                  "id": "q1-1",
+                  "type": "single",
+                  "text": "What is AI's primary and appropriate role in enterprise human resources?",
+                  "options": [
+                    "Replace human recruiters entirely",
+                    "Support repetitive manual activities while humans retain judgment",
+                    "Eliminate in-person interviews",
+                    "Hide candidate screening rationale"
+                  ],
+                  "answer": "B",
+                  "feedback": "AI should support speed and scale while human recruiters remain responsible for judgment, context, and decisions.",
+                  "source_topic": "Foundations"
+                }
+              ]
+            },
+            "completion": {
+              "type": "quiz_pass",
+              "requiredScore": 70
+            }
+          }
+        ]
+      },
+      {
+        "id": "module-2",
+        "number": 2,
+        "title": "The Future of Talent - AI-Driven Recruitment & Onboarding",
+        "description": "Deploying generative tools, semantic sourcing, automated rubrics, and personalized onboarding pipelines.",
+        "durationMinutes": 105,
+        "lessons": [
+          {
+            "id": "lesson-2-1",
+            "number": "2.1",
+            "title": "Module Overview & Learning Objectives",
+            "description": "Strategic orientation for AI-assisted talent acquisition.",
+            "durationMinutes": "15 Min",
+            "learningMode": "Concept + Demonstration",
+            "objectives": [
+              "Analyze current recruiting velocity challenges",
+              "Map out the 6 primary AI talent acquisition use cases"
+            ],
+            "targetAudience": "Recruiters, HR Business Partners, Talent Leaders",
+            "content": [
+              {
+                "type": "heading",
+                "level": 2,
+                "text": "Welcome to AI-Driven Recruitment"
+              },
+              {
+                "type": "paragraph",
+                "text": "In this module, you will discover how AI-augmented workflows empower recruiting teams to process high volumes of applicants without sacrificing quality or candidate rapport."
+              },
+              {
+                "type": "pills",
+                "items": [
+                  "Accelerated Candidate Sourcing",
+                  "Bias-Guarded Resume Screening",
+                  "Hyper-Personalized Candidate Engagement",
+                  "Structured Interview Scoring Rubrics"
+                ]
+              }
+            ],
+            "completion": {
+              "type": "view"
+            }
+          },
+          {
+            "id": "lesson-2-2",
+            "number": "2.2",
+            "title": "From Traditional Recruitment to AI-Augmented Recruitment",
+            "description": "Comparing legacy manual screening against structured AI-assisted pipelines.",
+            "durationMinutes": "30 Min",
+            "learningMode": "Demonstration + Case Study",
+            "objectives": [
+              "Contrast traditional sequential recruiting steps with agentic workflows",
+              "Apply productivity techniques for high-volume candidate funnels"
+            ],
+            "targetAudience": "Talent Acquisition Specialists, Recruiters, People Managers",
+            "video": {
+              "src": "assets/videos/lesson_2_2.mp4",
+              "poster": "assets/images/lesson_2_2_poster.jpg",
+              "required": false,
+              "completionThreshold": 0.85
+            },
+            "content": [
+              {
+                "type": "heading",
+                "level": 2,
+                "text": "From Traditional Recruitment to AI-Augmented Recruitment"
+              },
+              {
+                "type": "paragraph",
+                "text": "Traditional recruitment often involves repetitive manual activities that consume the majority of a recruiter's daily schedule:"
+              },
+              {
+                "type": "pills",
+                "items": [
+                  "Reading large numbers of CVs",
+                  "Writing and rewriting job descriptions",
+                  "Searching multiple databases",
+                  "Preparing interview questions",
+                  "Sending repetitive candidate communication",
+                  "Creating interview summaries",
+                  "Preparing stakeholder updates",
+                  "Maintaining recruitment reports"
+                ]
+              },
+              {
+                "type": "paragraph",
+                "text": "Generative AI can assist with many of these activities."
+              },
+              {
+                "type": "comparison",
+                "cards": [
+                  {
+                    "title": "Traditional Model",
+                    "variant": "neutral",
+                    "content": "Recruiter → Search → Screen → Communicate → Interview → Report"
+                  },
+                  {
+                    "title": "AI-Augmented Model - IMAGE",
+                    "variant": "highlight",
+                    "content": "Recruiter + AI → Search → Prioritize → Personalize → Evaluate → Decide"
+                  }
+                ]
+              },
+              {
+                "type": "note",
+                "text": "The important distinction is that AI can support speed and scale, while the recruiter remains responsible for judgment, context, and decision-making."
+              },
+              {
+                "type": "example",
+                "title": "EXAMPLE: RECRUITMENT PRODUCTIVITY - VIDEO",
+                "lead": "Imagine a recruiter has 250 applications for one position. Instead of manually beginning with every CV, the recruiter can use an approved AI workflow to:",
+                "steps": [
+                  "Define the role criteria.",
+                  "Separate must-have and nice-to-have requirements.",
+                  "Create a structured screening rubric.",
+                  "Summarize candidate information.",
+                  "Identify potential matches.",
+                  "Flag missing information.",
+                  "Prepare interview questions."
+                ],
+                "conclusion": "The recruiter then reviews the evidence and makes the final decision."
+              },
+              {
+                "type": "callout",
+                "variant": "key",
+                "title": "KEY LEARNING",
+                "text": "AI does not eliminate the recruiter. It eliminates unnecessary recruiter effort."
+              }
+            ],
+            "completion": {
+              "type": "view"
+            }
+          },
+          {
+            "id": "lesson-2-3",
+            "number": "2.3",
+            "title": "The AI Recruiter's Toolkit",
+            "description": "Essential tool categories, prompt structures, and capability matrix.",
+            "durationMinutes": "2.5 Hours",
+            "learningMode": "Concept + Demonstration + Hands-on Practice + Assessment",
+            "objectives": [
+              "Categorize AI tools across the recruitment lifecycle",
+              "Map activities to validated automation assistants",
+              "Verify compliance and bias boundaries"
+            ],
+            "targetAudience": "HR Professionals, Talent Acquisition Professionals, Recruiters, HR Business Partners, and People Managers",
+            "content": [
+              {
+                "type": "paragraph",
+                "text": "A practical AI Recruiter's Toolkit can include several categories of tools."
+              },
+              {
+                "type": "table",
+                "caption": "Toolkit Mapping Matrix",
+                "headers": ["Recruitment Activity", "AI Assistance"],
+                "rows": [
+                  ["Job Description", "Generate, improve, and standardize JDs with gender-neutral phrasing"],
+                  ["Sourcing", "Search across talent pools and extract candidate skill profiles"],
+                  ["Screening", "Match candidate qualifications against structured role rubrics"],
+                  ["Communication", "Draft personalized invitation notes and status communications"],
+                  ["Interview Preparation", "Generate evidence-based behavioral interview questions"],
+                  ["Interview Summary", "Synthesize panel feedback and highlight skill proficiencies"],
+                  ["Onboarding", "Generate customized day-one schedules and team briefing packs"]
+                ]
+              },
+              {
+                "type": "callout",
+                "variant": "key",
+                "title": "KEY LEARNING",
+                "text": "Always maintain an audit trail for AI tool recommendations to ensure objective and defensible hiring processes."
+              }
+            ],
+            "quiz": {
+              "id": "quiz-2-3",
+              "title": "The AI Recruiter's Toolkit Assessment",
+              "passingScore": 70,
+              "maxAttempts": 3,
+              "allowRetry": true,
+              "questions": [
+                {
+                  "id": "q2-3-1",
+                  "type": "single",
+                  "text": "When using AI for job description creation, what is the most valuable augmentation benefit?",
+                  "options": [
+                    "Eliminating the need to hire department managers",
+                    "Standardizing requirements and auditing for inclusive language",
+                    "Publishing postings without human signoff",
+                    "Automatically rejecting all applicants under 5 years experience"
+                  ],
+                  "answer": "B",
+                  "feedback": "Standardizing requirements and removing subtle gendered or biased language is a major proven benefit of AI JD generators.",
+                  "source_topic": "Toolkit"
+                },
+                {
+                  "id": "q2-3-2",
+                  "type": "single",
+                  "text": "Who remains accountable for candidate selection decisions in an AI-augmented workflow?",
+                  "options": [
+                    "The software vendor who licensed the AI model",
+                    "The automated screening algorithm",
+                    "The human recruiter and hiring committee",
+                    "The applicant tracking system database"
+                  ],
+                  "answer": "C",
+                  "feedback": "Human recruiters and hiring managers remain solely accountable for all candidate selection decisions.",
+                  "source_topic": "Governance"
+                }
+              ]
+            },
+            "completion": {
+              "type": "quiz_pass",
+              "requiredScore": 70
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
