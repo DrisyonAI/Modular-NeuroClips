@@ -13,6 +13,7 @@ import json
 import time
 import zipfile
 import tempfile
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -244,6 +245,62 @@ def test_voice_director_enhancements():
     assert contract.bg_music_applied is True
     print("  [PASS] Enhanced VoiceContract schema validated.")
 
+def test_document_parser_and_voice_cloner():
+    """Test 5: Verify Document Parser slicing, Voice Cloner normalization, and Dynamic Persona registration."""
+    print("\n--- [TEST 5] Document Parser, Voice Cloner & Dynamic Persona Registration ---")
+    from src.document_parser import DocumentParser
+    from src.agents.voice_cloner import VoiceCloner
+    from src.contracts.persona import PERSONA_CATALOG, get_persona_contract, GenderEnum, RegionLocaleEnum
+
+    # 1. Document Parser & Slicing Test
+    raw_document = """
+    # Executive Overview of FinTech Risk
+    Artificial intelligence is revolutionizing algorithmic market compliance across India.
+    Financial institutions utilize machine learning models to detect real-time transaction anomalies.
+    
+    ## Regulatory Architecture
+    The Reserve Bank of India mandates rigorous KYC and AML compliance audits.
+    Non-Banking Financial Companies must report credit ratings directly through verified APIs.
+    Decentralized ledgers provide tamper-proof evidentiary logs for financial transactions.
+    
+    ## Practical Implementation
+    Engineers must ensure zero data drift across high-frequency trade evaluation cycles.
+    """
+    res = DocumentParser.slice_into_scenes(raw_document, target_words_per_scene=25, max_scenes=10)
+    assert res.total_scenes >= 2, f"Expected >= 2 scenes, got {res.total_scenes}"
+    assert res.total_words > 40, f"Expected > 40 words, got {res.total_words}"
+    assert len(res.scenes) == res.total_scenes
+    print(f"  [PASS] Document Parser successfully sliced document into {res.total_scenes} pedagogical scenes ({res.total_words} words).")
+
+    # 2. Voice Cloner Normalization & Registration Test
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        raw_sample = tmp_path / "user_sample.wav"
+        
+        # Generate 6 seconds of test audio tone via ffmpeg
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=6", "-c:a", "pcm_s16le", str(raw_sample)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert raw_sample.exists(), "Failed to generate synthetic test audio sample"
+
+        cloner = VoiceCloner(voices_dir=tmp_path / "voices")
+        persona = cloner.register_user_voice(
+            display_name="Dr. Srinivas Velaga",
+            raw_audio_path=raw_sample,
+            gender=GenderEnum.MALE,
+            target_locale=RegionLocaleEnum.EN_IN,
+            industry_domain="FinTech Architecture"
+        )
+
+        assert persona.persona_id.startswith("dr_srinivas_velaga"), f"Unexpected persona_id: {persona.persona_id}"
+        assert persona.persona_id in PERSONA_CATALOG, "Custom persona not found in runtime PERSONA_CATALOG"
+        
+        fetched = get_persona_contract(persona.persona_id)
+        assert fetched.display_name == "Dr. Srinivas Velaga"
+        assert fetched.gender == GenderEnum.MALE
+        print(f"  [PASS] Voice Cloner audio normalization and custom persona dynamic registration verified ({persona.persona_id}).")
+
 def run_all_tests():
     print("===================================================================")
     print("Modular-NeuroClips Quality & Workflow Verification Suite")
@@ -252,6 +309,7 @@ def run_all_tests():
     test_external_video_scorm_builder()
     test_nipuna_item_bank_integrity()
     test_voice_director_enhancements()
+    test_document_parser_and_voice_cloner()
     print("\n===================================================================")
     print("ALL TESTS PASSED: Quality, role division & SCORM workflow verified!")
     print("===================================================================")

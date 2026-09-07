@@ -641,6 +641,214 @@ async def preview_tts_voice_api(voice: str = Query("en-IN-NeerjaNeural"), rate: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Voice preview failed: {str(e)}")
 
+# -------------------------------------------------------------------------
+# CUSTOM VOICE CLONING & UNIVERSAL DOCUMENT SPEECH APIS
+# -------------------------------------------------------------------------
+from fastapi import Form
+from src.agents.voice_cloner import VoiceCloner
+from src.document_parser import DocumentParser
+from src.contracts.persona import (
+    PERSONA_CATALOG,
+    PersonaIdentityContract,
+    GenderEnum,
+    RegionLocaleEnum,
+    get_persona_contract,
+    load_custom_personas
+)
+from src.contracts.script_contract import ScriptContract, ScriptScene
+from src.agents.voice_director import VoiceDirectorAgent
+
+VOICES_STORAGE_DIR = ASSETS_DIR / "voices"
+voice_cloner = VoiceCloner(VOICES_STORAGE_DIR)
+
+@app.get("/api/v1/voice/personas")
+async def list_all_personas_api():
+    """Lists all canonical and user-cloned personas available for narration."""
+    load_custom_personas()
+    result = []
+    for pid, p in PERSONA_CATALOG.items():
+        result.append({
+            "persona_id": p.persona_id,
+            "display_name": p.display_name,
+            "gender": p.gender.value if hasattr(p.gender, "value") else str(p.gender),
+            "target_locale": p.target_locale.value if hasattr(p.target_locale, "value") else str(p.target_locale),
+            "industry_domain": p.industry_domain,
+            "canonical_voice": p.canonical_voice,
+            "elevenlabs_voice_id": p.elevenlabs_voice_id
+        })
+    return {"status": "ok", "count": len(result), "personas": result}
+
+@app.post("/api/v1/voice/clone")
+async def clone_user_voice_api(
+    audio_file: UploadFile = File(...),
+    display_name: str = Form(...),
+    gender: str = Form("female"),
+    target_locale: str = Form("en-IN"),
+    elevenlabs_api_key: Optional[str] = Form(None)
+):
+    """
+    Ingests in-browser recorded audio or audio file upload, normalizes via FFmpeg,
+    registers voice with ElevenLabs or local profile, and creates an immutable custom persona.
+    """
+    temp_dir = OUTPUT_DIR / "temp_voice_uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_raw = temp_dir / f"raw_{uuid.uuid4().hex}_{audio_file.filename}"
+
+    try:
+        content = await audio_file.read()
+        temp_raw.write_bytes(content)
+
+        gender_enum = GenderEnum.FEMALE if gender.lower() == "female" else (
+            GenderEnum.MALE if gender.lower() == "male" else GenderEnum.NON_BINARY
+        )
+        locale_enum = RegionLocaleEnum.EN_IN
+        for loc in RegionLocaleEnum:
+            if loc.value == target_locale:
+                locale_enum = loc
+                break
+
+        persona = voice_cloner.register_user_voice(
+            display_name=display_name,
+            raw_audio_path=temp_raw,
+            gender=gender_enum,
+            target_locale=locale_enum,
+            elevenlabs_api_key=elevenlabs_api_key
+        )
+
+        return {
+            "status": "success",
+            "message": f"Voice cloned and persona '{persona.display_name}' registered successfully.",
+            "persona": {
+                "persona_id": persona.persona_id,
+                "display_name": persona.display_name,
+                "gender": persona.gender.value,
+                "target_locale": persona.target_locale.value,
+                "canonical_voice": persona.canonical_voice,
+                "elevenlabs_voice_id": persona.elevenlabs_voice_id
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Voice cloning failed: {str(e)}")
+    finally:
+        if temp_raw.exists():
+            try:
+                temp_raw.unlink()
+            except Exception:
+                pass
+
+@app.post("/api/v1/voice/synthesize-file")
+async def synthesize_document_speech_api(
+    document_file: UploadFile = File(...),
+    persona_id: str = Form("maya_fintech"),
+    speech_rate: float = Form(1.0),
+    pitch: str = Form("+0Hz"),
+    export_scorm: bool = Form(False),
+    elevenlabs_api_key: Optional[str] = Form(None)
+):
+    """
+    Ingests .txt, .md, .docx, or .pdf, decomposes into pedagogical scenes,
+    applies FinTech pronunciation lexicon and SSML, and synthesizes master audio + SRT subtitles.
+    Optionally packages as an ADL SCORM 1.2 e-learning zip.
+    """
+    temp_dir = OUTPUT_DIR / "temp_doc_uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_doc = temp_dir / f"doc_{uuid.uuid4().hex}_{document_file.filename}"
+
+    try:
+        content = await document_file.read()
+        temp_doc.write_bytes(content)
+
+        # 1. Parse document into pedagogical scenes
+        parse_result = DocumentParser.parse_file(temp_doc, target_words_per_scene=60, max_scenes=40)
+        if not parse_result.scenes:
+            raise HTTPException(status_code=400, detail="Document contains no readable text.")
+
+        # 2. Build ScriptContract for Voice Director
+        script_scenes = [
+            ScriptScene(
+                scene_id=sc.scene_id,
+                visual_prompt=f"Educational slide illustrating {sc.title}",
+                motion_prompt="Subtle camera tracking over bullet points",
+                narration=sc.narration,
+                duration_seconds=int(sc.estimated_duration_sec)
+            )
+            for sc in parse_result.scenes
+        ]
+
+        script_contract = ScriptContract(
+            title=parse_result.document_title,
+            target_audience="Enterprise Professionals",
+            total_estimated_duration_sec=sum(s.duration_seconds for s in script_scenes),
+            total_word_count=parse_result.total_words,
+            scenes=script_scenes
+        )
+
+        # 3. Resolve Persona & Synthesize
+        persona = get_persona_contract(persona_id)
+        voice_director = VoiceDirectorAgent(output_dir=OUTPUT_DIR)
+
+        engine_to_use = "elevenlabs" if elevenlabs_api_key and elevenlabs_api_key.strip() else "edge_tts"
+        voice_contract = voice_director.synthesize_voice_contract(
+            script=script_contract,
+            persona=persona,
+            speech_rate=speech_rate,
+            pitch=pitch,
+            engine=engine_to_use,
+            elevenlabs_api_key=elevenlabs_api_key,
+            target_lufs=-14.0
+        )
+
+        master_filename = Path(voice_contract.master_audio_path).name
+        srt_filename = Path(voice_contract.subtitles_srt_path).name if voice_contract.subtitles_srt_path else None
+
+        scorm_url = None
+        if export_scorm:
+            # Package directly into SCORM 1.2 zip
+            packager = SCORMPackager(
+                course_id=f"DOC_{uuid.uuid4().hex[:6].upper()}",
+                course_title=parse_result.document_title,
+                course_description=f"Generated from {document_file.filename} with voice {persona.display_name}",
+                version="1.2"
+            )
+            packager.add_module(1, "Main Lecture", "Decomposed audio narration")
+            for sc in script_scenes:
+                packager.add_lesson(
+                    module_id=1,
+                    lesson_id=sc.scene_id,
+                    lesson_title=sc.visual_prompt[:40],
+                    topic="Document Audio",
+                    description=sc.narration[:100],
+                    video_path=voice_contract.master_audio_path,
+                    audio_path=voice_contract.master_audio_path,
+                    srt_path=voice_contract.subtitles_srt_path,
+                    runtime_seconds=float(sc.duration_seconds)
+                )
+            out_zip = packager.export_zip()
+            scorm_url = f"/static_exports/{out_zip.name}"
+
+        return {
+            "status": "success",
+            "document_title": parse_result.document_title,
+            "persona_used": persona.display_name,
+            "total_scenes": parse_result.total_scenes,
+            "total_words": parse_result.total_words,
+            "total_duration_sec": voice_contract.total_audio_duration_sec,
+            "normalized_lufs": voice_contract.normalized_lufs,
+            "master_audio_url": f"/static_renders/{master_filename}",
+            "subtitles_srt_url": f"/static_renders/{srt_filename}" if srt_filename else None,
+            "scorm_download_url": scorm_url
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Document speech synthesis failed: {str(e)}")
+    finally:
+        if temp_doc.exists():
+            try:
+                temp_doc.unlink()
+            except Exception:
+                pass
+
 @app.post("/api/v1/scorm/package")
 async def create_custom_scorm_package(req: SCORMPackageRequest):
     """
@@ -1855,6 +2063,91 @@ async def serve_dashboard():
                         </div>
                     </div>
                 </div>
+
+                <!-- NEW SECTION: VOICE CLONING & UNIVERSAL DOCUMENT SPEECH INGESTION -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-4 border-t border-slate-800/80">
+                    <!-- Module A: Record & Clone User Voice -->
+                    <div class="glass-panel p-5 rounded-xl border border-indigo-500/30 space-y-4">
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                            <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                <span>🎙️</span> <span>Clone Real Voice into Library</span>
+                            </h4>
+                            <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono">Instant Voice Clone</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Record 15–30s of clean speech via microphone or upload an audio file (.wav, .ogg, .mp3) to register a new permanent persona.</p>
+                        
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-300 mb-1">Presenter Name</label>
+                                <input id="clone-display-name" type="text" placeholder="e.g. Dr. Srinivas Velaga" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white">
+                            </div>
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-300 mb-1">Accent / Locale</label>
+                                <select id="clone-locale" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white">
+                                    <option value="en-IN" selected>en-IN (Indian English)</option>
+                                    <option value="te-IN">te-IN (Telugu)</option>
+                                    <option value="hi-IN">hi-IN (Hindi)</option>
+                                    <option value="en-US">en-US (North American)</option>
+                                    <option value="en-GB">en-GB (British)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Recording Controls & File Upload -->
+                        <div class="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-3">
+                            <div class="flex items-center justify-between gap-2">
+                                <button id="btn-record-mic" onclick="toggleMicRecording()" class="px-3 py-2 rounded-lg bg-red-600/80 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all">
+                                    <span id="record-indicator">🔴</span> <span id="record-text">Record from Mic</span>
+                                </button>
+                                <span class="text-[11px] text-slate-500">or upload:</span>
+                                <label for="clone-file-upload" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold cursor-pointer inline-flex items-center gap-1">
+                                    <span>📁</span> <span>Choose Audio</span>
+                                </label>
+                                <input type="file" id="clone-file-upload" accept="audio/*" class="hidden" onchange="handleAudioSampleSelected(this)">
+                            </div>
+                            <div id="clone-audio-preview-box" class="hidden pt-1">
+                                <audio id="clone-audio-preview" controls class="w-full h-8"></audio>
+                            </div>
+                        </div>
+
+                        <button onclick="submitVoiceClone()" id="btn-submit-clone" class="w-full py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition-all flex items-center justify-center gap-1.5">
+                            <span>✨</span> <span>Clone Voice & Add to Catalog</span>
+                        </button>
+                    </div>
+
+                    <!-- Module B: Universal File-to-Speech Engine -->
+                    <div class="glass-panel p-5 rounded-xl border border-emerald-500/30 space-y-4">
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                            <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                <span>📄</span> <span>Universal Document-to-Audio Ingestion</span>
+                            </h4>
+                            <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono">Any File &bull; Any Voice</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Upload books, lecture notes, or reports (.txt, .md, .docx, .pdf). We slice into pedagogical scenes, apply FinTech pronunciation lexicons, and synthesize audio masters.</p>
+
+                        <div class="p-4 rounded-xl border-2 border-dashed border-emerald-500/40 bg-emerald-950/10 hover:bg-emerald-950/20 transition-all text-center space-y-2">
+                            <div class="text-2xl">📥</div>
+                            <div class="text-xs font-bold text-white">Drop Document Here or Browse</div>
+                            <p class="text-[10px] text-slate-400">Supports .txt, .md, .docx, .pdf &bull; up to 25MB</p>
+                            <label for="doc-speech-file-input" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer inline-flex items-center gap-1.5 shadow-md shadow-emerald-500/20">
+                                <span>📄</span> <span>Select Document</span>
+                            </label>
+                            <input type="file" id="doc-speech-file-input" class="hidden" accept=".txt,.md,.docx,.pdf" onchange="handleDocFileSelected(this)">
+                            <div id="selected-doc-name" class="text-[11px] font-mono text-emerald-300 pt-1"></div>
+                        </div>
+
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="flex items-center gap-2">
+                                <input type="checkbox" id="doc-export-scorm-chk" class="rounded accent-emerald-500 cursor-pointer">
+                                <label for="doc-export-scorm-chk" class="text-xs text-slate-300 cursor-pointer">Auto-package as SCORM 1.2 Zip</label>
+                            </div>
+                            <button onclick="submitDocumentSpeech()" id="btn-synth-doc" class="px-5 py-2.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5">
+                                <span>⚡</span> <span>Synthesize Document Audio</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
             </div>
         </div><!-- END OF MODE 2: VOICE DIRECTOR -->
 
@@ -2595,6 +2888,165 @@ async def serve_dashboard():
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = "<span>⚡</span> <span>Export Audio Master</span>";
+            }
+        }
+
+        // --- Custom Voice Recording & Cloning Client Logic ---
+        let mediaRecorder = null;
+        let recordedAudioChunks = [];
+        let activeAudioBlob = null;
+        let selectedDocFile = null;
+
+        async function toggleMicRecording() {
+            const btn = document.getElementById('btn-record-mic');
+            const ind = document.getElementById('record-indicator');
+            const txt = document.getElementById('record-text');
+
+            if (mediaRecorder && mediaRecorder.state === "recording") {
+                mediaRecorder.stop();
+                ind.innerText = "🔴";
+                txt.innerText = "Record from Mic";
+                btn.className = "px-3 py-2 rounded-lg bg-red-600/80 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all";
+                return;
+            }
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                recordedAudioChunks = [];
+                mediaRecorder = new MediaRecorder(stream);
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) recordedAudioChunks.push(e.data);
+                };
+
+                mediaRecorder.onstop = () => {
+                    activeAudioBlob = new Blob(recordedAudioChunks, { type: 'audio/webm' });
+                    const previewBox = document.getElementById('clone-audio-preview-box');
+                    const previewAudio = document.getElementById('clone-audio-preview');
+                    previewAudio.src = URL.createObjectURL(activeAudioBlob);
+                    previewBox.classList.remove('hidden');
+                    stream.getTracks().forEach(track => track.stop());
+                };
+
+                mediaRecorder.start();
+                ind.innerText = "⏹️";
+                txt.innerText = "Stop Recording";
+                btn.className = "px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all animate-pulse";
+            } catch (err) {
+                alert("Microphone access error: " + err.message);
+            }
+        }
+
+        function handleAudioSampleSelected(input) {
+            if (input.files && input.files[0]) {
+                const file = input.files[0];
+                activeAudioBlob = file;
+                const previewBox = document.getElementById('clone-audio-preview-box');
+                const previewAudio = document.getElementById('clone-audio-preview');
+                previewAudio.src = URL.createObjectURL(file);
+                previewBox.classList.remove('hidden');
+            }
+        }
+
+        async function submitVoiceClone() {
+            const name = document.getElementById('clone-display-name').value.trim();
+            if (!name) return alert("Please enter a presenter name.");
+            if (!activeAudioBlob) return alert("Please record or select an audio sample first (10-30s).");
+
+            const locale = document.getElementById('clone-locale').value;
+            const btn = document.getElementById('btn-submit-clone');
+            btn.disabled = true;
+            btn.innerText = "⏳ Normalizing & Registering Persona...";
+
+            try {
+                const formData = new FormData();
+                formData.append('audio_file', activeAudioBlob, 'voice_sample.wav');
+                formData.append('display_name', name);
+                formData.append('gender', 'female');
+                formData.append('target_locale', locale);
+
+                const res = await fetch('/api/v1/voice/clone', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'success') {
+                    alert(`✨ Voice cloned successfully! Persona '${data.persona.display_name}' registered.`);
+                    // Refresh persona dropdown
+                    const sel = document.getElementById('voice-lab-voice');
+                    const opt = document.createElement('option');
+                    opt.value = data.persona.canonical_voice;
+                    opt.innerText = `⭐ ${data.persona.display_name} (Custom Cloned)`;
+                    opt.selected = true;
+                    sel.prepend(opt);
+                } else {
+                    alert("Voice cloning failed: " + (data.detail || JSON.stringify(data)));
+                }
+            } catch (e) {
+                alert("Voice cloning error: " + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>✨</span> <span>Clone Voice & Add to Catalog</span>";
+            }
+        }
+
+        // --- Document Speech Ingestion Client Logic ---
+        function handleDocFileSelected(input) {
+            if (input.files && input.files[0]) {
+                selectedDocFile = input.files[0];
+                document.getElementById('selected-doc-name').innerText = `Selected: ${selectedDocFile.name} (${(selectedDocFile.size / 1024).toFixed(1)} KB)`;
+            }
+        }
+
+        async function submitDocumentSpeech() {
+            if (!selectedDocFile) return alert("Please select a document file (.txt, .md, .docx, .pdf) first.");
+            const exportScorm = document.getElementById('doc-export-scorm-chk').checked;
+            const btn = document.getElementById('btn-synth-doc');
+            const badge = document.getElementById('voice-lab-player-badge');
+
+            btn.disabled = true;
+            btn.innerText = "⏳ Parsing Scenes & Synthesizing Audio...";
+            badge.innerText = "Synthesizing Document...";
+
+            try {
+                const formData = new FormData();
+                formData.append('document_file', selectedDocFile);
+                formData.append('persona_id', 'maya_fintech');
+                formData.append('speech_rate', '1.0');
+                formData.append('export_scorm', exportScorm ? 'true' : 'false');
+
+                const res = await fetch('/api/v1/voice/synthesize-file', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'success') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.master_audio_url + '?t=' + Date.now();
+                    player.play();
+                    badge.innerText = "Playing Master 🎧";
+
+                    document.getElementById('voice-lab-download-box').classList.remove('hidden');
+                    document.getElementById('voice-lab-audio-dl').href = data.master_audio_url;
+                    if (data.subtitles_srt_url) {
+                        document.getElementById('voice-lab-srt-dl').href = data.subtitles_srt_url;
+                    }
+
+                    document.getElementById('voice-lab-srt-preview').innerText = `✅ "${data.document_title}" decomposed into ${data.total_scenes} pedagogical scenes (${data.total_words} words, ${data.total_duration_sec}s total). Normalized to -14 LUFS.\n` + (data.scorm_download_url ? `📦 SCORM Package: ${data.scorm_download_url}` : '');
+
+                    if (data.scorm_download_url) {
+                        alert(`⚡ Document Synthesized & SCORM 1.2 Package Ready!\n\nScenes: ${data.total_scenes}\nAudio: ${data.total_duration_sec}s\nSCORM URL: ${data.scorm_download_url}`);
+                    } else {
+                        alert(`⚡ Document Synthesized!\nDecomposed into ${data.total_scenes} scenes (${data.total_duration_sec}s). Audio player ready.`);
+                    }
+                } else {
+                    alert("Document synthesis failed: " + (data.detail || JSON.stringify(data)));
+                }
+            } catch (e) {
+                alert("Document synthesis error: " + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>⚡</span> <span>Synthesize Document Audio</span>";
             }
         }
 
