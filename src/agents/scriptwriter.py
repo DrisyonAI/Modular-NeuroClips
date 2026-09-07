@@ -48,14 +48,72 @@ class ScriptwriterAgent:
         topic: str,
         scene_count: int,
         persona: PersonaIdentityContract,
-        art_style: str
+        art_style: str,
+        voiceover_script: Optional[str] = None
     ) -> List[ScriptScene]:
         """
         Decomposes input topic into pedagogical scene chunks with director cues.
+        Separates visual intent (from topic) and narration audio (from voiceover_script).
         """
         lower = topic.lower()
 
-        # Domain Specific Tutorial Fast-Path (e.g. Excel Goal Seek)
+        camera_presets = [
+            "Slow cinematic tracking shot forward, volumetric studio lighting",
+            "Dynamic sweeping lateral pan across modern interfaces",
+            "Slow motion close-up focus pull with crystal clear detail",
+            "Wide establishing cinematic angle, dramatic contrast and depth"
+        ]
+
+        # 1. Explicit Empty Script -> 100% Silent video (zero spoken narration)
+        if voiceover_script is not None and not voiceover_script.strip():
+            topic_sentences = [s.strip() for s in re.split(r"[.!?]+", topic) if len(s.strip()) > 5]
+            if not topic_sentences:
+                topic_sentences = [topic.strip()]
+            scenes: List[ScriptScene] = []
+            for i in range(scene_count):
+                st = topic_sentences[i % len(topic_sentences)]
+                visual_prompt = f"{self.distill_visual_prompt(st)}, {art_style}, ultra high definition"
+                motion = camera_presets[i % len(camera_presets)]
+                scenes.append(
+                    ScriptScene(
+                        scene_id=i + 1,
+                        title=f"Visual Scene {i + 1}",
+                        narration="",
+                        visual_description=visual_prompt,
+                        motion_prompt=motion,
+                        estimated_duration_sec=4.5
+                    )
+                )
+            return scenes
+
+        # 2. Explicit Voiceover Script Provided -> Narrations strictly chunked from voiceover_script
+        if voiceover_script is not None and voiceover_script.strip():
+            v_sentences = [s.strip() for s in re.split(r"[.!?\n]+", voiceover_script) if len(s.strip()) > 3]
+            if not v_sentences:
+                v_sentences = [voiceover_script.strip()]
+            topic_sentences = [s.strip() for s in re.split(r"[.!?]+", topic) if len(s.strip()) > 5]
+            if not topic_sentences:
+                topic_sentences = [topic.strip()]
+            scenes = []
+            for i in range(scene_count):
+                v_text = v_sentences[i] if i < len(v_sentences) else (v_sentences[i % len(v_sentences)] if len(v_sentences) > 0 else "")
+                t_text = topic_sentences[i % len(topic_sentences)]
+                visual_prompt = f"{self.distill_visual_prompt(t_text)}, {art_style}, ultra high definition"
+                motion = camera_presets[i % len(camera_presets)]
+                est_duration = max(round(len(v_text.split()) / (140 * persona.default_speed) * 60, 1), 4.0)
+                scenes.append(
+                    ScriptScene(
+                        scene_id=i + 1,
+                        title=f"Module Scene {i + 1}",
+                        narration=v_text,
+                        visual_description=visual_prompt,
+                        motion_prompt=motion,
+                        estimated_duration_sec=est_duration
+                    )
+                )
+            return scenes
+
+        # 3. Domain Specific Tutorial Fast-Path (backward compatibility when voiceover_script is None)
         if "goal seek" in lower or "excel" in lower:
             return [
                 ScriptScene(
@@ -140,7 +198,8 @@ class ScriptwriterAgent:
         scene_count: int,
         persona: PersonaIdentityContract,
         art_style: str = "Photorealistic 8K (Corporate / Tech)",
-        target_locale: RegionLocaleEnum = RegionLocaleEnum.EN_US
+        target_locale: RegionLocaleEnum = RegionLocaleEnum.EN_US,
+        voiceover_script: Optional[str] = None
     ) -> ScriptContract:
         """
         Executes scriptwriting contract generation.
@@ -149,7 +208,8 @@ class ScriptwriterAgent:
             topic=topic,
             scene_count=max(min(scene_count, 16), 1),
             persona=persona,
-            art_style=art_style
+            art_style=art_style,
+            voiceover_script=voiceover_script
         )
         
         words = sum(len(s.narration.split()) for s in scenes)

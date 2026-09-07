@@ -111,6 +111,8 @@ def execute_tracked_generation(
     motion_graphics: bool = True,
     background_music: bool = False,
     chunking_mode: str = "auto",
+    voiceover_script: Optional[str] = None,
+    reference_media_url: Optional[str] = None,
 ):
     job = job_manager.get_job(job_id)
     if not job:
@@ -131,6 +133,7 @@ def execute_tracked_generation(
             scene_count=scene_count,
             art_style=art_style,
             avatar_persona=avatar_persona,
+            voiceover_script=voiceover_script,
         )
         latency = time.time() - t0
         job["script"] = script.model_dump() if hasattr(script, "model_dump") else script.dict()
@@ -150,7 +153,7 @@ def execute_tracked_generation(
                 "scene_id": sc.scene_id,
                 "visual_prompt": sc.visual_prompt,
                 "motion_prompt": sc.motion_prompt,
-                "narration": getattr(sc, "narration", "") or sc.visual_prompt,
+                "narration": getattr(sc, "narration", "") if getattr(sc, "narration", "") is not None else "",
                 "duration_seconds": sc.duration_seconds,
                 "video_source_type": getattr(sc, "video_source_type", "ai_generated"),
                 "video_source_url": getattr(sc, "video_source_url", ""),
@@ -187,6 +190,8 @@ def execute_tracked_generation(
             output_type=output_type,
             motion_graphics=motion_graphics,
             background_music=background_music,
+            voiceover_script=voiceover_script,
+            reference_media_url=reference_media_url,
         )
     except Exception as exc:
         job_manager.fail_job(job_id, str(exc))
@@ -197,6 +202,9 @@ def execute_tracked_generation(
 # -------------------------------------------------------------
 class GenerationRequest(BaseModel):
     topic: str
+    visual_prompt: Optional[str] = None
+    voiceover_script: Optional[str] = None
+    reference_media_url: Optional[str] = None
     scenes: int = 3
     art_style: str = "Cinematic 35mm (Volumetric Lighting)"
     resolution: str = "16:9_hd"
@@ -271,10 +279,13 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         "gap_vs_runtime_min": runtime_gap
     }
     
+    v_topic = req.visual_prompt or req.topic
+    vo_script = req.voiceover_script if req.voiceover_script is not None else None
+
     background_tasks.add_task(
         execute_tracked_generation,
         job_id=job_id,
-        topic=req.topic,
+        topic=v_topic,
         scene_count=req.scenes,
         art_style=req.art_style,
         resolution=req.resolution,
@@ -298,10 +309,12 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         output_type=req.output_type or "video",
         motion_graphics=req.motion_graphics if req.motion_graphics is not None else True,
         background_music=req.background_music if req.background_music is not None else False,
-        chunking_mode=req.chunking_mode or "auto"
+        chunking_mode=req.chunking_mode or "auto",
+        voiceover_script=vo_script,
+        reference_media_url=req.reference_media_url
     )
     
-    return {"status": "started", "job_id": job_id, "topic": req.topic, "scenes": req.scenes, "meta": job["curriculum_meta"]}
+    return {"status": "started", "job_id": job_id, "topic": v_topic, "scenes": req.scenes, "meta": job["curriculum_meta"]}
 
 class StoryboardPreviewRequest(BaseModel):
     topic: str
@@ -410,6 +423,7 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
             output_type=req.output_type or "video",
             motion_graphics=req.motion_graphics if req.motion_graphics is not None else True,
             background_music=req.background_music if req.background_music is not None else False,
+            voiceover_script=(full_narration if full_narration.strip() else ""),
         )
 
     background_tasks.add_task(_run_custom_storyboard)
@@ -625,6 +639,58 @@ async def upload_custom_avatar(file: UploadFile = File(...)):
         f.write(contents)
     return {"status": "ok", "message": "Avatar uploaded successfully", "avatar_url": "/static_renders/custom_avatar.png"}
 
+@app.post("/api/v1/director/upload-reference")
+async def upload_director_reference_media(file: UploadFile = File(...)):
+    """
+    Uploads multimodal reference media (image or video) for Director Studio.
+    """
+    valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".mkv"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in valid_exts:
+        raise HTTPException(status_code=400, detail=f"Unsupported format {ext}. Allowed: {', '.join(valid_exts)}")
+
+    uid = uuid.uuid4().hex[:8]
+    out_filename = f"director_ref_{uid}{ext}"
+    out_path = OUTPUT_DIR / out_filename
+    contents = await file.read()
+    with open(out_path, "wb") as f:
+        f.write(contents)
+
+    media_type = "video" if ext in {".mp4", ".mov", ".webm", ".mkv"} else "image"
+    return {
+        "status": "ok",
+        "message": f"Reference {media_type} uploaded successfully",
+        "reference_url": f"/static_renders/{out_filename}",
+        "reference_path": str(out_path),
+        "media_type": media_type,
+        "filename": file.filename
+    }
+
+@app.post("/api/v1/avatar/upload-3d")
+async def upload_avatar_3d_model(file: UploadFile = File(...)):
+    """
+    Uploads a 3D avatar mesh model (.glb, .gltf, .obj, .fbx, .zip).
+    """
+    valid_exts = {".glb", ".gltf", ".obj", ".fbx", ".zip"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in valid_exts:
+        raise HTTPException(status_code=400, detail=f"Unsupported 3D format {ext}. Allowed: {', '.join(valid_exts)}")
+
+    uid = uuid.uuid4().hex[:8]
+    out_filename = f"avatar_3d_{uid}{ext}"
+    out_path = OUTPUT_DIR / out_filename
+    contents = await file.read()
+    with open(out_path, "wb") as f:
+        f.write(contents)
+
+    return {
+        "status": "ok",
+        "message": "3D Avatar Model uploaded successfully",
+        "model_url": f"/static_renders/{out_filename}",
+        "model_path": str(out_path),
+        "filename": file.filename
+    }
+
 class VoiceScriptExpandRequest(BaseModel):
     prompt: str
     persona: Optional[str] = "maya_fintech"
@@ -755,34 +821,25 @@ async def export_scorm_package(
     
     questions = quiz_engine.get_module_questions(module_id)
     
-    manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="Course_{video_path.stem}" version="1.0" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
-  <organizations default="org1">
-    <organization identifier="org1">
-      <title>{c_title} • Interactive Lecture & Assessment</title>
-      <item identifier="item1" identifierref="resource1">
-        <title>Module Video Lecture & Knowledge Check ({len(questions)} Questions)</title>
-      </item>
-    </organization>
-  </organizations>
-  <resources>
-    <resource identifier="resource1" type="webcontent" adlcp:scormtype="sco" href="index.html">
-      <file href="index.html"/>
-      <file href="{filename}"/>
-    </resource>
-  </resources>
-</manifest>
-"""
-    player_html = quiz_engine.generate_interactive_scorm_html(
-        video_filename=filename,
-        module_id=module_id,
-        pass_percentage=70
+    packager = SCORMPackager(
+        course_id=f"Course_{video_path.stem}",
+        course_title=f"{c_title} • Interactive Lecture & Assessment",
+        course_description=f"Interactive lecture and knowledge assessment for {c_title}",
+        version=scorm_version
     )
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("imsmanifest.xml", manifest_xml)
-        zf.writestr("index.html", player_html)
-        zf.write(video_path, arcname=filename)
+    packager.add_module(
+        module_id=f"module_{module_id}",
+        module_title=f"Module {module_id}: {c_title}",
+        description=""
+    )
+    packager.add_lesson(
+        module_id=f"module_{module_id}",
+        lesson_id=f"lesson_{module_id}_1",
+        lesson_title=f"{c_title} Video Lecture & Knowledge Check",
+        topic=c_title,
+        video_path=str(video_path)
+    )
+    packager.export_zip(zip_path)
         
     return {
         "status": "ok",
@@ -820,7 +877,6 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
     questions = quiz_engine.get_module_questions(req.module_id or 1)
     
     video_file = None
-    target_vid_name = req.video_filename or ""
     if req.video_filename:
         v1 = OUTPUT_DIR / req.video_filename
         v2 = ASSETS_DIR / req.video_filename
@@ -829,46 +885,25 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
         elif v2.exists():
             video_file = v2
 
-    def _xml_escape(text: str) -> str:
-        return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;")
-
-    esc_course_title = _xml_escape(req.course_title)
-    esc_module_title = _xml_escape(req.module_title)
-    esc_lesson_label = _xml_escape(lesson_label)
-
-    manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="{safe_course_id}" version="{req.scorm_version}" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2">
-  <organizations default="org_{safe_course_id}">
-    <organization identifier="org_{safe_course_id}">
-      <title>{esc_course_title}</title>
-      <item identifier="module_{req.module_id or 1}">
-        <title>{esc_module_title}</title>
-        <item identifier="item_{safe_course_id}_{safe_lesson_id}" identifierref="res_{safe_course_id}">
-          <title>{esc_lesson_label} ({len(questions)} Questions)</title>
-        </item>
-      </item>
-    </organization>
-  </organizations>
-  <resources>
-    <resource identifier="res_{safe_course_id}" type="webcontent" adlcp:scormtype="sco" href="index.html">
-      <file href="index.html"/>
-      {f'<file href="{target_vid_name}"/>' if video_file else ''}
-    </resource>
-  </resources>
-</manifest>
-"""
-
-    player_html = quiz_engine.generate_interactive_scorm_html(
-        video_filename=target_vid_name if video_file else "",
-        module_id=req.module_id or 1,
-        pass_percentage=req.pass_percentage or 70
+    packager = SCORMPackager(
+        course_id=safe_course_id,
+        course_title=req.course_title,
+        course_description=req.module_description or "",
+        version=req.scorm_version or "1.2"
     )
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("imsmanifest.xml", manifest_xml)
-        zf.writestr("index.html", player_html)
-        if video_file and video_file.exists():
-            zf.write(video_file, arcname=target_vid_name)
+    packager.add_module(
+        module_id=f"module_{req.module_id or 1}",
+        module_title=req.module_title or f"Module {req.module_id or 1}",
+        description=req.module_description or ""
+    )
+    packager.add_lesson(
+        module_id=f"module_{req.module_id or 1}",
+        lesson_id=safe_lesson_id,
+        lesson_title=req.lesson_title or "Lesson 1",
+        topic=req.topic or "",
+        video_path=str(video_file) if video_file else None
+    )
+    packager.export_zip(zip_path)
 
     return {
         "status": "ok",
@@ -1147,15 +1182,17 @@ class AvatarVideoGenerateRequest(BaseModel):
     avatar_persona: Optional[str] = "maya_fintech"
     avatar_image_url: Optional[str] = None
     future_3d_model: Optional[bool] = False
+    model_3d_path: Optional[str] = None
 
 @app.post("/api/v1/avatar/generate-video")
 async def generate_avatar_video_api(req: AvatarVideoGenerateRequest):
     """
     Synthesizes an avatar presenter video matching the wireframe:
     - Custom speech script via neural Edge-TTS
+    - Audio-reactive lip-sync visemes and natural kinematics
+    - 3D mesh head rendering with jaw articulation if 3D model active
     - Green Screen / White Studio Curtain backdrop
     - Hand gesture choreography and avatar positioning
-    - Fast sub-10s FFmpeg video compilation
     """
     clean_script = (req.script or "").strip()
     if not clean_script:
@@ -1229,25 +1266,43 @@ async def generate_avatar_video_api(req: AvatarVideoGenerateRequest):
     output_filename = f"avatar_video_{vid_id}.mp4"
     output_path = OUTPUT_DIR / output_filename
 
-    # 6. FFmpeg compositing
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c={bg_color}:s=1280x720:d={duration}",
-        "-loop", "1", "-i", str(avatar_img_path.resolve()),
-        "-i", str(audio_path.resolve()),
-        "-filter_complex", overlay_filter,
-        "-map", "[v_out]",
-        "-map", "2:a",
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-t", str(duration),
-        "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
-        str(output_path)
-    ]
-
-    res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-    if res.returncode != 0 or not output_path.exists():
-        raise HTTPException(status_code=500, detail=f"FFmpeg compositing failed: {res.stderr[-300:]}")
+    # 6. Audio-Reactive Viseme Speaking Synthesis
+    is_3d = bool(req.future_3d_model or req.model_3d_path)
+    try:
+        from src.services.avatar_animation_service import AvatarAnimationService
+        anim_service = AvatarAnimationService()
+        anim_service.synthesize_speaking_avatar_video(
+            script=clean_script,
+            audio_path=audio_path,
+            output_path=output_path,
+            avatar_image_path=str(avatar_img_path) if avatar_img_path.exists() else None,
+            is_3d_model=is_3d,
+            curtain_mode=curtain_mode,
+            curtain_active=curtain_active,
+            hand_gestures=gesture,
+            width=1280,
+            height=720,
+            fps=25
+        )
+    except Exception as exc:
+        print(f"[Avatar Animation Service Warning] Fallback to FFmpeg compositing ({exc})")
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=c={bg_color}:s=1280x720:d={duration}",
+            "-loop", "1", "-i", str(avatar_img_path.resolve()),
+            "-i", str(audio_path.resolve()),
+            "-filter_complex", overlay_filter,
+            "-map", "[v_out]",
+            "-map", "2:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-t", str(duration),
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(output_path)
+        ]
+        res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not output_path.exists():
+            raise HTTPException(status_code=500, detail=f"FFmpeg compositing failed: {res.stderr[-300:]}")
 
     return {
         "status": "ok",
@@ -1257,7 +1312,7 @@ async def generate_avatar_video_api(req: AvatarVideoGenerateRequest):
         "duration": round(duration, 2),
         "curtain_mode": curtain_mode if curtain_active else "studio_dark",
         "hand_gestures": gesture,
-        "future_3d_model": req.future_3d_model
+        "future_3d_model": is_3d
     }
 
 class SCORMFrameworkBuildRequest(BaseModel):
@@ -1536,16 +1591,47 @@ async def serve_dashboard():
                         </div>
                     </div>
 
-                    <!-- STEP 1: SCRIPT INPUT / SCRIPT EDITOR -->
-                    <div class="space-y-2">
+                    <!-- STEP 1A: VISUAL PROMPT & REFERENCE MEDIA (What the video should show) -->
+                    <div class="p-4 rounded-xl bg-slate-950/80 border border-brand-500/20 space-y-3">
                         <div class="flex justify-between items-center">
                             <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-                                <span class="w-4 h-4 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold">1</span>
-                                <span>Master Script Input</span>
+                                <span class="w-4 h-4 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold">1A</span>
+                                <span>Visual Generation Prompt (What the video should show)</span>
                             </label>
-                            <div class="flex items-center space-x-3">
+                            <span class="text-[10px] text-brand-glow font-mono">Controls Visuals Only &bull; Not Spoken</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Describe the scene objects, environment, action, and lighting. This directly guides the visual generation model.</p>
+                        
+                        <textarea id="prompt-input" rows="3" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all font-sans leading-relaxed shadow-inner" placeholder="E.g., Cinematic aerial view of modern AI datacenter servers with glowing optical fiber interconnects and holographic data streams..."></textarea>
+
+                        <!-- Multimodal Reference Attachment -->
+                        <div class="pt-1 border-t border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                            <div class="flex items-center space-x-2">
+                                <input type="file" id="director-ref-upload" class="hidden" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm" onchange="handleDirectorReferenceUpload(this)">
+                                <label for="director-ref-upload" class="cursor-pointer px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-slate-700 transition-all">
+                                    <span>📎</span> <span>Attach Reference Media (Image / Video)</span>
+                                </label>
+                                <span id="director-ref-badge" class="text-[11px] font-mono text-slate-400">No media attached</span>
+                            </div>
+                            <input type="hidden" id="director-ref-url" value="">
+                            <div id="director-ref-preview-box" class="hidden flex items-center space-x-2">
+                                <img id="director-ref-preview-img" src="" class="w-9 h-9 rounded object-cover border border-brand-500/40">
+                                <button type="button" onclick="clearDirectorReferenceMedia()" class="text-[10px] text-red-400 hover:underline">✕ Remove</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- STEP 1B: SPOKEN VOICEOVER SCRIPT (What the narrator speaks) -->
+                    <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                        <div class="flex justify-between items-center">
+                            <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                <span class="w-4 h-4 rounded bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-[10px] font-bold">1B</span>
+                                <span>Voiceover Narration Script (What should be spoken)</span>
+                            </label>
+                            <div class="flex items-center space-x-2">
+                                <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Empty = Silent Video</span>
                                 <label for="script-file-upload" class="text-[11px] text-brand-glow hover:underline cursor-pointer flex items-center gap-1 font-sans">
-                                    <span>📁</span> <span>Upload Document (.txt, .md, .srt)</span>
+                                    <span>📁</span> <span>Upload Document</span>
                                 </label>
                                 <input type="file" id="script-file-upload" class="hidden" accept=".txt,.md,.srt,.vtt,.json" onchange="handleScriptDocumentUpload(this)">
                                 <span id="script-stats" class="text-[11px] font-mono text-brand-glow bg-slate-900 px-2 py-0.5 rounded border border-slate-800">0 words | ~0.0 min</span>
@@ -1554,22 +1640,22 @@ async def serve_dashboard():
 
                         <!-- Director Quick Insert Toolbar -->
                         <div class="flex items-center space-x-1.5 overflow-x-auto py-1 text-[11px]">
-                            <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Director Cues:</span>
-                            <button type="button" onclick="insertScriptTag('[pause 500ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
+                            <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Directorial Cues:</span>
+                            <button type="button" onclick="insertScriptTag('[pause 500ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow transition-all font-mono text-[10px]">
                                 ⏱️ [Pause 0.5s]
                             </button>
-                            <button type="button" onclick="insertScriptTag('[pause 1s] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
+                            <button type="button" onclick="insertScriptTag('[pause 1s] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow transition-all font-mono text-[10px]">
                                 ⏱️ [Pause 1.0s]
                             </button>
-                            <button type="button" onclick="insertScriptTag('[emphasis] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
+                            <button type="button" onclick="insertScriptTag('[emphasis] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow transition-all font-mono text-[10px]">
                                 ✨ [Emphasis]
                             </button>
-                            <button type="button" onclick="insertScriptTag('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
+                            <button type="button" onclick="insertScriptTag('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow transition-all font-mono text-[10px]">
                                 💡 [Pro Tip]
                             </button>
                         </div>
 
-                        <textarea id="prompt-input" rows="5" oninput="updateScriptMetrics()" class="w-full rounded-xl bg-slate-950/90 border border-slate-700/80 p-3.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all font-sans leading-relaxed shadow-inner" placeholder="Enter or paste your full production script here (e.g. In this session, [pause 500ms] we examine algorithmic liquidity and automated dispute settlement with AI agents)..."></textarea>
+                        <textarea id="script-input" rows="3" oninput="updateScriptMetrics()" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-sans leading-relaxed shadow-inner" placeholder="Enter spoken narration text. Leave completely empty for 100% silent video..."></textarea>
                     </div>
 
                     <!-- STEP 2: OUTPUT TYPE — VIDEO OR SLIDE -->
@@ -2055,6 +2141,42 @@ async def serve_dashboard():
                         <span class="text-xs text-slate-400">Script Latency</span>
                         <div id="latency-stat" class="text-base font-bold text-brand-glow font-mono mt-0.5">0.00s</div>
                         <span class="text-[10px] text-slate-500">Llama 3 Director</span>
+                    </div>
+                </div>
+
+                <!-- DIRECTOR PRODUCTION OUTPUT PLAYER & DOWNLOAD -->
+                <div id="director-output-card" class="glass-panel rounded-2xl p-5 space-y-3.5 border border-brand-500/30">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-slate-500" id="director-status-dot"></span>
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-200">Director Video Output</h3>
+                        </div>
+                        <span id="director-pipeline-phase" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 text-brand-glow border border-brand-500/30">Idle</span>
+                    </div>
+
+                    <!-- Pipeline Phase & Progress -->
+                    <div id="director-progress-container" class="space-y-1.5 hidden">
+                        <div class="flex justify-between text-[11px] font-mono">
+                            <span id="director-phase-msg" class="text-slate-300">Queued</span>
+                            <span id="director-phase-pct" class="text-brand-glow font-bold">0%</span>
+                        </div>
+                        <div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                            <div id="director-progress-bar" class="h-full bg-gradient-to-r from-brand-600 to-indigo-500 transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <!-- Video Preview Screen -->
+                    <div class="w-full aspect-video rounded-xl bg-slate-950 border border-slate-800 overflow-hidden relative shadow-inner flex items-center justify-center group">
+                        <video id="director-video-player" class="w-full h-full object-contain" controls poster="/static_renders/custom_avatar.png">
+                            Your browser does not support HTML5 video.
+                        </video>
+                    </div>
+
+                    <!-- Download CTA Button -->
+                    <div class="pt-1">
+                        <a id="director-download-btn" href="#" download="director_production.mp4" class="w-full py-2.5 px-4 rounded-xl bg-slate-800 text-slate-400 font-bold text-xs flex items-center justify-center gap-2 border border-slate-700 transition-all pointer-events-none opacity-50">
+                            <span>⬇️</span> <span>Download Generated Video (.mp4)</span>
+                        </a>
                     </div>
                 </div>
 
@@ -2610,20 +2732,30 @@ async def serve_dashboard():
                                 </p>
                             </div>
 
-                            <!-- Future 3D Model Teaser -->
-                            <div class="p-4 rounded-xl bg-gradient-to-br from-indigo-950/40 via-purple-950/30 to-slate-950/80 border border-purple-500/30 space-y-2 relative overflow-hidden">
+                            <!-- 3D Avatar Input Module -->
+                            <div class="p-4 rounded-xl bg-gradient-to-br from-indigo-950/40 via-purple-950/30 to-slate-950/80 border border-purple-500/30 space-y-2.5 relative overflow-hidden">
                                 <div class="flex items-center justify-between">
                                     <div class="flex items-center space-x-1.5">
                                         <span class="text-sm">🤖</span>
-                                        <span class="text-xs font-bold text-purple-200">Google Flap / Flow 3D</span>
+                                        <span class="text-xs font-bold text-purple-200">Google Flap / Flow 3D Rig</span>
                                     </div>
                                     <span class="px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[9px] font-bold font-mono uppercase tracking-wider">
-                                        Future 3D
+                                        3D Mesh
                                     </span>
                                 </div>
                                 <p class="text-[11px] text-slate-300 leading-snug">
-                                    Neural 3D mesh model with spatial head motion and real-time facial blendshapes tracking.
+                                    Neural 3D mesh model with spatial head motion and audio-reactive jaw blendshapes tracking.
                                 </p>
+                                
+                                <!-- 3D File Upload Picker + Drag & Drop -->
+                                <div class="border border-dashed border-purple-500/40 hover:border-purple-400 rounded-lg p-2 text-center bg-slate-900/60 transition-all cursor-pointer">
+                                    <input type="file" id="avatar-3d-file-input" accept=".glb,.gltf,.obj,.fbx,.zip" class="hidden" onchange="handleAvatar3DUpload(this)">
+                                    <label for="avatar-3d-file-input" class="cursor-pointer block text-[10px] text-purple-300 font-medium">
+                                        <span>📁 Click or Drag 3D Model (.glb, .obj, .fbx, .zip)</span>
+                                    </label>
+                                </div>
+                                <input type="hidden" id="avatar-3d-model-path" value="">
+
                                 <div class="flex items-center justify-between pt-1">
                                     <label class="flex items-center gap-2 cursor-pointer text-xs text-purple-300">
                                         <input type="checkbox" id="avatar-3d-model-toggle" onchange="toggle3DModelTeaser(this.checked)" class="accent-purple-500 cursor-pointer">
@@ -3707,11 +3839,20 @@ async def serve_dashboard():
         renderMilestones('init');
 
         function updateScriptMetrics() {
-            const text = document.getElementById('prompt-input').value.trim();
+            const scriptEl = document.getElementById('script-input');
+            const promptEl = document.getElementById('prompt-input');
+            const text = (scriptEl && scriptEl.value.trim()) ? scriptEl.value.trim() : '';
             const words = text ? text.split(/\s+/).length : 0;
-            const speed = parseFloat(document.getElementById('speed-slider').value) || 1.0;
+            const speed = parseFloat(document.getElementById('speed-slider')?.value || 1.0);
             const spokenMin = (words / (140 * speed)).toFixed(2);
-            document.getElementById('script-stats').innerText = `${words} words | ~${spokenMin} min`;
+            const statsEl = document.getElementById('script-stats');
+            if (statsEl) {
+                if (words === 0) {
+                    statsEl.innerText = "0 words | Silent";
+                } else {
+                    statsEl.innerText = `${words} words | ~${spokenMin} min`;
+                }
+            }
         }
 
         function newProjectCanvas() {
@@ -4307,7 +4448,16 @@ async def serve_dashboard():
                 const res = await fetch('/api/v1/script/upload-document', { method: 'POST', body: formData });
                 const data = await res.json();
                 if (data.status === 'ok') {
-                    document.getElementById('prompt-input').value = data.content;
+                    const scriptEl = document.getElementById('script-input');
+                    if (scriptEl) {
+                        scriptEl.value = data.content;
+                    } else {
+                        document.getElementById('prompt-input').value = data.content;
+                    }
+                    const promptEl = document.getElementById('prompt-input');
+                    if (promptEl && !promptEl.value.trim()) {
+                        promptEl.value = `Cinematic video visual sequence for ${data.filename.replace(/\.[^/.]+$/, '').replace(/_/g, ' ')}`;
+                    }
                     setSceneChunk(data.suggested_scenes);
                     updateScriptMetrics();
                     alert(`📄 Ingested document '${data.filename}' (${data.word_count} words). Configured ${data.suggested_scenes} scene chunks!`);
@@ -4322,9 +4472,11 @@ async def serve_dashboard():
         }
 
         async function exportStandaloneAudio() {
-            const text = document.getElementById('prompt-input').value.trim();
+            const scriptEl = document.getElementById('script-input');
+            const promptEl = document.getElementById('prompt-input');
+            const text = (scriptEl && scriptEl.value.trim()) ? scriptEl.value.trim() : (promptEl ? promptEl.value.trim() : '');
             if (!text) {
-                alert("Please enter narration text or upload a script document first.");
+                alert("Please enter spoken narration in Voiceover Narration Script first.");
                 return;
             }
 
@@ -4549,7 +4701,7 @@ async def serve_dashboard():
         }
 
         function insertScriptTag(tag) {
-            const textarea = document.getElementById('prompt-input');
+            const textarea = document.getElementById('script-input') || document.getElementById('prompt-input');
             const start = textarea.selectionStart || textarea.value.length;
             const end = textarea.selectionEnd || textarea.value.length;
             const text = textarea.value;
@@ -4658,7 +4810,9 @@ async def serve_dashboard():
         }
 
         async function auditionVoiceDirector() {
-            const text = document.getElementById('prompt-input').value.trim() || "Welcome to Modular-NeuroClips. Auditioning neural voice director prosody and natural pacing.";
+            const scriptEl = document.getElementById('script-input');
+            const promptEl = document.getElementById('prompt-input');
+            const text = (scriptEl && scriptEl.value.trim()) || (promptEl ? promptEl.value.trim() : '') || "Welcome to Modular-NeuroClips. Auditioning neural voice director prosody and natural pacing.";
             const voice = document.getElementById('voice-select').value;
             const speech_rate = parseFloat(document.getElementById('speed-slider').value) || 1.0;
             const pitchVal = parseInt(document.getElementById('pitch-slider').value) || 0;
@@ -4709,12 +4863,60 @@ async def serve_dashboard():
             }
         }
 
+        async function handleDirectorReferenceUpload(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+            const badge = document.getElementById('director-ref-badge');
+            if (badge) badge.innerText = 'Uploading reference media...';
+            try {
+                const res = await fetch('/api/v1/director/upload-reference', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    document.getElementById('director-ref-url').value = data.reference_path || data.reference_url;
+                    if (badge) badge.innerText = `Attached: ${data.filename} (${data.media_type})`;
+                    const previewBox = document.getElementById('director-ref-preview-box');
+                    const previewImg = document.getElementById('director-ref-preview-img');
+                    if (previewBox && previewImg) {
+                        previewBox.classList.remove('hidden');
+                        if (data.media_type === 'image') {
+                            previewImg.src = data.reference_url;
+                            previewImg.classList.remove('hidden');
+                        } else {
+                            previewImg.classList.add('hidden');
+                        }
+                    }
+                } else {
+                    alert('Reference upload failed: ' + (data.detail || 'Error'));
+                    if (badge) badge.innerText = 'Upload failed';
+                }
+            } catch(e) {
+                alert('Reference upload error: ' + e);
+                if (badge) badge.innerText = 'Upload error';
+            }
+        }
+
+        function clearDirectorReferenceMedia() {
+            const input = document.getElementById('director-ref-upload');
+            if (input) input.value = '';
+            const refUrl = document.getElementById('director-ref-url');
+            if (refUrl) refUrl.value = '';
+            const badge = document.getElementById('director-ref-badge');
+            if (badge) badge.innerText = 'No media attached';
+            const previewBox = document.getElementById('director-ref-preview-box');
+            if (previewBox) previewBox.classList.add('hidden');
+        }
+
         async function startGeneration() {
-            const topic = document.getElementById('prompt-input').value.trim();
-            if (!topic) {
-                alert('Please enter a concept or Master Script.');
+            const visual_prompt = document.getElementById('prompt-input').value.trim();
+            if (!visual_prompt) {
+                alert('Please enter a visual prompt for the video.');
                 return;
             }
+
+            const voiceover_script = document.getElementById('script-input') ? document.getElementById('script-input').value.trim() : '';
+            const reference_media_url = document.getElementById('director-ref-url') ? document.getElementById('director-ref-url').value.trim() : '';
 
             const scenes = parseInt(document.getElementById('scene-slider').value);
             const language = document.getElementById('language-select').value;
@@ -4745,12 +4947,30 @@ async def serve_dashboard():
             btn.disabled = true;
             btn.classList.add('opacity-50', 'cursor-not-allowed');
 
+            // UI State progression: Idle -> Uploading inputs -> Queued
+            const phaseEl = document.getElementById('director-pipeline-phase');
+            const progressContainer = document.getElementById('director-progress-container');
+            const phaseMsg = document.getElementById('director-phase-msg');
+            const phasePct = document.getElementById('director-phase-pct');
+            const progressBar = document.getElementById('director-progress-bar');
+            const statusDot = document.getElementById('director-status-dot');
+
+            if (phaseEl) { phaseEl.innerText = 'Uploading inputs'; phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow border border-brand-500/40 animate-pulse'; }
+            if (progressContainer) progressContainer.classList.remove('hidden');
+            if (phaseMsg) phaseMsg.innerText = 'Validating and uploading studio inputs...';
+            if (phasePct) phasePct.innerText = '10%';
+            if (progressBar) progressBar.style.width = '10%';
+            if (statusDot) statusDot.className = 'w-2.5 h-2.5 rounded-full bg-brand-400 animate-pulse';
+
             try {
                 const res = await fetch('/api/v1/generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        topic,
+                        topic: visual_prompt,
+                        visual_prompt: visual_prompt,
+                        voiceover_script: voiceover_script,
+                        reference_media_url: reference_media_url || null,
                         scenes,
                         art_style: 'Cinematic 35mm (Volumetric Lighting)',
                         resolution,
@@ -4780,17 +5000,20 @@ async def serve_dashboard():
                 const data = await res.json();
                 if (data.status === 'started') {
                     activeSessionJobId = data.job_id;
+                    if (phaseEl) phaseEl.innerText = 'Queued';
+                    if (phaseMsg) phaseMsg.innerText = `Job #${data.job_id} queued in production pipeline`;
+                    if (phasePct) phasePct.innerText = '15%';
+                    if (progressBar) progressBar.style.width = '15%';
                     if (currentSessionOnly) fetchGallery();
                 } else if (res.status === 409) {
                     alert(data.message);
+                    if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
                 }
             } catch (err) {
                 alert('Generation failed: ' + err);
-            } finally {
-                setTimeout(() => {
-                    btn.disabled = false;
-                    btn.classList.remove('opacity-50', 'cursor-not-allowed');
-                }, 3000);
+                if (phaseEl) { phaseEl.innerText = 'FAILED'; phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-red-950/80 text-red-400 border border-red-500/50'; }
+                if (phaseMsg) phaseMsg.innerText = String(err);
+                if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
             }
         }
 
@@ -5232,7 +5455,101 @@ async def serve_dashboard():
                 removeVaultRenderingCard();
                 renderMilestones(data.state.current_milestone || 'init');
             }
+
+            // Real-time UI state progression & preview player for Director Studio
+            updateDirectorJobUI(data.state, activeJob);
         };
+
+        function updateDirectorJobUI(state, activeJob) {
+            const phaseEl = document.getElementById('director-pipeline-phase');
+            const progressContainer = document.getElementById('director-progress-container');
+            const phaseMsg = document.getElementById('director-phase-msg');
+            const phasePct = document.getElementById('director-phase-pct');
+            const progressBar = document.getElementById('director-progress-bar');
+            const statusDot = document.getElementById('director-status-dot');
+            const outputCard = document.getElementById('director-output-card');
+            const videoPlayer = document.getElementById('director-video-player');
+            const downloadBtn = document.getElementById('director-download-btn');
+            const btn = document.getElementById('generate-btn');
+
+            if (!activeJob) {
+                if (state && (state.status === 'Idle' || state.status === 'idle')) {
+                    if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                }
+                return;
+            }
+
+            const st = activeJob.status;
+            const progress = (state && state.progress_percent !== undefined) ? state.progress_percent : (activeJob.progress_percent || 0);
+            const currentStep = (state && state.current_step) || activeJob.current_step || '';
+
+            if (st === 'running' || st === 'pending') {
+                if (progressContainer) progressContainer.classList.remove('hidden');
+                if (btn) { btn.disabled = true; btn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                if (statusDot) statusDot.className = 'w-2.5 h-2.5 rounded-full bg-brand-400 animate-pulse';
+
+                let phaseName = 'Generating video';
+                const ms = activeJob.current_milestone || '';
+                if (st === 'pending') {
+                    phaseName = 'Queued';
+                } else if (ms === 'script') {
+                    phaseName = 'Generating script';
+                } else if (ms === 'voice') {
+                    phaseName = 'Generating audio';
+                } else if (ms === 'keyframes' || ms === 'video') {
+                    phaseName = 'Generating video';
+                } else if (ms === 'compile' || ms === 'render') {
+                    phaseName = 'Rendering final video';
+                }
+
+                if (phaseEl) {
+                    phaseEl.innerText = phaseName;
+                    phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow border border-brand-500/40 animate-pulse';
+                }
+                if (phaseMsg) phaseMsg.innerText = currentStep || `Processing (${phaseName})...`;
+                if (phasePct) phasePct.innerText = `${progress}%`;
+                if (progressBar) progressBar.style.width = `${progress}%`;
+
+            } else if (st === 'complete') {
+                if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (statusDot) statusDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400';
+                if (phaseEl) {
+                    phaseEl.innerText = 'Completed';
+                    phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-500/50';
+                }
+                if (phaseMsg) phaseMsg.innerText = 'Video generated and compiled successfully!';
+                if (phasePct) phasePct.innerText = '100%';
+                if (progressBar) progressBar.style.width = '100%';
+
+                if (activeJob.output_path) {
+                    const videoFilename = activeJob.output_path.split(/[/\\]/).pop();
+                    const videoUrl = `/static_renders/${videoFilename}`;
+                    if (outputCard) outputCard.classList.remove('hidden');
+                    if (videoPlayer) {
+                        const currentSrc = videoPlayer.getAttribute('src') || '';
+                        if (!currentSrc.includes(videoFilename)) {
+                            videoPlayer.src = videoUrl;
+                            videoPlayer.load();
+                        }
+                    }
+                    if (downloadBtn) {
+                        downloadBtn.href = videoUrl;
+                        downloadBtn.setAttribute('download', videoFilename);
+                        downloadBtn.classList.remove('bg-slate-800', 'text-slate-400', 'border-slate-700', 'pointer-events-none', 'opacity-50');
+                        downloadBtn.classList.add('bg-gradient-to-r', 'from-brand-600', 'to-emerald-600', 'text-white', 'hover:brightness-110', 'shadow-md', 'shadow-brand-500/20', 'pointer-events-auto');
+                    }
+                }
+
+            } else if (st === 'failed') {
+                if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (statusDot) statusDot.className = 'w-2.5 h-2.5 rounded-full bg-red-400';
+                if (phaseEl) {
+                    phaseEl.innerText = 'FAILED';
+                    phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-red-950/80 text-red-400 border border-red-500/50';
+                }
+                if (phaseMsg) phaseMsg.innerText = (state && state.last_error) || (activeJob && activeJob.error) || 'Generation failed.';
+            }
+        }
 
         const savedElevenKey = localStorage.getItem('neuroclips_eleven_key');
         const savedElevenVoice = localStorage.getItem('neuroclips_eleven_voice');
@@ -5378,6 +5695,50 @@ async def serve_dashboard():
             }
         }
 
+        async function handleAvatar3DUpload(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const statusEl = document.getElementById('avatar-3d-status');
+            const badgeEl = document.getElementById('avatar-3d-badge');
+            const pathEl = document.getElementById('avatar-3d-model-path');
+
+            if (statusEl) {
+                statusEl.innerText = 'Uploading...';
+                statusEl.className = 'text-[10px] font-mono text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-700/50 animate-pulse';
+            }
+
+            try {
+                const res = await fetch('/api/v1/avatar/upload-3d', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    if (pathEl) pathEl.value = data.model_path || data.model_url;
+                    if (badgeEl) badgeEl.innerText = `${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+                    if (statusEl) {
+                        statusEl.innerText = 'Active (Ready)';
+                        statusEl.className = 'text-[10px] font-mono text-emerald-300 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-700/50';
+                    }
+                    const toggle = document.getElementById('avatar-3d-model-toggle');
+                    if (toggle) toggle.checked = true;
+                    alert(`3D Avatar asset uploaded successfully!\nPath: ${data.model_path || data.model_url}`);
+                } else {
+                    alert('Upload failed: ' + (data.detail || 'Unknown error'));
+                    if (statusEl) {
+                        statusEl.innerText = 'Upload Failed';
+                        statusEl.className = 'text-[10px] font-mono text-red-300 bg-red-950/60 px-2 py-0.5 rounded border border-red-700/50';
+                    }
+                }
+            } catch (e) {
+                alert('Upload error: ' + e);
+                if (statusEl) {
+                    statusEl.innerText = 'Upload Error';
+                    statusEl.className = 'text-[10px] font-mono text-red-300 bg-red-950/60 px-2 py-0.5 rounded border border-red-700/50';
+                }
+            }
+        }
+
         async function auditionAvatarVoice() {
             const text = document.getElementById('avatar-script-input').value.trim() || "Hello, this is your neural avatar instructor speaking.";
             const voice = document.getElementById('avatar-voice-select').value;
@@ -5419,6 +5780,7 @@ async def serve_dashboard():
             const curtainActive = document.getElementById('avatar-curtain-toggle').checked;
             const handGestures = document.getElementById('avatar-gesture-mode').value;
             const future3D = document.getElementById('avatar-3d-model-toggle').checked;
+            const model3DPath = document.getElementById('avatar-3d-model-path') ? document.getElementById('avatar-3d-model-path').value : null;
 
             const btn = document.getElementById('avatar-generate-btn');
             const progressBox = document.getElementById('avatar-gen-progress-box');
@@ -5452,7 +5814,8 @@ async def serve_dashboard():
                         curtain_mode: curtainMode,
                         curtain_active: curtainActive,
                         hand_gestures: handGestures,
-                        future_3d_model: future3D
+                        future_3d_model: future3D,
+                        model_3d_path: model3DPath || null
                     })
                 });
 

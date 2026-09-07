@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from src.config import OUTPUT_DIR, RESOLUTION_PROFILES, get_resolution_dimensions
+from src.config import OUTPUT_DIR, ASSETS_DIR, RESOLUTION_PROFILES, get_resolution_dimensions
 from src.pipeline import MediaGenerationEngine, VRAMGuard
 from src.compiler import compile_final_video, generate_srt_subtitles
 from src.services.audio_service import (
@@ -15,6 +15,7 @@ from src.services.audio_service import (
     resolve_video_path,
 )
 from src.services.job_manager import job_manager
+from src.services.video_generation_service import VideoGenerationService
 
 
 def run_production_pipeline(
@@ -44,6 +45,8 @@ def run_production_pipeline(
     output_type: str = "video",
     motion_graphics: bool = True,
     background_music: bool = False,
+    voiceover_script: Optional[str] = None,
+    reference_media_url: Optional[str] = None,
 ) -> None:
     """Executes full production workflow for a given job and scene list."""
     job = job_manager.get_job(job_id)
@@ -90,6 +93,24 @@ def run_production_pipeline(
             scene_motion = scene.get("motion_graphics", motion_graphics)
 
             resolved_v_path = resolve_video_path(v_url) if (v_type == "uploaded_video" and v_url) else None
+
+            # Multimodal Reference Media Support (Uploaded Image or Video)
+            ref_image_path = None
+            if not resolved_v_path and reference_media_url and idx == 1:
+                ref_candidate = Path(reference_media_url)
+                if not ref_candidate.is_absolute():
+                    c1 = OUTPUT_DIR / ref_candidate.name
+                    c2 = ASSETS_DIR / ref_candidate.name
+                    if c1.exists():
+                        ref_candidate = c1
+                    elif c2.exists():
+                        ref_candidate = c2
+                if ref_candidate.exists():
+                    ext = ref_candidate.suffix.lower()
+                    if ext in [".mp4", ".mov", ".mkv", ".webm"]:
+                        resolved_v_path = str(ref_candidate)
+                    elif ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp"]:
+                        ref_image_path = str(ref_candidate)
 
             if resolved_v_path:
                 base_p = 30 + int(((idx - 0.5) / total) * 35)
@@ -151,10 +172,23 @@ def run_production_pipeline(
                 job_manager.log_milestone(
                     job_id, "keyframes", f"Synthesizing keyframe {idx}/{total}...", base_p, f"Scene {idx}: Visual Prompt -> {vis_prompt[:60]}..."
                 )
-                full_prompt = f"{art_style}, {vis_prompt}" if art_style else vis_prompt
-                kf_path = engine.generate_image_keyframe(
-                    full_prompt, scene_id, job_id=job_id, width=width, height=height, force_refresh=True
-                )
+                if ref_image_path:
+                    # Multi-modal reference foundation
+                    vgs = VideoGenerationService()
+                    kf_path = vgs.adapter.generate_keyframe(
+                        prompt=vis_prompt,
+                        reference_media_path=ref_image_path,
+                        width=width,
+                        height=height,
+                        art_style=art_style,
+                        scene_id=scene_id,
+                        job_id=job_id
+                    )
+                else:
+                    full_prompt = f"{art_style}, {vis_prompt}" if art_style else vis_prompt
+                    kf_path = engine.generate_image_keyframe(
+                        full_prompt, scene_id, job_id=job_id, width=width, height=height, force_refresh=True
+                    )
                 keyframe_paths.append(kf_path)
                 job["keyframe_paths"] = keyframe_paths
 
@@ -170,56 +204,84 @@ def run_production_pipeline(
                 job["clip_paths"] = clip_paths
 
         # MILESTONE 4: VOICEOVER / TTS
-        audio_file = OUTPUT_DIR / f"audio_{job_id}.mp3"
-        narration_text = topic or " ".join([s.get("narration", "") for s in scenes if s.get("narration")]) or title
-        job_manager.log_milestone(
-            job_id, "voiceover", f"Synthesizing voiceover ({voice}, {speech_rate}x, {voice_provider})...", 75, f"Generating neural voice narration for '{title}'"
-        )
+        # Audio / Visual Separation & Empty Script Rule:
+        # If voiceover_script is explicitly passed:
+        #   - Empty / whitespace-only string: 100% Silent video! Skip voice generation entirely.
+        #   - Non-empty: Synthesize strictly from voiceover_script.
+        # If voiceover_script is None (backward compatibility):
+        #   - Use scene narration if present; otherwise fallback to topic / title for legacy tests.
+        is_silent_requested = (voiceover_script is not None and not voiceover_script.strip())
+        audio_file = None
 
-        tts_ok = generate_voiceover_audio_sync(
-            text=narration_text,
-            voice=voice,
-            speech_rate=speech_rate,
-            output_path=audio_file,
-            pitch=pitch,
-            volume=volume,
-            voice_provider=voice_provider,
-            elevenlabs_api_key=elevenlabs_api_key,
-            elevenlabs_voice_id=elevenlabs_voice_id,
-            stability=stability,
-            similarity_boost=similarity_boost,
-        )
-        if tts_ok:
-            job["audio_paths"] = [str(audio_file)]
+        if is_silent_requested:
+            narration_text = ""
+            burn_subtitles = False
             job_manager.log_milestone(
-                job_id,
-                "voiceover",
-                "Voiceover synthesized successfully",
-                80,
-                f"Generated voice audio: {audio_file.name} ({audio_file.stat().st_size / 1024:.1f} KB)",
+                job_id, "voiceover", "Silent mode active (Zero narration requested)", 80, "Zero voiceover narration synthesized per empty script rule"
             )
         else:
-            job_manager.log_milestone(
-                job_id, "voiceover", "Audio generated (silent mode)", 80, "No TTS audio generated"
-            )
+            if voiceover_script is not None and voiceover_script.strip():
+                narration_text = voiceover_script.strip()
+            else:
+                scene_narr = " ".join([s.get("narration", "").strip() for s in scenes if s.get("narration", "").strip()])
+                narration_text = scene_narr or topic or title
+
+            if not narration_text or not narration_text.strip():
+                burn_subtitles = False
+                job_manager.log_milestone(
+                    job_id, "voiceover", "Silent mode active (No narration text)", 80, "No voiceover synthesized"
+                )
+            else:
+                audio_file = OUTPUT_DIR / f"audio_{job_id}.mp3"
+                job_manager.log_milestone(
+                    job_id, "voiceover", f"Synthesizing voiceover ({voice}, {speech_rate}x, {voice_provider})...", 75, f"Generating neural voice narration for '{title}'"
+                )
+                tts_ok = generate_voiceover_audio_sync(
+                    text=narration_text,
+                    voice=voice,
+                    speech_rate=speech_rate,
+                    output_path=audio_file,
+                    pitch=pitch,
+                    volume=volume,
+                    voice_provider=voice_provider,
+                    elevenlabs_api_key=elevenlabs_api_key,
+                    elevenlabs_voice_id=elevenlabs_voice_id,
+                    stability=stability,
+                    similarity_boost=similarity_boost,
+                )
+                if tts_ok and audio_file.exists() and audio_file.stat().st_size > 100:
+                    job["audio_paths"] = [str(audio_file)]
+                    job_manager.log_milestone(
+                        job_id,
+                        "voiceover",
+                        "Voiceover synthesized successfully",
+                        80,
+                        f"Generated voice audio: {audio_file.name} ({audio_file.stat().st_size / 1024:.1f} KB)",
+                    )
+                else:
+                    audio_file = None
+                    job_manager.log_milestone(
+                        job_id, "voiceover", "Audio generated (silent mode)", 80, "No TTS audio generated"
+                    )
 
         # SRT SUBTITLE GENERATION
         srt_file = OUTPUT_DIR / f"subtitles_{job_id}.srt"
-        scenes_data = [
-            {
-                "scene_id": sc.get("scene_id", i + 1),
-                "narration": sc.get("narration", "") or sc.get("visual_prompt", ""),
-                "visual_prompt": sc.get("visual_prompt", ""),
-                "duration_seconds": sc.get("duration_seconds", 4),
-            }
-            for i, sc in enumerate(scenes)
-        ]
-        # Dimensions matter here too, not only at compile time: the caption chunker
-        # sizes each cue to the frame. Without them a 9:16 job gets the landscape
-        # character budget (~153 vs ~86), so cues wrap to five or six lines at
-        # portrait font size and run off the top of the frame.
-        generate_srt_subtitles(scenes_data, srt_file, width=width, height=height)
-        job["srt_path"] = str(srt_file)
+        if is_silent_requested or not narration_text.strip():
+            burn_subtitles = False
+            srt_file.write_text("", encoding="utf-8")
+            job["srt_path"] = str(srt_file)
+        else:
+            scenes_data = [
+                {
+                    "scene_id": sc.get("scene_id", i + 1),
+                    "narration": sc.get("narration", ""),
+                    "visual_prompt": sc.get("visual_prompt", ""),
+                    "duration_seconds": sc.get("duration_seconds", 4),
+                }
+                for i, sc in enumerate(scenes)
+            ]
+            generate_srt_subtitles(scenes_data, srt_file, width=width, height=height)
+            job["srt_path"] = str(srt_file)
 
         # MILESTONE 5: COMPILATION & FINALIZATION
         if output_type == "slide":
@@ -245,7 +307,7 @@ def run_production_pipeline(
             f"Executing multi-layer compositing (subtitles: {burn_subtitles}, avatar: {avatar_persona}, bgm: {background_music})",
         )
         output_filename = f"prod_{job_id}_{int(time.time())}.mp4"
-        audio_param = str(audio_file) if (audio_file.exists() and audio_file.stat().st_size > 100) else None
+        audio_param = str(audio_file) if (audio_file is not None and audio_file.exists() and audio_file.stat().st_size > 100) else None
 
         avatar_img_path = None
         if avatar_persona == "custom_upload":
