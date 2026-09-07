@@ -200,6 +200,50 @@ def test_nipuna_item_bank_integrity():
     else:
         print("  [SKIP] nipuna_item_bank.json not found in root, skipping raw file check.")
 
+def test_voice_director_enhancements():
+    """Test 4: Verify SSML prosody compiler, lexicon substitutions, and VoiceContract schema."""
+    print("\n--- [TEST 4] Voice Director Enhancements (SSML, Lexicon, LUFS Contract) ---")
+    from src.agents.voice_director import VoiceDirectorAgent
+    from src.lexicon import LexiconEngine
+    from src.contracts.voice_contract import VoiceContract, SceneAudioArtifact
+    
+    # 1. Lexicon Test
+    lexicon = LexiconEngine()
+    test_text = "The KYC and UPI compliance mandated by RBI and SEBI must be verified."
+    converted = lexicon.apply_lexicon(test_text)
+    assert "K-Y-C" in converted, f"Expected K-Y-C in {converted}"
+    assert "U-P-I" in converted, f"Expected U-P-I in {converted}"
+    assert "R-B-I" in converted, f"Expected R-B-I in {converted}"
+    assert "SEB-ee" in converted, f"Expected SEB-ee in {converted}"
+    print("  [PASS] Domain pronunciation lexicon substitutions verified.")
+
+    # 2. SSML & Prosody Compiler Test
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        agent = VoiceDirectorAgent(output_dir=Path(tmp_dir))
+        raw_script = "Welcome to FinTech. [pause 500ms] [tone:urgent]Immediate action required![/tone] [protip]Check the CIBIL score."
+        ssml, clean_plain = agent.compile_ssml_prosody(raw_script, voice_name="en-IN-NeerjaNeural")
+        
+        assert '<break time="500ms"/>' in ssml, f"Missing break tag in SSML: {ssml}"
+        assert '<prosody rate="+10%" pitch="+2Hz">' in ssml, f"Missing urgent prosody in SSML: {ssml}"
+        assert 'SIB-il' in ssml, f"Missing lexicon substitution in SSML: {ssml}"
+        assert 'Pro tip:' in clean_plain, f"Missing clean protip in plain text: {clean_plain}"
+        print("  [PASS] SSML compiler generated W3C tags and clean prosody.")
+
+    # 3. VoiceContract Contract Test
+    artifact = SceneAudioArtifact(scene_id=1, audio_path="/tmp/scene_1.mp3", measured_duration_sec=4.5)
+    contract = VoiceContract(
+        voice_profile_used="en-IN-NeerjaNeural",
+        engine="edge_tts",
+        master_audio_path="/tmp/master.mp3",
+        total_audio_duration_sec=4.5,
+        scene_audios=[artifact],
+        normalized_lufs=-14.0,
+        bg_music_applied=True
+    )
+    assert contract.normalized_lufs == -14.0
+    assert contract.bg_music_applied is True
+    print("  [PASS] Enhanced VoiceContract schema validated.")
+
 def run_all_tests():
     print("===================================================================")
     print("Modular-NeuroClips Quality & Workflow Verification Suite")
@@ -207,6 +251,7 @@ def run_all_tests():
     test_role_division_ui()
     test_external_video_scorm_builder()
     test_nipuna_item_bank_integrity()
+    test_voice_director_enhancements()
     print("\n===================================================================")
     print("ALL TESTS PASSED: Quality, role division & SCORM workflow verified!")
     print("===================================================================")
