@@ -197,3 +197,39 @@ def test_scorm_framework_packaging_logic(tmp_path):
         manifest_content = zf.read("imsmanifest.xml").decode("utf-8")
         assert "Edu Framework" in manifest_content
         assert frame_template.title() in manifest_content
+
+
+def test_director_phases_and_preflight():
+    """Verify Task 5, 6, 7: 4 phases, preflight summary, and settings modal."""
+    html = get_dashboard_html()
+    assert "Phase 1 — Content" in html
+    assert "Phase 2 — Format" in html
+    assert "Phase 3: Presentation" in html
+    assert "Phase 4: Render Engine & Compilation" in html
+    assert 'id="preflight-summary"' in html
+    assert 'id="settings-modal"' in html
+    assert 'id="elevenlabs-api-key"' in html
+    assert 'id="elevenlabs-voice-id"' in html
+    assert 'id="engine-select"' in html
+
+
+def test_login_portal_neuroclips_mytestbed_tech():
+    """Verify Login portal for neuroclips.mytestbed.tech."""
+    from fastapi.testclient import TestClient
+    from src.dashboard import app
+
+    client = TestClient(app)
+    res = client.get("/login")
+    assert res.status_code == 200
+    assert "neuroclips.mytestbed.tech" in res.text
+    assert "Studio Workstation Sign-In" in res.text
+    assert "id=\"username-input\"" in res.text
+    assert "id=\"password-input\"" in res.text
+    assert "id=\"role-select\"" in res.text
+    assert "Instant Demo Access" in res.text
+
+    # Verify /signin alias
+    res_alias = client.get("/signin")
+    assert res_alias.status_code == 200
+    assert "neuroclips.mytestbed.tech" in res_alias.text
+

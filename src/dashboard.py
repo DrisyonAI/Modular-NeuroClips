@@ -1440,6 +1440,11 @@ async def serve_avatar_route():
 async def serve_scorm_route():
     return await serve_dashboard()
 
+@app.api_route("/login", methods=["GET", "POST", "HEAD"], response_class=HTMLResponse)
+@app.api_route("/signin", methods=["GET", "POST", "HEAD"], response_class=HTMLResponse)
+async def serve_login_route():
+    return await serve_login_page()
+
 
 # -------------------------------------------------------------
 # Web UI Portal Interface with SCORM & Visual Storyboard
@@ -6316,3 +6321,272 @@ async def serve_dashboard():
 </body>
 </html>
 """
+
+
+async def serve_login_page():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modular-NeuroClips Studio | Director Login (neuroclips.mytestbed.tech)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                            glow: '#818cf8',
+                            dark: '#030712'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #030712;
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(168, 85, 247, 0.12) 0px, transparent 50%),
+                radial-gradient(at 50% 50%, rgba(6, 182, 212, 0.08) 0px, transparent 60%);
+        }
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between text-slate-100 font-sans selection:bg-brand-500 selection:text-white">
+
+    <!-- Top Domain & Status Bar -->
+    <header class="w-full px-6 py-4 flex items-center justify-between border-b border-slate-800/60 backdrop-blur-md">
+        <a href="/" class="flex items-center space-x-3 group">
+            <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-brand-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-brand-500/25 group-hover:scale-105 transition-all">
+                <span class="text-lg font-black text-white">⚡</span>
+            </div>
+            <div>
+                <span class="font-bold text-sm tracking-tight text-white group-hover:text-brand-glow transition-all">Modular-NeuroClips</span>
+                <span class="text-[10px] text-slate-400 block font-mono">Director Suite v2.6</span>
+            </div>
+        </a>
+
+        <!-- Production Node SSL Badge -->
+        <div class="flex items-center space-x-2.5">
+            <div class="glass-panel px-3 py-1.5 rounded-full flex items-center space-x-2 text-xs font-mono border border-emerald-500/30">
+                <span class="relative flex h-2 w-2">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                <span class="text-slate-300">neuroclips.mytestbed.tech</span>
+                <span class="text-emerald-400 font-bold text-[10px]">🔒 SSL</span>
+            </div>
+            <a href="/" class="text-xs text-slate-400 hover:text-brand-glow transition-all px-2.5 py-1 rounded-lg hover:bg-slate-800">
+                Studio View &rarr;
+            </a>
+        </div>
+    </header>
+
+    <!-- Main Authentication Portal -->
+    <main class="flex-1 flex items-center justify-center p-6">
+        <div class="w-full max-w-md space-y-6">
+
+            <!-- Card Container -->
+            <div class="glass-panel rounded-3xl p-8 space-y-6 border border-brand-500/30 shadow-2xl shadow-indigo-500/10">
+                
+                <!-- Header / Logo -->
+                <div class="text-center space-y-2">
+                    <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-brand-600 via-indigo-600 to-purple-600 shadow-xl shadow-brand-500/30 mb-1">
+                        <span class="text-2xl font-black text-white">⚡</span>
+                    </div>
+                    <h2 class="text-xl font-bold tracking-tight text-white">Studio Workstation Sign-In</h2>
+                    <p class="text-xs text-slate-400">Authenticate to access autonomous director orchestration & SCORM export</p>
+                </div>
+
+                <!-- Alert / Status Notice -->
+                <div id="login-status-notice" class="hidden p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs text-emerald-300 flex items-center space-x-2">
+                    <span class="text-sm">✓</span>
+                    <span id="login-status-text">Authorization confirmed. Entering Studio...</span>
+                </div>
+
+                <!-- Form -->
+                <form id="login-form" onsubmit="handleFormLogin(event)" class="space-y-4 text-xs">
+                    <div>
+                        <label for="username-input" class="block font-semibold text-slate-300 mb-1.5 uppercase tracking-wider text-[10px]">
+                            Workstation ID / Email
+                        </label>
+                        <div class="relative">
+                            <input type="text" id="username-input" value="director@mytestbed.tech" required
+                                   class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 pl-9 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono transition-all">
+                            <span class="absolute left-3 top-3 text-slate-500 text-sm">👤</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between mb-1.5">
+                            <label for="password-input" class="block font-semibold text-slate-300 uppercase tracking-wider text-[10px]">
+                                Access Token / Key
+                            </label>
+                            <span class="text-[10px] text-brand-glow font-mono">Demo Auto-Filled</span>
+                        </div>
+                        <div class="relative">
+                            <input type="password" id="password-input" value="nc-prod-director-token-2026" required
+                                   class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 pl-9 pr-10 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono transition-all">
+                            <span class="absolute left-3 top-3 text-slate-500 text-sm">🔑</span>
+                            <button type="button" onclick="togglePasswordVisibility()" class="absolute right-3 top-3 text-slate-400 hover:text-white" title="Toggle visibility">
+                                👁️
+                            </button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label for="role-select" class="block font-semibold text-slate-300 mb-1.5 uppercase tracking-wider text-[10px]">
+                            Operational Role
+                        </label>
+                        <select id="role-select" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-slate-200 focus:outline-none focus:border-brand-500 font-sans">
+                            <option value="Director & Master Orchestrator" selected>👑 Director & Master Orchestrator</option>
+                            <option value="Curriculum & Instructional Architect">🎓 Curriculum & Instructional Architect</option>
+                            <option value="Production & Video Engineer">⚙️ Production & Video Engineer</option>
+                            <option value="Enterprise LMS Admin">📦 Enterprise LMS Admin</option>
+                        </select>
+                    </div>
+
+                    <div class="flex items-center justify-between pt-1 text-[11px]">
+                        <label class="flex items-center space-x-2 text-slate-300 cursor-pointer select-none">
+                            <input type="checkbox" id="remember-me-check" checked class="rounded accent-brand-500">
+                            <span>Remember on this workstation</span>
+                        </label>
+                        <a href="/" class="text-brand-glow hover:underline">Guest Preview</a>
+                    </div>
+
+                    <!-- Sign In CTA -->
+                    <button type="submit" id="submit-login-btn"
+                            class="w-full py-3.5 rounded-xl bg-gradient-to-r from-brand-600 via-indigo-600 to-purple-600 hover:from-brand-500 hover:to-indigo-500 font-bold text-xs text-white shadow-lg shadow-brand-500/25 active:scale-[0.99] transition-all flex items-center justify-center space-x-2">
+                        <span>🚀</span>
+                        <span>Sign In to Workstation</span>
+                    </button>
+                </form>
+
+                <!-- Divider -->
+                <div class="relative flex items-center justify-center">
+                    <div class="border-t border-slate-800 w-full"></div>
+                    <span class="bg-slate-950 px-3 text-[10px] text-slate-500 uppercase tracking-widest font-mono font-bold absolute">OR QUICK ACCESS</span>
+                </div>
+
+                <!-- Instant One-Click Demo Access -->
+                <button type="button" onclick="handleQuickDemoAccess()"
+                        class="w-full py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-brand-500/30 hover:border-brand-500/60 font-semibold text-xs transition-all flex items-center justify-center space-x-2 group">
+                    <span class="group-hover:scale-110 transition-transform">⚡</span>
+                    <span>Instant Demo Access (Director Role)</span>
+                </button>
+            </div>
+
+            <!-- Server & Cluster Info Box -->
+            <div class="glass-panel p-4 rounded-2xl text-[11px] text-slate-400 space-y-2 border border-slate-800/80 font-mono">
+                <div class="flex items-center justify-between text-[10px]">
+                    <span class="text-slate-500 uppercase tracking-wider">Target Endpoint</span>
+                    <span class="text-slate-300 font-bold">neuroclips.mytestbed.tech</span>
+                </div>
+                <div class="flex items-center justify-between text-[10px]">
+                    <span class="text-slate-500 uppercase tracking-wider">Reverse Proxy</span>
+                    <span class="text-indigo-400">Caddy / Nginx TLS 1.3</span>
+                </div>
+                <div class="flex items-center justify-between text-[10px]">
+                    <span class="text-slate-500 uppercase tracking-wider">Engine Status</span>
+                    <span class="text-emerald-400">Autonomous Pipeline Ready</span>
+                </div>
+            </div>
+
+            <div class="text-center">
+                <a href="/" class="text-xs text-slate-400 hover:text-slate-200 transition-colors">
+                    &larr; Back to Director Studio
+                </a>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="w-full py-4 text-center text-xs text-slate-500 border-t border-slate-800/60 font-mono">
+        Modular-NeuroClips &bull; neuroclips.mytestbed.tech &bull; Autonomous Production Cluster
+    </footer>
+
+    <script>
+        // Check for existing session on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            try {
+                const existingUser = localStorage.getItem('neuroclips_user');
+                if (existingUser) {
+                    const uInput = document.getElementById('username-input');
+                    if (uInput) uInput.value = existingUser;
+                }
+                const existingRole = localStorage.getItem('neuroclips_role');
+                if (existingRole) {
+                    const rSelect = document.getElementById('role-select');
+                    if (rSelect) rSelect.value = existingRole;
+                }
+            } catch (e) {}
+        });
+
+        function togglePasswordVisibility() {
+            const pwd = document.getElementById('password-input');
+            if (pwd) {
+                pwd.type = pwd.type === 'password' ? 'text' : 'password';
+            }
+        }
+
+        function handleFormLogin(e) {
+            e.preventDefault();
+            const username = document.getElementById('username-input').value.trim();
+            const role = document.getElementById('role-select').value;
+            authenticateAndRedirect(username, role);
+        }
+
+        function handleQuickDemoAccess() {
+            authenticateAndRedirect('director@mytestbed.tech', 'Director & Master Orchestrator');
+        }
+
+        function authenticateAndRedirect(user, role) {
+            const btn = document.getElementById('submit-login-btn');
+            const notice = document.getElementById('login-status-notice');
+            const noticeText = document.getElementById('login-status-text');
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span>⏳</span> <span>Authorizing Session...</span>';
+            }
+
+            try {
+                localStorage.setItem('neuroclips_user', user);
+                localStorage.setItem('neuroclips_role', role);
+                localStorage.setItem('neuroclips_session_token', 'nc_' + Math.random().toString(36).substring(2) + Date.now().toString(36));
+                localStorage.setItem('neuroclips_authenticated', 'true');
+            } catch (e) {
+                console.warn('Storage warning:', e);
+            }
+
+            if (notice && noticeText) {
+                noticeText.innerText = `Welcome ${user.split('@')[0]}! Launching Director Studio...`;
+                notice.classList.remove('hidden');
+            }
+
+            setTimeout(() => {
+                const params = new URLSearchParams(window.location.search);
+                const redirect = params.get('redirect') || '/';
+                window.location.href = redirect;
+            }, 600);
+        }
+    </script>
+</body>
+</html>
+"""
+
