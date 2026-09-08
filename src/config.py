@@ -18,6 +18,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
+N8N_ALERT_WEBHOOK_URL = os.getenv(
+    "N8N_ALERT_WEBHOOK_URL",
+    "https://n8n.mytestbed.tech/webhook/alert-dispatch"
+)
+N8N_ALERTS_ENABLED = os.getenv("N8N_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
+
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./render_output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

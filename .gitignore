@@ -24,6 +24,7 @@ graphify-out/
 test_tmp/
 .pytest_cache/
 batch_production.db
+scratch_tmp/
 !wire_frames/*.jpeg
 !wire_frames/*.png
 !wire_frames/*.webp
