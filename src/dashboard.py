@@ -1546,29 +1546,6 @@ async def serve_dashboard():
     <!-- Main Container -->
     <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
 
-        <!-- 🌟 MILESTONE PROGRESS SECTION -->
-        <section class="glass-panel-glow rounded-2xl p-6 relative overflow-hidden">
-            <div class="flex items-center justify-between mb-4">
-                <div>
-                    <h2 class="text-base font-bold text-white flex items-center gap-2">
-                        <span>🎯</span> End-to-End Production Milestones
-                    </h2>
-                    <p class="text-xs text-slate-400">Real-time lifecycle tracking across all generative stages</p>
-                </div>
-                <div class="text-right">
-                    <span id="overall-progress-num" class="text-2xl font-black text-brand-glow font-mono">0%</span>
-                    <p id="active-step-caption" class="text-xs text-slate-400">Waiting for job</p>
-                </div>
-            </div>
-
-            <div class="w-full h-2.5 bg-slate-800/80 rounded-full overflow-hidden mb-6 p-0.5 border border-slate-700/50">
-                <div id="master-progress-fill" class="h-full bg-gradient-to-r from-brand-600 via-indigo-500 to-brand-glow rounded-full transition-all duration-500 shadow-lg shadow-brand-500/50" style="width: 0%"></div>
-            </div>
-
-            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3" id="milestones-container">
-            </div>
-        </section>
-
         <!-- 🎛️ STUDIO MODE SELECTOR BAR (GOOGLE STITCH WIREFRAME SUITE) -->
         <div class="flex items-center space-x-2 border-b border-slate-800 pb-3 overflow-x-auto">
             <button onclick="switchStudioMode('video')" id="mode-btn-video" title="Director Studio (Master Orchestrator)" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all whitespace-nowrap">
@@ -1589,9 +1566,40 @@ async def serve_dashboard():
             </button>
         </div>
 
-
         <!-- MODE 1: MULTI-AGENT VIDEO STUDIO -->
         <div id="mode-video-section" class="space-y-6">
+
+            <!-- 🌟 MILESTONE PROGRESS SECTION (INSIDE DIRECTOR TAB ONLY) -->
+            <section id="milestone-tracker-section" class="glass-panel-glow rounded-2xl p-3 sm:px-5 transition-all duration-300 relative overflow-hidden">
+                <div class="flex items-center justify-between min-h-[32px]">
+                    <div class="flex items-center gap-2.5">
+                        <span class="text-base">🎯</span>
+                        <div>
+                            <h2 class="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                                Production Milestones
+                            </h2>
+                            <p id="tracker-subtext" class="text-[11px] text-slate-400 hidden">Real-time lifecycle tracking across all generative stages</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="flex items-center gap-2 text-right">
+                            <span id="overall-progress-num" class="text-base sm:text-lg font-black text-brand-glow font-mono">0%</span>
+                            <span class="text-slate-600">&bull;</span>
+                            <p id="active-step-caption" class="text-xs text-slate-300 font-medium">Ready</p>
+                        </div>
+                        <button type="button" id="tracker-toggle-btn" onclick="toggleTrackerManual()" class="text-slate-400 hover:text-white text-xs px-2 py-0.5 rounded bg-slate-800/80 border border-slate-700 font-mono transition-all" title="Toggle milestone tracker">▾</button>
+                    </div>
+                </div>
+
+                <!-- Expanded Content: Progress bar and stage cards (collapses when idle) -->
+                <div id="tracker-expanded-content" class="hidden mt-3 pt-3 border-t border-slate-800/80 space-y-4">
+                    <div class="w-full h-2.5 bg-slate-800/80 rounded-full overflow-hidden p-0.5 border border-slate-700/50">
+                        <div id="master-progress-fill" class="h-full bg-gradient-to-r from-brand-600 via-indigo-500 to-brand-glow rounded-full transition-all duration-500 shadow-lg shadow-brand-500/50" style="width: 0%"></div>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3" id="milestones-container">
+                    </div>
+                </div>
+            </section>
 
         <!-- Studio Control Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -3962,7 +3970,30 @@ async def serve_dashboard():
             });
         }
 
+        let trackerForceExpanded = false;
+        function updateTrackerDisplay(isActive) {
+            const exp = document.getElementById('tracker-expanded-content');
+            const sub = document.getElementById('tracker-subtext');
+            const toggle = document.getElementById('tracker-toggle-btn');
+            if (!exp) return;
+            if (isActive || trackerForceExpanded) {
+                exp.classList.remove('hidden');
+                if (sub) sub.classList.remove('hidden');
+                if (toggle) toggle.innerText = '▴';
+            } else {
+                exp.classList.add('hidden');
+                if (sub) sub.classList.add('hidden');
+                if (toggle) toggle.innerText = '▾';
+            }
+        }
+
+        function toggleTrackerManual() {
+            trackerForceExpanded = !trackerForceExpanded;
+            updateTrackerDisplay(false);
+        }
+
         renderMilestones('init');
+        updateTrackerDisplay(false);
 
         function updateScriptMetrics() {
             const scriptEl = document.getElementById('script-input');
@@ -3987,6 +4018,7 @@ async def serve_dashboard():
             activeSessionJobId = null;
             document.getElementById('terminal-logs').innerHTML = `<div class="text-brand-glow italic">[NEW PROJECT] Workspace reset to pristine blank canvas. Ready for new course.</div>`;
             renderMilestones('init');
+            updateTrackerDisplay(false);
             document.getElementById('master-progress-fill').style.width = '0%';
             document.getElementById('overall-progress-num').innerText = '0%';
             document.getElementById('active-step-caption').innerText = 'Blank Canvas Ready';
@@ -5126,6 +5158,7 @@ async def serve_dashboard():
                 const data = await res.json();
                 if (data.status === 'started') {
                     activeSessionJobId = data.job_id;
+                    updateTrackerDisplay(true);
                     if (phaseEl) phaseEl.innerText = 'Queued';
                     if (phaseMsg) phaseMsg.innerText = `Job #${data.job_id} queued in production pipeline`;
                     if (phasePct) phasePct.innerText = '15%';
@@ -5578,6 +5611,9 @@ async def serve_dashboard():
             document.getElementById('active-step-caption').innerText = data.state.current_step || 'Idle';
 
             const activeJob = data.active_job;
+            const isJobRendering = Boolean(activeJob && activeJob.status !== 'complete' && activeJob.status !== 'failed');
+            updateTrackerDisplay(isJobRendering || Boolean(activeSessionJobId));
+
             if (activeJob) {
                 renderMilestones(activeJob.current_milestone, activeJob.milestones);
                 if (activeJob.logs && activeJob.logs.length > 0) {
@@ -5590,6 +5626,7 @@ async def serve_dashboard():
                 if (activeJob.status !== 'complete' && activeJob.status !== 'failed') {
                     updateVaultRenderingCard(activeJob);
                 } else {
+                    activeSessionJobId = null;
                     removeVaultRenderingCard();
                 }
 
@@ -5601,6 +5638,7 @@ async def serve_dashboard():
                     }
                 }
             } else {
+                activeSessionJobId = null;
                 removeVaultRenderingCard();
                 renderMilestones(data.state.current_milestone || 'init');
             }
