@@ -13,9 +13,10 @@
    - [🎬 Multi-Agent Video Studio](#-multi-agent-video-studio)
    - [🎙️ Voice Director Studio & Audio Master Exporter](#-voice-director-studio--audio-master-exporter)
    - [📦 Custom SCORM & LMS Courseware Generator](#-custom-scorm--lms-courseware-generator)
-6. [High-Level Design (HLD) & Sequence Diagrams](#6-high-level-design-hld--sequence-diagrams)
-7. [API Specifications & REST Endpoints](#7-api-specifications--rest-endpoints)
-8. [Deployment & VPS Control Plane](#8-deployment--vps-control-plane)
+6. [Product Specifications: BRD & FRD](#6-product-specifications-brd--frd)
+7. [High-Level Design (HLD) & Low-Level Design (LLD)](#7-high-level-design-hld--low-level-design-lld)
+8. [API Specifications & REST Endpoints](#8-api-specifications--rest-endpoints)
+9. [Deployment & VPS Control Plane](#9-deployment--vps-control-plane)
 
 ---
 
@@ -129,7 +130,20 @@ The Web Portal features 3 dedicated studio workbenches accessible via the top mo
 
 ### 🎙️ Voice Director Studio & Audio Master Exporter
 * Dedicated audio synthesis laboratory supporting:
-  * **Two Input Modes**: Direct text / document upload (`.txt`, `.md`, `.srt`, `.vtt`, `.json`) OR **`✨ AI Expand Prompt`** mode where the `ScriptwriterAgent` automatically turns brief topics into spoken scripts.
+  * **Custom Voice Recording & Cloning (`VoiceCloner`)**:
+    * In-browser live microphone recording (`MediaRecorder` API) or audio file upload (`.wav`, `.ogg`, `.mp3`, `.m4a`).
+    * FFmpeg conditioning to 44.1kHz mono WAV with high-pass noise filtering.
+    * Cloud cloning via ElevenLabs Instant Voice Clone API (`/v1/voices/add`) with local reference speaker fallback.
+    * Dynamic persona persistence into `src/contracts/custom_personas.json` and immediate registration in `PERSONA_CATALOG`.
+  * **Universal Document-to-Speech Engine (`DocumentParser`)**:
+    * Multi-format ingestion: `.txt`, `.md`, `.docx`, and `.pdf` files up to 25MB.
+    * Automatic decomposition into bounded pedagogical scenes (40–80 words / 20–40s per scene).
+    * Automated injection of domain pronunciation lexicons (`KYC`, `UPI`, `RBI`, `NBFC`, `SEBI`) and directorial prosody cues (`[pause]`, `[tone]`, `[emphasis]`).
+  * **Broadcast Audio Mastering & SCORM Packaging**:
+    * EBU R128 loudness normalization (-14 LUFS) and dynamic background music ducking.
+    * Millisecond-accurate synchronized `.srt` subtitle generation.
+    * One-click bundling into an ADL SCORM 1.2 course package.
+  * **Two Input Modes**: Direct text / document upload OR **`✨ AI Expand Prompt`** mode with `ScriptwriterAgent`.
   * **Directorial Cues Toolbar**: 1-click injection of `[pause 250ms]`, `[pause 500ms]`, `[pause 1.0s]`, `[emphasis]`, `[protip]`.
   * **Prosody Tuning**: Speech Rate (`0.75x`–`1.50x`) and Pitch Shift (`-20Hz` to `+20Hz`).
   * **Multi-Format Audio Masters**: 1-click export in **MP3 (320kbps)**, **WAV (Lossless 44.1kHz)**, **M4A / AAC (Apple Podcasts)**, **OGG (Web Audio)**, and **FLAC (Audiophile)** with companion `.srt` subtitles.
@@ -146,7 +160,28 @@ The Web Portal features 3 dedicated studio workbenches accessible via the top mo
 
 ---
 
-## 6. High-Level Design (HLD) & Sequence Diagrams
+## 6. Product Specifications: BRD & FRD
+The product requirements, business rationale, and detailed functional workflows are fully documented in:
+* 📄 **Complete PRD & Specifications**: [`PRD_PORTAL_SPECIFICATION.md`](PRD_PORTAL_SPECIFICATION.md)
+* 📊 **Business Requirements Document (BRD)**: [`PRD_PORTAL_SPECIFICATION.md#71-business-requirements-document-brd`](PRD_PORTAL_SPECIFICATION.md#71-business-requirements-document-brd)
+  * Voice Cloning Asset Ownership (`BRD-VOICE-01`)
+  * Zero-Cost Local Cloning (`BRD-VOICE-02`)
+  * Universal Document Ingestion (`BRD-DOC-01`)
+  * One-Click SCORM Audio Assembly (`BRD-DOC-02`)
+* ⚙️ **Functional Requirements Document (FRD)**: [`PRD_PORTAL_SPECIFICATION.md#72-functional-requirements-document-frd`](PRD_PORTAL_SPECIFICATION.md#72-functional-requirements-document-frd)
+  * Includes interactive **End-to-End Workflow Architecture** and **Sequence Diagrams**
+  * Module 1: In-Browser Mic Recording & ElevenLabs/Local Voice Cloning (`FRD-VC-01` to `FRD-VC-04`)
+  * Module 2: Multi-Format Document Parsing, Pedagogical Slicing & SCORM 1.2 Zip (`FRD-DFS-01` to `FRD-DFS-04`)
+
+---
+
+## 7. High-Level Design (HLD) & Low-Level Design (LLD)
+Technical blueprints, component interfaces, and subsystem failure recovery designs:
+* 🏛️ **High-Level Design (HLD)**: [`docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_HLD.md`](docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_HLD.md)
+  * Multi-agent subsystem context, audio conditioning gates (FFmpeg 44.1kHz mono noise-gating), local-first zero-cost fallbacks, and NFR matrix.
+* 🔧 **Low-Level Design (LLD)**: [`docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_LLD.md`](docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_LLD.md)
+  * Pydantic schemas (`CustomPersonaRecord`, `ParsedDocumentScene`, `DocumentParseResult`), class method signatures for `VoiceCloner` and `DocumentParser`, REST API specs, and sequence diagrams.
+* 🎬 **Multi-Agent Orchestration Specification**: [`MULTI_AGENT_ORCHESTRATION_SPEC.md`](MULTI_AGENT_ORCHESTRATION_SPEC.md)
 
 ```mermaid
 sequenceDiagram
@@ -177,14 +212,17 @@ sequenceDiagram
 
 ---
 
-## 7. API Specifications & REST Endpoints
+## 8. API Specifications & REST Endpoints
 
 ### Multi-Agent & Script Endpoints
 * `POST /api/v1/director/orchestrate`: Dispatches full Director-led multi-agent production job.
 * `POST /api/v1/script/upload-document`: Cleans and ingests `.txt`, `.md`, `.srt`, `.vtt`, `.json` documents.
 * `POST /api/v1/voice/expand-prompt`: Expands raw prompts into complete spoken scripts with directorial cues using `ScriptwriterAgent`.
 
-### Voice Director Studio Endpoints
+### Voice Director & Document Speech Endpoints
+* `POST /api/v1/voice/clone`: Uploads/records audio sample, normalizes via FFmpeg, clones voice (ElevenLabs or local reference), and registers a custom persona.
+* `POST /api/v1/voice/synthesize-file`: Ingests `.txt`, `.md`, `.docx`, or `.pdf`, decomposes into scenes, applies pronunciation lexicon & SSML, and generates master audio, subtitles, and optional SCORM package.
+* `GET /api/v1/voice/personas`: Returns all active canonical and user-cloned personas.
 * `POST /api/v1/preview-voice`: Instant neural voice audition.
 * `POST /api/v1/voice/export`: Synthesizes and converts master audio to **MP3, WAV, M4A, OGG, FLAC** with synchronous `.srt` subtitles.
 
@@ -197,7 +235,7 @@ sequenceDiagram
 
 ---
 
-## 8. Deployment & VPS Control Plane
+## 9. Deployment & VPS Control Plane
 
 ### Rootless Docker Deployment
 ```bash

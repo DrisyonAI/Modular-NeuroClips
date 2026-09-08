@@ -767,19 +767,22 @@ async def synthesize_document_speech_api(
         script_scenes = [
             ScriptScene(
                 scene_id=sc.scene_id,
-                visual_prompt=f"Educational slide illustrating {sc.title}",
+                title=sc.title,
+                visual_description=f"Educational slide illustrating {sc.title}",
                 motion_prompt="Subtle camera tracking over bullet points",
                 narration=sc.narration,
-                duration_seconds=int(sc.estimated_duration_sec)
+                estimated_duration_sec=float(sc.estimated_duration_sec)
             )
             for sc in parse_result.scenes
         ]
 
         script_contract = ScriptContract(
-            title=parse_result.document_title,
-            target_audience="Enterprise Professionals",
-            total_estimated_duration_sec=sum(s.duration_seconds for s in script_scenes),
+            course_title=parse_result.document_title,
+            persona_id=persona_id,
+            target_locale=RegionLocaleEnum.EN_IN,
+            art_style_preset="Photorealistic 8K",
             total_word_count=parse_result.total_words,
+            estimated_total_runtime_sec=sum(s.estimated_duration_sec for s in script_scenes),
             scenes=script_scenes
         )
 

@@ -26,5 +26,33 @@
     "default_pitch": "+0Hz",
     "default_speed": 1.0,
     "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
+  },
+  "test_presenter_14860": {
+    "persona_id": "test_presenter_14860",
+    "display_name": "Professor Ananya Sharma",
+    "gender": "female",
+    "target_locale": "en-IN",
+    "demographic_ethnicity": "South Asian",
+    "industry_domain": "FinTech Research",
+    "visual_continuity_anchor": "Professor in formal Indian attire, university lecture theater",
+    "canonical_voice": "en-IN-NeerjaNeural",
+    "elevenlabs_voice_id": "test_eleven_123",
+    "default_pitch": "+0Hz",
+    "default_speed": 1.0,
+    "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
+  },
+  "test_presenter_41484": {
+    "persona_id": "test_presenter_41484",
+    "display_name": "Professor Ananya Sharma",
+    "gender": "female",
+    "target_locale": "en-IN",
+    "demographic_ethnicity": "South Asian",
+    "industry_domain": "FinTech Research",
+    "visual_continuity_anchor": "Professor in formal Indian attire, university lecture theater",
+    "canonical_voice": "en-IN-NeerjaNeural",
+    "elevenlabs_voice_id": "test_eleven_123",
+    "default_pitch": "+0Hz",
+    "default_speed": 1.0,
+    "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
   }
 }
