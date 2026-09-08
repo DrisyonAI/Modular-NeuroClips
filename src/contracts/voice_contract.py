@@ -21,10 +21,12 @@ class VoiceContract(BaseModel):
     Complete audio production package verified for downstream AV synchronization.
     """
     voice_profile_used: str
-    engine: str  # 'edge_tts' or 'elevenlabs'
+    engine: str  # 'edge_tts', 'elevenlabs', or 'kokoro_local'
     pitch: str = "+0Hz"
     speech_rate: float = 1.0
     master_audio_path: str
     subtitles_srt_path: Optional[str] = None
     total_audio_duration_sec: float
     scene_audios: List[SceneAudioArtifact]
+    normalized_lufs: Optional[float] = None
+    bg_music_applied: bool = False
