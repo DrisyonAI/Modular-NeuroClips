@@ -178,9 +178,8 @@ The product requirements, business rationale, and detailed functional workflows 
 ## 7. High-Level Design (HLD) & Low-Level Design (LLD)
 Technical blueprints, component interfaces, and subsystem failure recovery designs:
 * 🏛️ **High-Level Design (HLD)**: [`docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_HLD.md`](docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_HLD.md)
-  * Multi-agent subsystem context, audio conditioning gates (FFmpeg 44.1kHz mono noise-gating), local-first zero-cost fallbacks, and NFR matrix.
-* 🔧 **Low-Level Design (LLD)**: [`docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_LLD.md`](docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_LLD.md)
-  * Pydantic schemas (`CustomPersonaRecord`, `ParsedDocumentScene`, `DocumentParseResult`), class method signatures for `VoiceCloner` and `DocumentParser`, REST API specs, and sequence diagrams.
+* 📐 **Low-Level Design (LLD)**: [`docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_LLD.md`](docs/architecture/VOICE_CLONING_AND_DOC_SPEECH_LLD.md)
+* 💼 **No-Code Finance Labs Playbook**: [`docs/NO_CODE_FINANCE_LABS_WORKFLOWS.md`](docs/NO_CODE_FINANCE_LABS_WORKFLOWS.md) (Zero-code n8n/Make.com recipes for all 7 labs + Capstone)
 * 🎬 **Multi-Agent Orchestration Specification**: [`MULTI_AGENT_ORCHESTRATION_SPEC.md`](MULTI_AGENT_ORCHESTRATION_SPEC.md)
 
 ```mermaid
