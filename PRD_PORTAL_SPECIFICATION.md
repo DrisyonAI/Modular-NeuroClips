@@ -545,21 +545,101 @@ Modular-NeuroClips/
 
 ### 7.2 Functional Requirements Document (FRD)
 
-#### 7.2.1 Module 1: User Voice Recording & Library Registration (`VoiceCloner`)
+#### 7.2.1 Workflow Architecture Diagram
+
+```mermaid
+flowchart TD
+    %% Workflow 1: Voice Cloning
+    subgraph WF1["Workflow 1: User Voice Ingestion & Library Registration"]
+        A1[Creator Records Mic or Uploads Audio .wav, .ogg, .mp3] --> A2[Audio Normalization Gate: 44.1kHz Mono WAV]
+        A2 --> A3{Duration & SNR Check: 5s to 600s}
+        A3 -->|Fail| A_Err[Reject with Duration/Noise Error]
+        A3 -->|Pass| A4{Cloud Key Available?}
+        A4 -->|Yes| A5[ElevenLabs Instant Voice Clone API /v1/voices/add]
+        A4 -->|No| A6[Compute Local Reference Embeddings]
+        A5 --> A7[Persist Metadata to custom_personas.json]
+        A6 --> A7
+        A7 --> A8[Inject into PERSONA_CATALOG]
+        A8 --> A9([⭐ Custom Voice Available in All Dropdowns])
+    end
+
+    %% Workflow 2: Document-to-Speech & SCORM
+    subgraph WF2["Workflow 2: Universal Document Ingestion & SCORM Delivery"]
+        B1[Upload Raw Document .txt, .md, .docx, .pdf] --> B2[DocumentParser: Strip Formatting & Metadata]
+        B2 --> B3[Sentence-Boundary Chunking: 40-80 Words/Scene]
+        B3 --> B4[LexiconEngine: FinTech Pronunciation Pass]
+        B4 --> B5[SSML Compiler: Tag Conversion break, prosody, emphasis]
+        B5 --> B6[Select Cloned Voice or Canonical Persona]
+        B6 --> B7[VoiceDirectorAgent Synthesis Loop]
+        B7 --> B8[EBU R128 Loudness Normalization: -14 LUFS]
+        B8 --> B9[Generate Millisecond-Aligned .srt Subtitles]
+        B9 --> B10{Export SCORM 1.2 Enabled?}
+        B10 -->|Yes| B11[SCORMPackager: Build imsmanifest.xml & HTML5 Player]
+        B10 -->|No| B12([🎵 Master MP3 & Subtitles Delivered])
+        B11 --> B13([📦 Interactive SCORM 1.2 ZIP Archive])
+    end
+```
+
+#### 7.2.2 End-to-End Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Creator as 👤 Creator / Trainer
+    participant UI as 🖥️ Voice Director Studio UI
+    participant API as ⚡ FastAPI Control Plane
+    participant Cloner as 🎙️ VoiceCloner Engine
+    participant Parser as 📄 DocumentParser
+    participant Lexicon as 📚 LexiconEngine
+    participant VoiceAgent as 👑 VoiceDirectorAgent
+    participant SCORM as 📦 SCORMPackager
+
+    %% Voice Cloning Cycle
+    Note over Creator,Cloner: Cycle 1: Custom Voice Cloning
+    Creator->>UI: Record 15-30s audio / upload sample
+    UI->>API: POST /api/v1/voice/clone
+    API->>Cloner: normalize_sample_audio()
+    Cloner->>Cloner: FFmpeg highpass filter & 44.1kHz mono conversion
+    Cloner->>Cloner: clone_voice_elevenlabs() / local profile
+    Cloner->>Cloner: register_custom_persona_contract()
+    Cloner-->>API: Return PersonaIdentityContract
+    API-->>UI: Persona registered & selectable in UI
+
+    %% Document Speech Cycle
+    Note over Creator,SCORM: Cycle 2: Universal Document-to-Speech & SCORM
+    Creator->>UI: Drop document (.txt/.md/.docx/.pdf) + select Voice
+    UI->>API: POST /api/v1/voice/synthesize-file (export_scorm=true)
+    API->>Parser: parse_file(temp_doc)
+    Parser->>Parser: extract_text() & slice_into_scenes()
+    Parser-->>API: DocumentParseResult (Scenes 1..N)
+    API->>Lexicon: apply_lexicon(narration)
+    Lexicon-->>API: Phonetically corrected text
+    API->>VoiceAgent: synthesize_voice_contract()
+    VoiceAgent->>VoiceAgent: SSML compilation & TTS synthesis
+    VoiceAgent->>VoiceAgent: EBU R128 -14 LUFS normalization
+    VoiceAgent->>VoiceAgent: generate_srt_subtitles()
+    VoiceAgent-->>API: VoiceContract (Master MP3 + .srt)
+    API->>SCORM: export_zip(manifest, HTML5 player, audio, srt)
+    SCORM-->>API: SCORM_DOC_SPEECH.zip
+    API-->>UI: Stream Master Audio + Download Links (.mp3, .srt, .zip)
+    UI-->>Creator: Audio playback active & SCORM course package ready
+```
+
+#### 7.2.3 Module 1: User Voice Recording & Library Registration (`VoiceCloner`)
 
 - **FRD-VC-01 (Audio Ingestion)**:
   - System shall support in-browser microphone recording (`MediaRecorder` API, 16kHz/44.1kHz WAV/WebM/OGG) and file upload (`.wav`, `.mp3`, `.ogg`, `.m4a`).
-  - System shall validate that audio length is between 10 seconds and 300 seconds and minimum size > 50KB.
+  - System shall validate that audio length is between 5 seconds and 600 seconds and minimum size > 50KB.
 - **FRD-VC-02 (Storage & Normalization)**:
   - System shall save raw sample to `assets_library/voices/<clean_name>_<timestamp>.<ext>`.
-  - System shall use FFmpeg to normalize the sample to 44.1kHz mono WAV with noise gate filtering.
+  - System shall use FFmpeg to normalize the sample to 44.1kHz mono WAV with highpass filtering (`highpass=f=80,lowpass=f=12000`).
 - **FRD-VC-03 (Provider Binding)**:
   - **Cloud Path (ElevenLabs)**: System shall call `POST https://api.elevenlabs.io/v1/voices/add` passing `name`, `description`, and `files=[sample_path]`. Stores returned `voice_id`.
-  - **Local Path (Kokoro / Reference Embeddings)**: System shall compute voice speaker latents and store them in `assets_library/voices/<name>_embedding.pt`.
+  - **Local Path (Reference Speaker Profiles)**: System shall compute voice speaker conditioning profile and save it in `assets_library/voices/`.
 - **FRD-VC-04 (Dynamic Persona Catalog Registry)**:
   - System shall persist the new voice into `src/contracts/custom_personas.json` and dynamically inject it into `PERSONA_CATALOG` (`PersonaIdentityContract`), making it instantly selectable across all Studio and SCORM tabs.
 
-#### 7.2.2 Module 2: Universal File-to-Speech Ingestion (`DocumentVoiceEngine`)
+#### 7.2.4 Module 2: Universal File-to-Speech Ingestion (`DocumentVoiceEngine`)
 
 - **FRD-DFS-01 (Multi-Format Document Parsing)**:
   - System shall accept `.txt`, `.md`, `.docx`, and `.pdf` files up to 25MB via `POST /api/v1/voice/synthesize-file`.
