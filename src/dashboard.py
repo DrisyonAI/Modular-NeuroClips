@@ -3298,13 +3298,13 @@ async def serve_dashboard():
     <!-- Scripts -->
     <script>
         const MILESTONE_DEFS = [
-            { id: 'init', name: '1. Init', icon: '⚙️' },
-            { id: 'scripting', name: '2. Script', icon: '📝' },
-            { id: 'keyframes', name: '3. Keyframes', icon: '🖼️' },
-            { id: 'animation', name: '4. Motion', icon: '🎥' },
-            { id: 'voiceover', name: '5. Voiceover', icon: '🎙️' },
-            { id: 'compilation', name: '6. Stitch', icon: '🎞️' },
-            { id: 'complete', name: '7. Ready', icon: '✨' }
+            { id: 'init',        name: 'Init',      icon: '⚙️' },
+            { id: 'scripting',   name: 'Script',    icon: '📝' },
+            { id: 'keyframes',   name: 'Keyframes', icon: '🖼️' },
+            { id: 'animation',   name: 'Motion',    icon: '🎥' },
+            { id: 'voiceover',   name: 'Voiceover', icon: '🎙️' },
+            { id: 'compilation', name: 'Stitch',    icon: '🎞️' },
+            { id: 'complete',    name: 'Ready',     icon: '✨' }
         ];
 
         let currentSessionOnly = true;
