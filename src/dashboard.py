@@ -1268,6 +1268,110 @@ async def list_scorm_packages():
             })
     packages.sort(key=lambda x: x["created_at"], reverse=True)
     return {"packages": packages}
+class BatchSlideAudioRequest(BaseModel):
+    deck_path: Optional[str] = None
+    excel_path: Optional[str] = None
+    module_num: Optional[int] = 1
+    persona_id: Optional[str] = "maya_fintech"
+    speech_rate: Optional[float] = 1.0
+    slide_numbering: Optional[str] = "lesson_relative"
+    skip_existing: Optional[bool] = True
+
+
+@app.post("/api/v1/voice/batch-slides")
+async def batch_slides_api(req: BatchSlideAudioRequest):
+    """
+    Generates batch audio files adhering strictly to M{m}_T{t}_L{l}_Slide{s}.mp3
+    from a presentation deck (.pptx) or an Excel course map (.xlsx).
+    """
+    try:
+        from src.agents.slide_batch_processor import SlideBatchProcessor
+        out_sub = f"M{req.module_num:02d}" if req.module_num else "batch_output"
+        processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides" / out_sub)
+
+        if req.deck_path:
+            p_deck = Path(req.deck_path)
+            if not p_deck.exists():
+                raise HTTPException(status_code=404, detail=f"Deck file not found: {req.deck_path}")
+            items = processor.parse_pptx_deck(p_deck, module_num=req.module_num, slide_numbering=req.slide_numbering)
+        elif req.excel_path:
+            p_excel = Path(req.excel_path)
+            if not p_excel.exists():
+                raise HTTPException(status_code=404, detail=f"Excel file not found: {req.excel_path}")
+            items = processor.parse_excel_course_map(p_excel)
+        else:
+            raise HTTPException(status_code=400, detail="Either deck_path or excel_path must be provided.")
+
+        result = processor.process_batch(
+            items,
+            persona_id=req.persona_id or "maya_fintech",
+            speech_rate=req.speech_rate or 1.0,
+            skip_existing=req.skip_existing
+        )
+        return {
+            "status": "ok",
+            "total_slides": result.total_slides,
+            "successful_slides": result.successful_slides,
+            "failed_slides": result.failed_slides,
+            "manifest_file": result.manifest_file,
+            "files": result.generated_files
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/voice/batch-slides-upload")
+async def batch_slides_upload_api(
+    file: UploadFile = File(...),
+    module_num: int = Form(1),
+    persona_id: str = Form("maya_fintech"),
+    speech_rate: float = Form(1.0),
+    slide_numbering: str = Form("lesson_relative"),
+    skip_existing: bool = Form(True)
+):
+    """
+    Accepts uploaded .pptx or .xlsx file and generates M{m}_T{t}_L{l}_Slide{s}.mp3 files in batch.
+    """
+    try:
+        from src.agents.slide_batch_processor import SlideBatchProcessor
+        filename = file.filename
+        ext = Path(filename).suffix.lower()
+        if ext not in [".pptx", ".xlsx"]:
+            raise HTTPException(status_code=400, detail="Only .pptx and .xlsx files are supported.")
+
+        temp_dir = OUTPUT_DIR / "temp_uploads"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        saved_file = temp_dir / filename
+        with open(saved_file, "wb") as f:
+            f.write(await file.read())
+
+        out_sub = f"M{module_num:02d}"
+        processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides" / out_sub)
+
+        if ext == ".pptx":
+            items = processor.parse_pptx_deck(saved_file, module_num=module_num, slide_numbering=slide_numbering)
+        else:
+            items = processor.parse_excel_course_map(saved_file)
+
+        result = processor.process_batch(
+            items,
+            persona_id=persona_id,
+            speech_rate=speech_rate,
+            skip_existing=skip_existing
+        )
+
+        return {
+            "status": "ok",
+            "filename": filename,
+            "total_slides": result.total_slides,
+            "successful_slides": result.successful_slides,
+            "failed_slides": result.failed_slides,
+            "manifest_file": result.manifest_file,
+            "files": result.generated_files
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 class IdentitySaveRequest(BaseModel):
     name: str
@@ -2275,14 +2379,78 @@ async def serve_dashboard():
                                 <input type="checkbox" id="doc-export-scorm-chk" class="rounded accent-emerald-500 cursor-pointer">
                                 <label for="doc-export-scorm-chk" class="text-xs text-slate-300 cursor-pointer">Auto-package as SCORM 1.2 Zip</label>
                             </div>
-                            <button onclick="submitDocumentSpeech()" id="btn-synth-doc" class="px-5 py-2.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5">
-                                <span>⚡</span> <span>Synthesize Document Audio</span>
-                            </button>
-                        </div>
                     </div>
                 </div>
 
-            </div>
+                <!-- MODULE C: BATCH PRESENTATION & DECK AUDIO STUDIO (M{m}_T{t}_L{l}_Slide{s}.mp3) -->
+                <div class="glass-panel p-5 rounded-xl border border-teal-500/30 space-y-4 pt-4 mt-4">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <div>
+                            <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                <span>📊</span> <span>Batch Presentation & Deck Audio Studio</span>
+                            </h4>
+                            <p class="text-[11px] text-slate-400">Upload PowerPoint deck (.pptx) or Excel course map (.xlsx) to synthesize slide audio matching <code class="text-teal-400">M{m}_T{t}_L{l}_Slide{s}.mp3</code>.</p>
+                        </div>
+                        <span class="text-[10px] px-2.5 py-1 rounded-full bg-teal-500/20 text-teal-300 font-mono border border-teal-500/30">
+                            Courseware Automation
+                        </span>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Select Presentation or Excel File</label>
+                            <label for="batch-slide-file-input" class="w-full py-2 px-3 rounded-lg bg-teal-600/20 border border-teal-500/40 text-teal-300 text-xs font-bold text-center cursor-pointer hover:bg-teal-600/30 transition-all flex items-center justify-center gap-1.5">
+                                <span>📁</span> <span id="batch-slide-file-label">Upload .pptx / .xlsx</span>
+                            </label>
+                            <input type="file" id="batch-slide-file-input" class="hidden" accept=".pptx,.xlsx" onchange="handleBatchSlideFileSelected(this)">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Module Number</label>
+                            <input type="number" id="batch-slide-module-num" value="1" min="1" max="50" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Voice Persona</label>
+                            <select id="batch-slide-persona" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="maya_fintech" selected>Maya (FinTech Senior Lead)</option>
+                                <option value="alex_ai">Alex (Enterprise AI Architect)</option>
+                                <option value="elena_compliance">Elena (Risk & Governance Director)</option>
+                                <option value="david_trainer">David (Global LMS Instructor)</option>
+                                <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Slide Numbering</label>
+                            <select id="batch-slide-numbering" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="lesson_relative" selected>Lesson-Relative (Slide 1, 2 of Lesson)</option>
+                                <option value="deck_absolute">Deck-Absolute (Slide 1–29 of Deck)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between gap-3 pt-2">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" id="batch-slide-skip-cache" class="rounded accent-teal-500 cursor-pointer" checked>
+                            <label for="batch-slide-skip-cache" class="text-xs text-slate-300 cursor-pointer select-none">
+                                Skip Already Generated Files <span class="text-[11px] text-slate-500">(Fast Resume)</span>
+                            </label>
+                        </div>
+                        <button onclick="submitBatchSlideGeneration()" id="btn-batch-slide-run" class="px-6 py-2.5 rounded-lg bg-gradient-to-r from-teal-600 to-emerald-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-teal-500/20 transition-all flex items-center gap-2">
+                            <span>⚡</span> <span>Generate Slide Audio Batch</span>
+                        </button>
+                    </div>
+
+                    <!-- Progress and Results Box -->
+                    <div id="batch-slide-status-box" class="hidden p-3 rounded-xl bg-slate-950/80 border border-teal-500/30 space-y-2">
+                        <div class="flex items-center justify-between text-xs">
+                            <span id="batch-slide-status-text" class="text-teal-300 font-mono">Synthesizing batch audio...</span>
+                            <span id="batch-slide-counts" class="font-bold text-white font-mono">0 / 0</span>
+                        </div>
+                        <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                            <div id="batch-slide-progress-bar" class="bg-teal-400 h-full w-0 transition-all duration-300"></div>
+                        </div>
+                        <div id="batch-slide-results-list" class="max-h-48 overflow-y-auto font-mono text-xs space-y-1 text-slate-300 pt-1"></div>
+                    </div>
+                </div>
         </div><!-- END OF MODE 2: VOICE DIRECTOR -->
 
         <!-- MODE 3: IMAGE DIRECTOR STUDIO (KEYFRAMES & PERSONAS) -->
@@ -4538,6 +4706,79 @@ async def serve_dashboard():
         }
         if (savedElevenVoice && document.getElementById('elevenlabs-voice-id')) {
             document.getElementById('elevenlabs-voice-id').value = savedElevenVoice;
+        }
+
+        let selectedBatchSlideFile = null;
+        function handleBatchSlideFileSelected(input) {
+            if (input.files && input.files[0]) {
+                selectedBatchSlideFile = input.files[0];
+                document.getElementById('batch-slide-file-label').innerText = selectedBatchSlideFile.name;
+            }
+        }
+
+        async function submitBatchSlideGeneration() {
+            if (!selectedBatchSlideFile) {
+                alert("Please select a PowerPoint (.pptx) or Excel (.xlsx) file first.");
+                return;
+            }
+
+            const btn = document.getElementById('btn-batch-slide-run');
+            const statusBox = document.getElementById('batch-slide-status-box');
+            const statusText = document.getElementById('batch-slide-status-text');
+            const countsText = document.getElementById('batch-slide-counts');
+            const progressBar = document.getElementById('batch-slide-progress-bar');
+            const resultsList = document.getElementById('batch-slide-results-list');
+
+            const moduleNum = parseInt(document.getElementById('batch-slide-module-num').value) || 1;
+            const personaId = document.getElementById('batch-slide-persona').value;
+            const numbering = document.getElementById('batch-slide-numbering').value;
+            const skipCache = document.getElementById('batch-slide-skip-cache').checked;
+
+            statusBox.classList.remove('hidden');
+            statusText.innerText = `Ingesting ${selectedBatchSlideFile.name}...`;
+            progressBar.style.width = '30%';
+            resultsList.innerHTML = `<div class="text-slate-500 italic">Parsing slides, speaker notes, and curriculum hierarchy...</div>`;
+            btn.disabled = true;
+            btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+            const formData = new FormData();
+            formData.append('file', selectedBatchSlideFile);
+            formData.append('module_num', moduleNum);
+            formData.append('persona_id', personaId);
+            formData.append('slide_numbering', numbering);
+            formData.append('skip_existing', skipCache);
+
+            try {
+                const res = await fetch('/api/v1/voice/batch-slides-upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    progressBar.style.width = '100%';
+                    statusText.innerText = `Batch Complete: ${data.successful_slides} of ${data.total_slides} audio files generated.`;
+                    countsText.innerText = `${data.successful_slides} / ${data.total_slides} Succeeded`;
+
+                    resultsList.innerHTML = (data.files || []).map(f => {
+                        const isSuccess = f.status === 'success' || f.status === 'cached';
+                        const badgeColor = isSuccess ? 'text-teal-400' : 'text-red-400';
+                        const tag = f.status === 'cached' ? '[CACHED]' : (isSuccess ? '[OK]' : '[ERR]');
+                        return `<div class="flex items-center justify-between py-1 border-b border-slate-900">
+                            <span class="${badgeColor} font-bold">${tag} ${f.filename}</span>
+                            <span class="text-slate-400">${f.duration_sec ? f.duration_sec.toFixed(1) + 's (' + f.duration_frames + ' frames)' : (f.error || 'error')}</span>
+                        </div>`;
+                    }).join('');
+                } else {
+                    statusText.innerText = 'Batch processing failed: ' + (data.detail || data.message || 'Unknown error');
+                    progressBar.style.width = '0%';
+                }
+            } catch(e) {
+                statusText.innerText = 'Network/API error: ' + e;
+                progressBar.style.width = '0%';
+            } finally {
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
         }
 
         fetchGallery();

@@ -360,25 +360,26 @@ class SlideBatchProcessor:
                 continue
 
             # Construct single-scene script contract
+            estimated_sec = round(len(item.narration_text.split()) / 2.5, 2)
             scene = ScriptScene(
                 scene_id=item.slide_num,
                 title=item.title,
                 visual_description=f"Slide visual for {item.title}",
                 narration=item.narration_text,
-                pedagogical_purpose="Slide Lecture Audio",
-                estimated_duration_sec=round(len(item.narration_text.split()) / 2.5, 2)
+                estimated_duration_sec=estimated_sec
             )
             script_contract = ScriptContract(
-                topic=item.title,
+                course_title=item.title,
                 persona_id=persona.persona_id,
-                scenes=[scene],
-                total_duration_sec=scene.estimated_duration_sec,
-                word_count=len(item.narration_text.split())
+                art_style_preset="corporate_fintech",
+                total_word_count=len(item.narration_text.split()),
+                estimated_total_runtime_sec=estimated_sec,
+                scenes=[scene]
             )
 
             try:
                 # Synthesize via VoiceDirectorAgent
-                voice_contract = self.voice_director.synthesize_speech(
+                voice_contract = self.voice_director.synthesize_voice_contract(
                     script=script_contract,
                     persona=persona,
                     speech_rate=speech_rate,

@@ -124,6 +124,34 @@ class VoiceDirectorAgent:
             print(f"[Audio Normalize Warning] {e}")
             return False
 
+    def add_silence_padding(
+        self,
+        input_audio_path: Path,
+        output_audio_path: Path,
+        lead_in_ms: int = 150,
+        tail_ms: int = 350
+    ) -> bool:
+        """
+        Pads audio with lead-in silence (to prevent clipped plosives)
+        and tail silence (to prevent abrupt timeline cuts during video slide transitions).
+        """
+        try:
+            # adelay adds silence at the start (in ms)
+            # apad adds silence at the end; pad_dur is in seconds
+            tail_sec = round(tail_ms / 1000.0, 3)
+            filter_str = f"adelay={lead_in_ms}|{lead_in_ms},apad=pad_dur={tail_sec}"
+            cmd = [
+                "ffmpeg", "-y", "-i", str(input_audio_path),
+                "-af", filter_str,
+                "-ar", "44100",
+                str(output_audio_path)
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return res.returncode == 0 and output_audio_path.exists() and output_audio_path.stat().st_size > 500
+        except Exception as e:
+            print(f"[Audio Padding Warning] {e}")
+            return False
+
     def apply_audio_ducking(self, speech_path: Path, bg_music_path: Path, output_path: Path) -> bool:
         """
         Mixes speech over background music, dynamically ducking the music volume when speech is active.
@@ -361,14 +389,17 @@ class VoiceDirectorAgent:
 
         cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list_file), "-c", "copy", str(raw_master_audio_path)]
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if not raw_master_audio_path.exists() and scene_audio_paths:
-            raw_master_audio_path = scene_audio_paths[0]
+        # Apply Silence Padding (150ms pre-roll, 350ms post-roll)
+        padded_path = self.output_dir / f"master_padded_{session_id}.mp3"
+        if self.add_silence_padding(raw_master_audio_path, padded_path, lead_in_ms=150, tail_ms=350):
+            master_to_use = padded_path
+        else:
+            master_to_use = raw_master_audio_path
 
         # Apply LUFS Normalization
-        master_to_use = raw_master_audio_path
         if target_lufs is not None:
             norm_path = self.output_dir / f"master_norm_{session_id}.mp3"
-            if self.normalize_lufs(raw_master_audio_path, norm_path, target_lufs):
+            if self.normalize_lufs(master_to_use, norm_path, target_lufs):
                 master_to_use = norm_path
 
         # Apply Audio Ducking if background music is supplied
