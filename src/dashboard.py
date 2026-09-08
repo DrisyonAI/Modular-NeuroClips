@@ -1606,15 +1606,7 @@ async def serve_dashboard():
                             <p class="text-[11px] text-slate-400 mt-0.5">Central learning content production & configuration workspace</p>
                         </div>
                         <div class="flex items-center gap-2">
-                            <!-- Wireframe Callout: Note Director Let It Be -->
-                            <div class="flex items-center gap-2 px-3 py-1 rounded-xl bg-indigo-950/70 border border-indigo-500/30 text-xs" title="Autonomous Director Orchestration enabled">
-                                <span class="text-xs">🎬</span>
-                                <div class="text-[11px]">
-                                    <span class="text-slate-400">Directorial Rule:</span>
-                                    <span class="font-bold text-indigo-300 font-mono">"Note: Director Let It Be"</span>
-                                </div>
-                                <span class="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[9px] font-bold font-mono">AUTONOMOUS</span>
-                            </div>
+                            <!-- Note: Director Let It Be AUTONOMOUS (Wireframe annotation removed) -->
                             <span class="text-xs text-brand-glow bg-brand-500/10 px-2.5 py-1 rounded-lg border border-brand-500/20 font-mono">
                                 AI Production Engine
                             </span>
@@ -2153,14 +2145,14 @@ async def serve_dashboard():
             <div class="lg:col-span-5 space-y-6">
                 <div class="grid grid-cols-2 gap-3">
                     <div class="glass-panel p-3.5 rounded-xl">
-                        <span class="text-xs text-slate-400">GPU VRAM</span>
-                        <div id="vram-stat" class="text-base font-bold text-brand-glow font-mono mt-0.5">0 / 0 MB</div>
-                        <div class="w-full bg-slate-800 h-1 rounded-full mt-1.5 overflow-hidden"><div id="vram-bar" class="bg-brand-500 h-full w-0"></div></div>
+                        <span class="text-xs text-slate-400">Current Stage</span>
+                        <div id="current-stage-stat" class="text-base font-bold text-brand-glow font-mono mt-0.5 truncate" title="Idle">Idle</div>
+                        <span class="text-[10px] text-slate-500">Active Milestone</span>
                     </div>
                     <div class="glass-panel p-3.5 rounded-xl">
-                        <span class="text-xs text-slate-400">GPU Utilization</span>
-                        <div id="gpu-util-stat" class="text-base font-bold text-white font-mono mt-0.5">0%</div>
-                        <div class="w-full bg-slate-800 h-1 rounded-full mt-1.5 overflow-hidden"><div id="gpu-bar" class="bg-emerald-400 h-full w-0"></div></div>
+                        <span class="text-xs text-slate-400">Elapsed</span>
+                        <div id="elapsed-stat" class="text-base font-bold text-white font-mono mt-0.5">00:00</div>
+                        <span class="text-[10px] text-slate-500">Render Time (mm:ss)</span>
                     </div>
                     <div class="glass-panel p-3.5 rounded-xl">
                         <span class="text-xs text-slate-400">System CPU</span>
@@ -2170,7 +2162,7 @@ async def serve_dashboard():
                     <div class="glass-panel p-3.5 rounded-xl">
                         <span class="text-xs text-slate-400">Script Latency</span>
                         <div id="latency-stat" class="text-base font-bold text-brand-glow font-mono mt-0.5">0.00s</div>
-                        <span class="text-[10px] text-slate-500">Llama 3 Director</span>
+                        <span class="text-[10px] text-slate-500">Rule-Based Director (Fallback)</span>
                     </div>
                 </div>
 
@@ -5543,18 +5535,41 @@ async def serve_dashboard():
         evtSource.onmessage = function(e) {
             const data = JSON.parse(e.data);
             const gpu = data.telemetry.gpu;
-            document.getElementById('header-vram').innerText = `${gpu.used_mb} / ${gpu.total_mb} MB`;
-            document.getElementById('vram-stat').innerText = `${gpu.used_mb} / ${gpu.total_mb} MB`;
-            const vramPct = (gpu.used_mb / gpu.total_mb * 100) || 0;
-            document.getElementById('vram-bar').style.width = `${vramPct}%`;
+            const headerVram = document.getElementById('header-vram');
+            if (headerVram && gpu) headerVram.innerText = `${gpu.used_mb} / ${gpu.total_mb} MB`;
 
-            document.getElementById('gpu-util-stat').innerText = `${gpu.utilization}%`;
-            document.getElementById('gpu-bar').style.width = `${gpu.utilization}%`;
-            document.getElementById('cpu-stat').innerText = `${data.telemetry.system.cpu_percent}%`;
-            document.getElementById('cpu-bar').style.width = `${data.telemetry.system.cpu_percent}%`;
+            const cpuStat = document.getElementById('cpu-stat');
+            if (cpuStat && data.telemetry.system) cpuStat.innerText = `${data.telemetry.system.cpu_percent}%`;
+            const cpuBar = document.getElementById('cpu-bar');
+            if (cpuBar && data.telemetry.system) cpuBar.style.width = `${data.telemetry.system.cpu_percent}%`;
 
-            document.getElementById('header-status').innerText = data.state.status;
-            document.getElementById('latency-stat').innerText = `${data.state.model_load_latency.toFixed(2)}s`;
+            const headerStatus = document.getElementById('header-status');
+            if (headerStatus && data.state) headerStatus.innerText = data.state.status || 'Idle';
+
+            const latencyStat = document.getElementById('latency-stat');
+            if (latencyStat && data.state && data.state.model_load_latency !== undefined) {
+                latencyStat.innerText = `${data.state.model_load_latency.toFixed(2)}s`;
+            }
+
+            const currentStageStat = document.getElementById('current-stage-stat');
+            if (currentStageStat && data.state) {
+                currentStageStat.innerText = data.state.current_step || 'Idle';
+                currentStageStat.title = data.state.current_step || 'Idle';
+            }
+
+            const elapsedStat = document.getElementById('elapsed-stat');
+            if (elapsedStat) {
+                const job = data.active_job;
+                if (job && job.created_at && job.status !== 'complete' && job.status !== 'failed') {
+                    const nowSec = data.timestamp || (Date.now() / 1000);
+                    const elapsedSec = Math.max(0, Math.floor(nowSec - job.created_at));
+                    const m = Math.floor(elapsedSec / 60).toString().padStart(2, '0');
+                    const s = (elapsedSec % 60).toString().padStart(2, '0');
+                    elapsedStat.innerText = `${m}:${s}`;
+                } else {
+                    elapsedStat.innerText = "00:00";
+                }
+            }
 
             const progress = data.state.progress_percent || 0;
             document.getElementById('master-progress-fill').style.width = `${progress}%`;
