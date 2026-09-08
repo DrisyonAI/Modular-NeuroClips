@@ -1571,20 +1571,21 @@ async def serve_dashboard():
 
         <!-- 🎛️ STUDIO MODE SELECTOR BAR (GOOGLE STITCH WIREFRAME SUITE) -->
         <div class="flex items-center space-x-2 border-b border-slate-800 pb-3 overflow-x-auto">
-            <button onclick="switchStudioMode('video')" id="mode-btn-video" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all whitespace-nowrap">
-                <span>👑</span> <span>Director Studio (Master Orchestrator)</span>
+            <button onclick="switchStudioMode('video')" id="mode-btn-video" title="Director Studio (Master Orchestrator)" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all whitespace-nowrap">
+                <span>👑</span> <span>Director</span>
             </button>
-            <button onclick="switchStudioMode('avatar')" id="mode-btn-avatar" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
-                <span>👤</span> <span>Avatar Studio (Presenter Lab)</span>
+            <button onclick="switchStudioMode('voice')" id="mode-btn-voice" title="Voice Director Studio" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>🎙️</span> <span>Voice</span>
             </button>
-            <button onclick="switchStudioMode('scorm')" id="mode-btn-scorm" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
-                <span>📦</span> <span>SCORM Framework & LMS</span>
+            <button onclick="switchStudioMode('image')" id="mode-btn-image" title="Image Director Studio" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>🎨</span> <span>Image</span>
             </button>
-            <button onclick="switchStudioMode('voice')" id="mode-btn-voice" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
-                <span>🎙️</span> <span>Voice Director Studio</span>
+            <button onclick="switchStudioMode('avatar')" id="mode-btn-avatar" title="Avatar Studio (Presenter Lab)" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>👤</span> <span>Avatar</span>
             </button>
-            <button onclick="switchStudioMode('image')" id="mode-btn-image" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
-                <span>🎨</span> <span>Image Director Studio</span>
+            <div class="h-6 w-px bg-slate-800 mx-1.5 self-center flex-shrink-0" aria-hidden="true"></div>
+            <button onclick="switchStudioMode('scorm')" id="mode-btn-scorm" title="SCORM Framework & LMS" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>📦</span> <span>SCORM Export</span>
             </button>
         </div>
 
