@@ -6,6 +6,7 @@
     "title": "AI-Powered HR",
     "description": "A practical, interactive introduction to AI-assisted recruitment, talent intelligence, and automated onboarding workflows.",
     "thumbnail": "assets/images/course.jpg",
+    "introBackgroundVideo": "assets/videos/AI-FinTech-v0.mp4",
     "durationMinutes": 150,
     "audience": "HR professionals, recruiters, talent acquisition specialists, and people managers",
     "learningObjectives": [
@@ -78,6 +79,20 @@
                   "answer": "B",
                   "feedback": "AI should support speed and scale while human recruiters remain responsible for judgment, context, and decisions.",
                   "source_topic": "Foundations"
+                },
+                {
+                  "id": "q1-2",
+                  "type": "single",
+                  "text": "Which principle is essential when integrating AI into people operations?",
+                  "options": [
+                    "Complete removal of human oversight",
+                    "Maintaining human judgment, transparency, and accountability",
+                    "Automating all termination decisions",
+                    "Disabling candidate feedback loops"
+                  ],
+                  "answer": "B",
+                  "feedback": "Human judgment, transparency, and accountability must always be preserved.",
+                  "source_topic": "Governance"
                 }
               ]
             },

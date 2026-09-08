@@ -81,8 +81,9 @@ class CompletionRule(BaseModel):
 
 class Lesson(BaseModel):
     id: str
-    number: Optional[str] = "1.1"
+    number: Optional[str] = None
     title: str
+    name: Optional[str] = None
     description: Optional[str] = ""
     durationMinutes: Optional[Union[int, float, str]] = 15
     learningMode: Optional[str] = "Concept + reading"
@@ -92,6 +93,7 @@ class Lesson(BaseModel):
     content: List[Union[ContentBlock, Dict[str, Any]]] = Field(default_factory=list)
     interactions: List[Union[Interaction, Dict[str, Any]]] = Field(default_factory=list)
     quiz: Optional[Quiz] = None
+    understanding_check: Optional[Quiz] = None
     completion: Optional[CompletionRule] = None
 
 
@@ -99,6 +101,7 @@ class Module(BaseModel):
     id: str
     number: Union[int, str] = 1
     title: str
+    name: Optional[str] = None
     description: Optional[str] = ""
     durationMinutes: Optional[Union[int, float]] = 45
     lessons: List[Lesson] = Field(default_factory=list)
@@ -123,6 +126,8 @@ class Course(BaseModel):
     learningObjectives: List[str] = Field(default_factory=list)
     settings: CourseSettings = Field(default_factory=CourseSettings)
     modules: List[Module] = Field(default_factory=list)
+    introBackgroundVideo: Optional[str] = None
+    intro: Optional[Dict[str, Any]] = None
 
 
 class CourseDocument(BaseModel):

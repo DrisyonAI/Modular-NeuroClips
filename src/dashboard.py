@@ -10,7 +10,7 @@ import zipfile
 import asyncio
 import threading
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -853,28 +853,49 @@ async def export_scorm_package(
 class CustomSCORMBuildRequest(BaseModel):
     course_title: str
     course_id: Optional[str] = "FINTECH_AGENTS_M1"
-    module_title: Optional[str] = "Module 1: Traditional AI vs GenAI vs Agents"
+    module_title: Optional[str] = None
     module_id: Optional[int] = 1
+    module_number: Optional[Union[int, str]] = None
+    module_name: Optional[str] = None
     module_description: Optional[str] = "Core concepts of autonomous AI agents and foundational architecture"
-    lesson_title: Optional[str] = "Lesson 1: Foundations & Agentic Workflows"
+    lesson_title: Optional[str] = None
+    lesson_number: Optional[str] = None
+    lesson_name: Optional[str] = None
     lesson_id: Optional[str] = "L101"
-    topic: Optional[str] = "1.1 Traditional AI vs GenAI vs Agents"
+    topic: Optional[str] = None
     pass_percentage: Optional[int] = 70
     scorm_version: Optional[str] = "1.2"
     video_filename: Optional[str] = None
+    intro_video_filename: Optional[str] = None
 
 @app.post("/api/v1/scorm/custom-build")
 async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
     """
-    Builds a custom SCORM 1.2 / 2004 e-learning package with custom metadata (course, module, lesson, topic),
-    media attachment (rendered or externally uploaded video), and module quiz.
+    Builds a custom SCORM 1.2 / 2004 e-learning package with dynamic metadata (module number, module name,
+    lesson number, lesson name), intro background video, media attachment, and 2-3 question understanding check.
     """
     safe_course_id = "".join(c for c in (req.course_id or "COURSE") if c.isalnum() or c in ('_', '-')).strip() or "COURSE"
     safe_lesson_id = "".join(c for c in (req.lesson_id or "L1") if c.isalnum() or c in ('_', '-')).strip() or "L1"
     package_name = f"SCORM_{safe_course_id}_{safe_lesson_id}_{int(time.time())}.zip"
     zip_path = EXPORTS_DIR / package_name
     
-    questions = quiz_engine.get_module_questions(req.module_id or 1)
+    m_num = str(req.module_number).strip() if req.module_number is not None and str(req.module_number).strip() else (str(req.module_id) if req.module_id else "1")
+    m_name = (req.module_name or "").strip()
+    if not m_name:
+        if req.module_title:
+            m_name = re.sub(r"^Module\s*\d+\s*:\s*", "", req.module_title).strip() or req.module_title
+        else:
+            m_name = f"Module {m_num}"
+
+    final_module_title = f"Module {m_num}: {m_name}" if (m_num and not m_name.startswith(f"Module {m_num}")) else m_name
+    
+    l_num = str(req.lesson_number).strip() if req.lesson_number is not None and str(req.lesson_number).strip() else f"{m_num}.1"
+    raw_lesson_name = (req.lesson_name or req.lesson_title or req.topic or f"Lesson {l_num}").strip()
+    clean_l_name = re.sub(r"^(Lesson\s*)?\d+(\.\d+)?\s*[:\-]?\s*", "", raw_lesson_name).strip() or raw_lesson_name
+    final_lesson_title = f"{l_num} {clean_l_name}"
+
+    q_mod_id = int(m_num) if str(m_num).isdigit() else (req.module_id or 1)
+    questions = quiz_engine.get_module_questions(q_mod_id)
     
     video_file = None
     if req.video_filename:
@@ -888,20 +909,25 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
     packager = SCORMPackager(
         course_id=safe_course_id,
         course_title=req.course_title,
-        course_description=req.module_description or "",
-        version=req.scorm_version or "1.2"
+        course_description=req.module_description or f"Curriculum module: {final_module_title}",
+        version=req.scorm_version or "1.2",
+        intro_video_path=req.intro_video_filename
     )
     packager.add_module(
-        module_id=f"module_{req.module_id or 1}",
-        module_title=req.module_title or f"Module {req.module_id or 1}",
-        description=req.module_description or ""
+        module_id=f"module_{m_num}",
+        module_title=final_module_title,
+        description=req.module_description or "",
+        module_number=m_num,
+        module_name=m_name
     )
     packager.add_lesson(
-        module_id=f"module_{req.module_id or 1}",
+        module_id=f"module_{m_num}",
         lesson_id=safe_lesson_id,
-        lesson_title=req.lesson_title or "Lesson 1",
-        topic=req.topic or "",
-        video_path=str(video_file) if video_file else None
+        lesson_title=final_lesson_title,
+        topic=req.topic or clean_l_name,
+        video_path=str(video_file) if video_file else None,
+        lesson_number=l_num,
+        lesson_name=clean_l_name
     )
     packager.export_zip(zip_path)
 
@@ -911,12 +937,16 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
         "download_url": f"/static_exports/{package_name}",
         "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
         "course_title": req.course_title,
-        "module_id": req.module_id,
-        "module_title": req.module_title,
-        "lesson_title": req.lesson_title,
+        "module_id": q_mod_id,
+        "module_number": m_num,
+        "module_name": m_name,
+        "module_title": final_module_title,
+        "lesson_number": l_num,
+        "lesson_name": clean_l_name,
+        "lesson_title": final_lesson_title,
         "lesson_id": req.lesson_id,
-        "topic": req.topic,
-        "questions_count": len(questions),
+        "topic": req.topic or clean_l_name,
+        "questions_count": min(len(questions), 3),
         "scorm_version": req.scorm_version
     }
 
@@ -2973,8 +3003,8 @@ async def serve_dashboard():
                         </div>
 
                         <!-- Course Title & Course Code -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div class="md:col-span-2">
                                 <label class="block text-xs font-semibold text-slate-300 mb-1">Course Title</label>
                                 <input type="text" id="scorm-gen-course-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="AI Agents in FinTech: Autonomous Execution">
                             </div>
@@ -2984,32 +3014,67 @@ async def serve_dashboard():
                             </div>
                         </div>
 
-                        <!-- Module Title & Module ID -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Module Title</label>
-                                <input type="text" id="scorm-gen-module-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="Module 1: Traditional AI vs GenAI vs Agents">
+                        <!-- Dynamic Module Configuration (User Request #1) -->
+                        <div class="p-3.5 rounded-xl bg-slate-900/80 border border-indigo-500/30 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                                    <span>🧩</span> <span>Dynamic Module Configuration</span>
+                                </span>
+                                <span id="scorm-live-mod-preview" class="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-950 border border-indigo-500/40 text-indigo-300">Module 1 Preview</span>
                             </div>
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Module Description / Overview</label>
-                                <input type="text" id="scorm-gen-module-desc" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500" value="Core concepts of autonomous AI agents and foundational architecture">
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                <div>
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Module Number <span class="text-rose-400">*</span></label>
+                                    <input type="number" id="scorm-gen-module-number" min="1" max="99" class="w-full rounded-xl bg-slate-950 border border-indigo-500/50 p-2.5 text-xs text-brand-glow font-mono font-bold focus:outline-none focus:border-brand-500" value="1" placeholder="e.g. 2" oninput="syncScormDynamicFields()">
+                                </div>
+                                <div class="md:col-span-3">
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Module Name <span class="text-rose-400">*</span></label>
+                                    <input type="text" id="scorm-gen-module-name" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2.5 text-xs text-white font-semibold focus:outline-none focus:border-indigo-500" value="Traditional AI vs GenAI vs Agents" placeholder="e.g. Intelligent & Autonomous Transactions" oninput="syncScormDynamicFields()">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-400 mb-1">Module Full Title (Auto-Composed)</label>
+                                    <input type="text" id="scorm-gen-module-title" class="w-full rounded-xl bg-slate-900/60 border border-slate-800 p-2 text-xs text-slate-300 focus:outline-none" value="Module 1: Traditional AI vs GenAI vs Agents" readonly>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-400 mb-1">Module Overview / Description</label>
+                                    <input type="text" id="scorm-gen-module-desc" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2 text-xs text-slate-300 focus:outline-none focus:border-indigo-500" value="Core concepts of autonomous AI agents and foundational architecture">
+                                </div>
                             </div>
                         </div>
 
-                        <!-- Lesson Title, Lesson ID & Topic Unit -->
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson Title</label>
-                                <input type="text" id="scorm-gen-lesson-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="Lesson 1: Foundations & Agentic Workflows">
+                        <!-- Dynamic Lesson Configuration (User Request #2 & #4) -->
+                        <div class="p-3.5 rounded-xl bg-slate-900/80 border border-emerald-500/30 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                                    <span>📖</span> <span>Dynamic Lesson Configuration & Intro Hero</span>
+                                </span>
+                                <span id="scorm-live-les-preview" class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-950 border border-emerald-500/40 text-emerald-300">Start Lesson 1.1</span>
                             </div>
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson ID / Unit Code</label>
-                                <input type="text" id="scorm-gen-lesson-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs font-mono text-indigo-300 focus:outline-none focus:border-indigo-500" value="L101">
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                <div>
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson Number <span class="text-rose-400">*</span></label>
+                                    <input type="text" id="scorm-gen-lesson-number" class="w-full rounded-xl bg-slate-950 border border-emerald-500/50 p-2.5 text-xs text-emerald-400 font-mono font-bold focus:outline-none focus:border-emerald-400" value="1.1" placeholder="e.g. 2.1" oninput="syncScormDynamicFields(false)">
+                                </div>
+                                <div class="md:col-span-3">
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson Name / Topic Title <span class="text-rose-400">*</span></label>
+                                    <input type="text" id="scorm-gen-lesson-name" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2.5 text-xs text-white font-semibold focus:outline-none focus:border-emerald-500" value="Traditional AI vs GenAI vs Agents" placeholder="e.g. Intelligent & Autonomous Transactions" oninput="syncScormDynamicFields(false)">
+                                </div>
                             </div>
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Topic / Unit</label>
-                                <input type="text" id="scorm-gen-topic" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="1.1 Traditional AI vs GenAI vs Agents">
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-400 mb-1">Lesson ID / Unit Code</label>
+                                    <input type="text" id="scorm-gen-lesson-id" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2.5 text-xs font-mono text-indigo-300 focus:outline-none focus:border-indigo-500" value="L101">
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label class="block text-[11px] font-semibold text-slate-400 mb-1">Intro Background Video (Hero Section)</label>
+                                    <input type="text" id="scorm-gen-intro-video" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2 text-xs font-mono text-cyan-300 focus:outline-none focus:border-cyan-400" value="AI-FinTech-v0.mp4" placeholder="AI-FinTech-v0.mp4 (bundled)">
+                                </div>
                             </div>
+                            <!-- Hidden inputs for backward-compatible JS/tests referencing these IDs -->
+                            <input type="hidden" id="scorm-gen-lesson-title" value="Lesson 1: Foundations & Agentic Workflows">
+                            <input type="hidden" id="scorm-gen-topic" value="1.1 Traditional AI vs GenAI vs Agents">
                         </div>
 
                         <!-- Upload-driven SCORM source -->
@@ -3028,7 +3093,7 @@ async def serve_dashboard():
                             <div class="flex items-center justify-between gap-3 flex-wrap">
                                 <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                                     <input type="checkbox" id="scorm-upload-quiz" checked class="accent-emerald-500 cursor-pointer">
-                                    Attach the assessment item bank selected below
+                                    Attach the lightweight understanding check selected below
                                 </label>
                                 <button onclick="buildScormFromUpload()" id="scorm-upload-btn"
                                         class="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 font-bold text-xs text-white shadow-md shadow-emerald-500/20 transition-all flex items-center gap-2">
@@ -3038,18 +3103,18 @@ async def serve_dashboard():
                             <div id="scorm-upload-status" class="hidden text-xs rounded-lg p-2.5 font-mono"></div>
                         </div>
 
-                        <!-- Item Bank & Passing Score -->
+                        <!-- Understanding Check (2-3 Questions) & Passing Score -->
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">📝 Attach Assessment Item Bank</label>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">📝 Attach Understanding Check (2-3 Questions Only)</label>
                                 <select id="scorm-gen-module-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-emerald-400 font-bold focus:outline-none focus:border-indigo-500">
-                                    <option value="1">Module 1: Traditional AI vs GenAI vs Agents (32 Qs)</option>
-                                    <option value="2">Module 2: Agent Architecture & Planning (32 Qs)</option>
-                                    <option value="3">Module 3: RAG & Financial Memory (32 Qs)</option>
-                                    <option value="4">Module 4: Multi-Agent Collaboration (32 Qs)</option>
-                                    <option value="5">Module 5: Risk, Compliance & Governance (32 Qs)</option>
-                                    <option value="6">Module 6: Enterprise Deployment & Observability (32 Qs)</option>
-                                    <option value="7">Module 7: Algorithmic Execution & Trading (32 Qs)</option>
+                                    <option value="1">Module 1: Traditional AI vs GenAI vs Agents (3 Qs Check)</option>
+                                    <option value="2">Module 2: Agent Architecture & Planning (3 Qs Check)</option>
+                                    <option value="3">Module 3: RAG & Financial Memory (3 Qs Check)</option>
+                                    <option value="4">Module 4: Multi-Agent Collaboration (3 Qs Check)</option>
+                                    <option value="5">Module 5: Risk, Compliance & Governance (3 Qs Check)</option>
+                                    <option value="6">Module 6: Enterprise Deployment & Observability (3 Qs Check)</option>
+                                    <option value="7">Module 7: Algorithmic Execution & Trading (3 Qs Check)</option>
                                 </select>
                             </div>
                             <div>
@@ -3620,9 +3685,22 @@ async def serve_dashboard():
             fd.append('file', input.files[0]);
             fd.append('course_title', document.getElementById('scorm-gen-course-title').value.trim() || 'Untitled Course');
             fd.append('course_id', document.getElementById('scorm-gen-course-id').value.trim() || 'COURSE');
-            fd.append('module_title', document.getElementById('scorm-gen-module-title').value.trim() || 'Module 1');
-            fd.append('topic', document.getElementById('scorm-gen-topic').value.trim());
-            fd.append('module_id', document.getElementById('scorm-gen-module-id').value || '1');
+            
+            const modNum = document.getElementById('scorm-gen-module-number') ? document.getElementById('scorm-gen-module-number').value.trim() : '';
+            const modName = document.getElementById('scorm-gen-module-name') ? document.getElementById('scorm-gen-module-name').value.trim() : '';
+            const lesNum = document.getElementById('scorm-gen-lesson-number') ? document.getElementById('scorm-gen-lesson-number').value.trim() : '';
+            const lesName = document.getElementById('scorm-gen-lesson-name') ? document.getElementById('scorm-gen-lesson-name').value.trim() : '';
+            const introVideo = document.getElementById('scorm-gen-intro-video') ? document.getElementById('scorm-gen-intro-video').value.trim() : '';
+
+            fd.append('module_title', document.getElementById('scorm-gen-module-title') ? document.getElementById('scorm-gen-module-title').value.trim() : (modName ? `Module ${modNum || 1}: ${modName}` : 'Module 1'));
+            fd.append('topic', document.getElementById('scorm-gen-topic') ? document.getElementById('scorm-gen-topic').value.trim() : lesName);
+            fd.append('module_id', document.getElementById('scorm-gen-module-id').value || (modNum || '1'));
+            if (modNum) fd.append('module_number', modNum);
+            if (modName) fd.append('module_name', modName);
+            if (lesNum) fd.append('lesson_number', lesNum);
+            if (lesName) fd.append('lesson_name', lesName);
+            if (introVideo) fd.append('intro_video_filename', introVideo);
+
             fd.append('pass_percentage', document.getElementById('scorm-gen-pass').value || '70');
             fd.append('scorm_version', document.getElementById('scorm-gen-version').value || '1.2');
             fd.append('include_quiz', document.getElementById('scorm-upload-quiz').checked ? 'true' : 'false');
@@ -3660,6 +3738,51 @@ async def serve_dashboard():
         }
 
         // ================= CUSTOM SCORM GENERATOR LOGIC =================
+        function syncScormDynamicFields(autoDeriveLesson = true) {
+            const mNumInput = document.getElementById('scorm-gen-module-number');
+            const mNameInput = document.getElementById('scorm-gen-module-name');
+            const lNumInput = document.getElementById('scorm-gen-lesson-number');
+            const lNameInput = document.getElementById('scorm-gen-lesson-name');
+            const mTitleInput = document.getElementById('scorm-gen-module-title');
+            const lTitleInput = document.getElementById('scorm-gen-lesson-title');
+            const topicInput = document.getElementById('scorm-gen-topic');
+            const modSelect = document.getElementById('scorm-gen-module-id');
+            const modPreview = document.getElementById('scorm-live-mod-preview');
+            const lesPreview = document.getElementById('scorm-live-les-preview');
+
+            const mNum = (mNumInput && mNumInput.value.trim()) || '1';
+            const mName = (mNameInput && mNameInput.value.trim()) || `Module ${mNum}`;
+
+            if (autoDeriveLesson && lNumInput) {
+                lNumInput.value = `${mNum}.1`;
+            }
+            const lNum = (lNumInput && lNumInput.value.trim()) || `${mNum}.1`;
+            const lName = (lNameInput && lNameInput.value.trim()) || mName;
+
+            if (mTitleInput) {
+                mTitleInput.value = `Module ${mNum}: ${mName}`;
+            }
+            if (lTitleInput) {
+                lTitleInput.value = `Lesson ${lNum}: ${lName}`;
+            }
+            if (topicInput) {
+                topicInput.value = `${lNum} ${lName}`;
+            }
+            if (modPreview) {
+                modPreview.innerText = `Module ${mNum}: ${mName.length > 25 ? mName.slice(0, 25) + '...' : mName}`;
+            }
+            if (lesPreview) {
+                lesPreview.innerText = `Start Lesson ${lNum}`;
+            }
+            if (modSelect && !isNaN(parseInt(mNum))) {
+                const numVal = parseInt(mNum);
+                if (numVal >= 1 && numVal <= 7) {
+                    modSelect.value = String(numVal);
+                }
+            }
+        }
+        setTimeout(syncScormDynamicFields, 100);
+
         async function fetchScormMediaList() {
             try {
                 const res = await fetch('/api/v1/gallery');
@@ -3740,11 +3863,16 @@ async def serve_dashboard():
         async function buildCustomScormPackage() {
             const courseTitle = document.getElementById('scorm-gen-course-title').value.trim();
             const courseId = document.getElementById('scorm-gen-course-id').value.trim();
-            const moduleTitle = document.getElementById('scorm-gen-module-title').value.trim();
+            const moduleNumber = document.getElementById('scorm-gen-module-number') ? document.getElementById('scorm-gen-module-number').value.trim() : '';
+            const moduleName = document.getElementById('scorm-gen-module-name') ? document.getElementById('scorm-gen-module-name').value.trim() : '';
+            const moduleTitle = document.getElementById('scorm-gen-module-title') ? document.getElementById('scorm-gen-module-title').value.trim() : `Module ${moduleNumber || 1}: ${moduleName}`;
             const moduleDesc = document.getElementById('scorm-gen-module-desc') ? document.getElementById('scorm-gen-module-desc').value.trim() : '';
-            const lessonTitle = document.getElementById('scorm-gen-lesson-title') ? document.getElementById('scorm-gen-lesson-title').value.trim() : '';
+            const lessonNumber = document.getElementById('scorm-gen-lesson-number') ? document.getElementById('scorm-gen-lesson-number').value.trim() : `${moduleNumber || 1}.1`;
+            const lessonName = document.getElementById('scorm-gen-lesson-name') ? document.getElementById('scorm-gen-lesson-name').value.trim() : moduleName;
+            const lessonTitle = document.getElementById('scorm-gen-lesson-title') ? document.getElementById('scorm-gen-lesson-title').value.trim() : `${lessonNumber} ${lessonName}`;
             const lessonId = document.getElementById('scorm-gen-lesson-id') ? document.getElementById('scorm-gen-lesson-id').value.trim() : '';
-            const topic = document.getElementById('scorm-gen-topic').value.trim();
+            const topic = document.getElementById('scorm-gen-topic') ? document.getElementById('scorm-gen-topic').value.trim() : `${lessonNumber} ${lessonName}`;
+            const introVideo = document.getElementById('scorm-gen-intro-video') ? document.getElementById('scorm-gen-intro-video').value.trim() : '';
             
             const attachedFnInput = document.getElementById('scorm-attached-filename');
             let videoFile = attachedFnInput && attachedFnInput.value && !attachedFnInput.value.includes('No video attached') && !attachedFnInput.value.includes('Uploading') ? attachedFnInput.value : '';
@@ -3752,7 +3880,7 @@ async def serve_dashboard():
                 videoFile = document.getElementById('scorm-gen-video-select').value;
             }
 
-            const moduleId = parseInt(document.getElementById('scorm-gen-module-id').value) || 1;
+            const moduleId = parseInt(document.getElementById('scorm-gen-module-id').value) || parseInt(moduleNumber) || 1;
             const passPercentage = parseInt(document.getElementById('scorm-gen-pass').value) || 70;
             const scormVersion = document.getElementById('scorm-gen-version').value;
             const btn = document.getElementById('scorm-custom-build-btn');
@@ -3768,11 +3896,16 @@ async def serve_dashboard():
                         course_id: courseId,
                         module_title: moduleTitle,
                         module_id: moduleId,
+                        module_number: moduleNumber,
+                        module_name: moduleName,
                         module_description: moduleDesc,
                         lesson_title: lessonTitle,
+                        lesson_number: lessonNumber,
+                        lesson_name: lessonName,
                         lesson_id: lessonId,
                         topic: topic,
                         video_filename: videoFile,
+                        intro_video_filename: introVideo,
                         pass_percentage: passPercentage,
                         scorm_version: scormVersion
                     })
@@ -3786,7 +3919,7 @@ async def serve_dashboard():
                     link.click();
                     document.body.removeChild(link);
                     fetchScormPackagesTable();
-                    alert(`📦 Custom SCORM Package (${data.size_mb} MB) bundled for "${data.course_title}" / "${data.lesson_title || data.topic}" with Module ${data.module_id} Quiz (${data.questions_count} questions) and ready for LMS!`);
+                    alert(`📦 Custom SCORM Package (${data.size_mb} MB) bundled for "${data.course_title}" / "${data.lesson_title || data.topic}" with Module ${data.module_number || data.module_id} Understanding Check (${data.questions_count} questions) and ready for LMS!`);
                 } else {
                     alert('SCORM Packaging failed: ' + data.detail);
                 }

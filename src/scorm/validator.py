@@ -49,6 +49,10 @@ def validate_course_document(doc: Dict[str, Any], asset_base_dir: Path = None) -
     if not c.get("title"):
         errors.append("Course must have a non-empty 'title'.")
 
+    intro_vid = c.get("introBackgroundVideo") or (isinstance(c.get("intro"), dict) and c.get("intro").get("background_video"))
+    if intro_vid and isinstance(intro_vid, str):
+        files.add(intro_vid)
+
     modules = c.get("modules")
     if not isinstance(modules, list):
         errors.append("Course 'modules' must be a list.")

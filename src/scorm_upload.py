@@ -364,9 +364,14 @@ def install_scorm_upload(app, *, output_dir: Path, exports_dir: Path, quiz_engin
         file: UploadFile = File(...),
         course_title: str = Form("Untitled Course"),
         course_id: str = Form("COURSE"),
-        module_title: str = Form("Module 1"),
+        module_title: str = Form(""),
         topic: str = Form(""),
         module_id: int = Form(1),
+        module_number: Optional[str] = Form(None),
+        module_name: Optional[str] = Form(None),
+        lesson_number: Optional[str] = Form(None),
+        lesson_name: Optional[str] = Form(None),
+        intro_video_filename: Optional[str] = Form(None),
         pass_percentage: int = Form(70),
         scorm_version: str = Form("1.2"),
         include_quiz: str = Form("true"),
@@ -421,30 +426,50 @@ def install_scorm_upload(app, *, output_dir: Path, exports_dir: Path, quiz_engin
 
             video_names = [v.name for v in videos]
 
+            # --- dynamic module and lesson metadata -----------------------
+            m_num = str(module_number).strip() if module_number else (str(module_id) if module_id else "1")
+            m_name = (module_name or "").strip()
+            if not m_name:
+                if module_title:
+                    m_name = re.sub(r"^Module\s*\d+\s*:\s*", "", module_title).strip() or module_title
+                else:
+                    m_name = f"Module {m_num}"
+
+            final_module_title = f"Module {m_num}: {m_name}" if (m_num and not m_name.startswith(f"Module {m_num}")) else m_name
+
             # --- player + manifest ----------------------------------------
-            questions = quiz_engine.get_module_questions(module_id or 1) if want_quiz else []
-            item_title = f"{module_title}: {topic}" if topic else module_title
+            questions = quiz_engine.get_module_questions(int(m_num) if str(m_num).isdigit() else (module_id or 1)) if want_quiz else []
+            item_title = f"{final_module_title}: {topic}" if topic else final_module_title
             if questions:
                 item_title = f"{item_title} ({len(questions)} Questions)"
 
             packager = SCORMPackager(
                 course_id=safe_course_id,
                 course_title=course_title,
-                course_description=f"Curriculum module: {module_title}",
-                version=scorm_version
+                course_description=f"Curriculum module: {final_module_title}",
+                version=scorm_version,
+                intro_video_path=intro_video_filename
             )
             packager.add_module(
                 module_id=f"mod_{safe_course_id}",
-                module_title=module_title,
-                description=""
+                module_title=final_module_title,
+                description="",
+                module_number=m_num,
+                module_name=m_name
             )
             for idx, v in enumerate(videos, start=1):
+                l_num = str(lesson_number).strip() if (lesson_number and idx == 1) else f"{m_num}.{idx}"
+                l_name = str(lesson_name).strip() if (lesson_name and idx == 1) else (
+                    f"{topic or 'Lesson'} (Part {idx})" if len(videos) > 1 else (topic or m_name or "Lesson")
+                )
                 packager.add_lesson(
                     module_id=f"mod_{safe_course_id}",
                     lesson_id=f"les_{safe_course_id}_{idx}",
-                    lesson_title=f"{topic or 'Lesson'} (Part {idx})" if len(videos) > 1 else (topic or module_title),
-                    topic=topic or module_title,
-                    video_path=str(v)
+                    lesson_title=l_name,
+                    topic=topic or m_name,
+                    video_path=str(v),
+                    lesson_number=l_num,
+                    lesson_name=l_name
                 )
 
             # --- zip it ----------------------------------------------------
