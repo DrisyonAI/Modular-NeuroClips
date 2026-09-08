@@ -177,6 +177,115 @@ def test_scorm_packager_backwards_compatibility():
             assert course_json["course"]["modules"][0]["lessons"][0]["id"] == "l101"
 
 
+def test_scorm_dynamic_module2_and_lesson21():
+    """Validates dynamic Module 2, Lesson 2.1, 2-3 question Understanding Check, and intro video bundling."""
+    packager = SCORMPackager(
+        course_id="M2_FINTECH_AGENTS",
+        course_title="AI Agents in FinTech: Autonomous Execution",
+        course_description="Module 2 courseware",
+        version="1.2"
+    )
+    packager.add_module(
+        module_id="mod_2",
+        module_title="Module 2: Intelligent & Autonomous Transactions",
+        module_number=2,
+        module_name="Intelligent & Autonomous Transactions"
+    )
+    packager.add_lesson(
+        module_id="mod_2",
+        lesson_id="les_2_1",
+        lesson_title="2.1 Intelligent & Autonomous Transactions",
+        topic="Intelligent & Autonomous Transactions",
+        lesson_number="2.1",
+        lesson_name="Intelligent & Autonomous Transactions"
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        out_zip = Path(td) / "m2_scorm.zip"
+        res = packager.export_zip(out_zip)
+        assert res.exists()
+
+        with zipfile.ZipFile(res, "r") as zf:
+            files = zf.namelist()
+            assert "imsmanifest.xml" in files
+            assert "index.html" in files
+            assert "data/course.json" in files
+            assert "assets/videos/AI-FinTech-v0.mp4" in files
+
+            course_json = json.loads(zf.read("data/course.json").decode("utf-8"))
+            course = course_json["course"]
+
+            # Intro video must be set
+            assert course.get("introBackgroundVideo") == "assets/videos/AI-FinTech-v0.mp4"
+
+            # Module checks
+            assert len(course["modules"]) == 1
+            mod = course["modules"][0]
+            assert mod["number"] == 2
+            assert "Intelligent & Autonomous Transactions" in mod["title"]
+            assert "Module 1" not in mod["title"]
+
+            # Lesson checks
+            assert len(mod["lessons"]) == 1
+            les = mod["lessons"][0]
+            assert les["number"] == "2.1"
+            assert "2.1" in les["title"]
+            assert "1.1" not in les["title"]
+            assert "Lesson 1.1" not in les["title"]
+
+            # Formative Understanding Check: strictly 2-3 questions
+            assert "quiz" in les
+            quiz = les["quiz"]
+            assert quiz["title"] == "Understanding Check"
+            assert 2 <= len(quiz["questions"]) <= 3
+
+            # Ensure zero references to Module 1 or Lesson 1.1 in course.json
+            raw_course_text = zf.read("data/course.json").decode("utf-8")
+            assert "Module 1" not in raw_course_text
+            assert "Lesson 1.1" not in raw_course_text
+            assert '"number": "1.1"' not in raw_course_text
+
+
+def test_custom_build_api_dynamic_module_and_lesson():
+    """Validates custom_scorm_build_api handles dynamic module & lesson numbers and 2-3 questions check."""
+    import asyncio
+    from src.dashboard import custom_scorm_build_api, CustomSCORMBuildRequest
+
+    req = CustomSCORMBuildRequest(
+        course_title="AI Agents in FinTech: Autonomous Execution",
+        course_id="M2_API_TEST",
+        module_number=2,
+        module_name="Intelligent & Autonomous Transactions",
+        lesson_number="2.1",
+        lesson_name="Intelligent & Autonomous Transactions",
+        lesson_id="L201",
+        pass_percentage=70,
+        scorm_version="1.2"
+    )
+
+    res = asyncio.run(custom_scorm_build_api(req))
+    assert res["status"] == "ok"
+    assert res["module_number"] == "2"
+    assert res["lesson_number"] == "2.1"
+    assert 2 <= res["questions_count"] <= 3
+
+    zip_path = PROJECT_ROOT / "exports" / res["package_name"]
+    if not zip_path.exists():
+        from src.config import EXPORTS_DIR
+        zip_path = EXPORTS_DIR / res["package_name"]
+    assert zip_path.exists()
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        raw_json = zf.read("data/course.json").decode("utf-8")
+        assert "Module 1" not in raw_json
+        assert "Lesson 1.1" not in raw_json
+        course_data = json.loads(raw_json)
+        assert course_data["course"]["modules"][0]["number"] == 2
+        assert course_data["course"]["modules"][0]["lessons"][0]["number"] == "2.1"
+        # Check intro background video is attached
+        assert course_data["course"]["introBackgroundVideo"] == "assets/videos/AI-FinTech-v0.mp4"
+
+
 if __name__ == "__main__":
     print("[*] Running SCORM Framework Test Suite...")
     test_validator_valid_course()
@@ -186,4 +295,5 @@ if __name__ == "__main__":
     test_manifest_generation_scorm2004()
     test_package_builder_creates_valid_archive()
     test_scorm_packager_backwards_compatibility()
+    test_scorm_dynamic_module2_and_lesson21()
     print("[PASS] ALL SCORM FRAMEWORK TESTS PASSED.")

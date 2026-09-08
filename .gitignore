@@ -23,7 +23,10 @@ exports/
 graphify-out/
 test_tmp/
 .pytest_cache/
+batch_production.db
 !wire_frames/*.jpeg
 !wire_frames/*.png
 !wire_frames/*.webp
 !scrom_reference/*.png
+!scrom_reference/*.mp4
+!src/scorm/runtime/assets/**

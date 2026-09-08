@@ -26,12 +26,12 @@ class QuizEngine {
       return;
     }
 
-    const title = this.config.title || 'Knowledge Check & Assessment';
+    const title = this.config.title || 'Understanding Check';
     const totalQuestions = questions.length;
 
     let html = `
       <div class="quiz-section">
-        <div class="quiz-header-badge">ASSESSMENT</div>
+        <div class="quiz-header-badge">UNDERSTANDING CHECK</div>
         <h3 class="quiz-title">${esc(title)}</h3>
         <p class="quiz-meta">Answer all questions to verify your understanding. Passing score: <strong>${this.passingScore}%</strong></p>
 
@@ -74,7 +74,7 @@ class QuizEngine {
         val.innerText = `${previousAttempt.bestScore}%`;
         val.className = 'quiz-score-num pass';
         document.getElementById('quiz-submit-action-btn').disabled = true;
-        document.getElementById('quiz-submit-action-btn').innerText = 'Assessment Completed';
+        document.getElementById('quiz-submit-action-btn').innerText = 'Understanding Check Completed';
       }
     }
   }

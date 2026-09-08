@@ -140,11 +140,18 @@ class NeuroClipsPlayer {
 
     const c = this.course.course;
     const currentMod = this.currentModule || (c.modules && c.modules[0]) || { number: 1, title: c.title };
+    const modNumber = (currentMod.number !== undefined && currentMod.number !== null && currentMod.number !== '') ? currentMod.number : 1;
+    const rawModTitle = currentMod.title || currentMod.name || c.title || `Module ${modNumber}`;
+    let cleanModTitle = rawModTitle;
+    const modPrefixRegex = new RegExp(`^Module\\s*${modNumber}\\s*:\\s*`, 'i');
+    if (modPrefixRegex.test(cleanModTitle)) {
+      cleanModTitle = cleanModTitle.replace(modPrefixRegex, '').trim();
+    }
 
     headerEl.innerHTML = `
       <div class="header-left">
-        <span class="module-badge">Module ${currentMod.number || 1}</span>
-        <span class="module-header-title">${esc(currentMod.title || c.title)}</span>
+        <span class="module-badge">Module ${modNumber}</span>
+        <span class="module-header-title">${esc(cleanModTitle)}</span>
       </div>
       <div class="header-right">
         <button type="button" class="dropdown-trigger-btn" onclick="player.toggleLessonsDropdown()">
@@ -177,10 +184,13 @@ class NeuroClipsPlayer {
 
     let itemsHtml = '';
     for (const mod of this.course.course.modules || []) {
+      const mNum = (mod.number !== undefined && mod.number !== null && mod.number !== '') ? mod.number : 1;
       for (const les of mod.lessons || []) {
         const state = this.store ? this.store.getLessonState(les.id) : null;
         const isCurrent = this.currentLesson && this.currentLesson.id === les.id;
         const isDone = state && (state.status === 'completed' || state.status === 'passed');
+        const lNum = les.number || `${mNum}.1`;
+        const lTitle = les.title || les.name || `Lesson ${lNum}`;
 
         let statusIcon = '⚪';
         if (isDone) statusIcon = '✅';
@@ -191,8 +201,8 @@ class NeuroClipsPlayer {
           <div class="dropdown-item ${isCurrent ? 'active' : ''}" onclick="player.selectLessonFromDropdown('${les.id}')">
             <span class="dropdown-status-icon">${statusIcon}</span>
             <div>
-              <div style="font-size: 11px; color: #64748B;">${les.number || ''}</div>
-              <div>${esc(les.title)}</div>
+              <div style="font-size: 11px; color: #64748B;">${lNum}</div>
+              <div>${esc(lTitle)}</div>
             </div>
           </div>
         `;
@@ -258,21 +268,27 @@ class NeuroClipsPlayer {
     if (!container) return;
 
     const c = this.course.course;
-    const firstLessonId = c.modules?.[0]?.lessons?.[0]?.id;
+    const firstMod = (c.modules && c.modules[0]) || {};
+    const firstModNum = (firstMod.number !== undefined && firstMod.number !== null && firstMod.number !== '') ? firstMod.number : 1;
+    const firstLesson = firstMod.lessons?.[0];
+    const firstLessonId = firstLesson?.id;
     const progress = this.store.calculateProgress(c);
 
     // Hero background / artwork
     const heroTitle = c.title || 'AI Powered HR';
-    const firstLessonNum = c.modules?.[0]?.lessons?.[0]?.number || '1.1';
+    const firstLessonNum = firstLesson?.number || `${firstModNum}.1`;
+    const introVideo = c.introBackgroundVideo || c.intro?.background_video || c.intro_video;
 
     let modulesHtml = '';
     for (const mod of c.modules || []) {
+      const mNum = (mod.number !== undefined && mod.number !== null && mod.number !== '') ? mod.number : 1;
+      const mTitle = mod.title || mod.name || `Module ${mNum}`;
       modulesHtml += `
         <div class="module-card">
           <div class="module-card-header">
             <div class="module-card-title-group">
-              <span class="module-number-pill">Module ${mod.number || 1}</span>
-              <span class="module-card-title">${esc(mod.title)}</span>
+              <span class="module-number-pill">Module ${mNum}</span>
+              <span class="module-card-title">${esc(mTitle)}</span>
             </div>
             <div style="font-size: 12px; color: #64748B;">${mod.durationMinutes ? `${mod.durationMinutes} min` : ''}</div>
           </div>
@@ -280,11 +296,13 @@ class NeuroClipsPlayer {
             ${(mod.lessons || []).map(les => {
               const state = this.store.getLessonState(les.id);
               const isDone = state && (state.status === 'completed' || state.status === 'passed');
+              const lNum = les.number || `${mNum}.1`;
+              const lTitle = les.title || les.name || `Lesson ${lNum}`;
               return `
                 <div class="lesson-row-card" onclick="player.navigateLesson('${les.id}')">
                   <div class="lesson-row-left">
-                    <span class="lesson-row-num">${les.number || ''}</span>
-                    <span class="lesson-row-title">${esc(les.title)}</span>
+                    <span class="lesson-row-num">${lNum}</span>
+                    <span class="lesson-row-title">${esc(lTitle)}</span>
                   </div>
                   <div class="lesson-row-right">
                     ${les.durationMinutes ? `<span class="lesson-badge">${les.durationMinutes}</span>` : ''}
@@ -299,11 +317,20 @@ class NeuroClipsPlayer {
     }
 
     container.innerHTML = `
-      <!-- Hero Card - Matches Screenshots 63-65 -->
+      <!-- Hero Card - Matches Screenshots 63-65 & Reference Background Video -->
       <div class="hero-card">
-        <div class="hero-art-container">
-          <div style="width: 320px; height: 220px; background: radial-gradient(circle, rgba(229,37,42,0.15) 0%, rgba(30,27,75,0.05) 70%); border-radius: 50%;"></div>
-        </div>
+        ${introVideo ? `
+          <div class="hero-video-wrapper">
+            <video class="hero-bg-video" autoplay muted loop playsinline preload="auto">
+              <source src="${esc(introVideo)}" type="video/mp4" />
+            </video>
+            <div class="hero-video-overlay"></div>
+          </div>
+        ` : `
+          <div class="hero-art-container">
+            <div style="width: 320px; height: 220px; background: radial-gradient(circle, rgba(229,37,42,0.15) 0%, rgba(30,27,75,0.05) 70%); border-radius: 50%;"></div>
+          </div>
+        `}
         <div class="hero-content-overlay">
           <h1 class="hero-title">${esc(heroTitle)}</h1>
           ${firstLessonId ? `
@@ -393,6 +420,11 @@ class NeuroClipsPlayer {
     if (!container) return;
 
     const les = match.lesson;
+    const mod = match.module;
+    const mNum = (mod.number !== undefined && mod.number !== null && mod.number !== '') ? mod.number : 1;
+    const lNum = les.number || `${mNum}.1`;
+    const cleanLName = (les.title || les.name || '').replace(new RegExp(`^(Lesson\\s*)?${lNum}\\s*[:\\-]?\\s*`, 'i'), '').trim() || les.title || les.name || `Lesson ${lNum}`;
+    const lDisplayTitle = (les.title && (les.title.startsWith(`${lNum} `) || les.title.startsWith(`Lesson ${lNum}`))) ? les.title : `${lNum} ${cleanLName}`;
     const lesState = this.store.getLessonState(lessonId);
 
     // Calculate previous and next lesson links
@@ -402,7 +434,7 @@ class NeuroClipsPlayer {
         flatLessons.push(l);
       }
     }
-    const currentIndex = flatLessons.findIndex(l => l.id === lessonId);
+    const currentIndex = flatLessons.findIndex(l => l.id === lessonId || l === lessonId);
     const prevLesson = currentIndex > 0 ? flatLessons[currentIndex - 1] : null;
     const nextLesson = currentIndex < flatLessons.length - 1 ? flatLessons[currentIndex + 1] : null;
 
@@ -428,10 +460,10 @@ class NeuroClipsPlayer {
       <!-- Main Lesson Card (Screenshot 62) -->
       <div class="lesson-card">
         <!-- Eyebrow -->
-        <div class="lesson-eyebrow">LESSON ${les.number || ''}</div>
+        <div class="lesson-eyebrow">LESSON ${lNum}</div>
 
         <!-- Main Title -->
-        <h1 class="lesson-title">${esc(les.title)}</h1>
+        <h1 class="lesson-title">${esc(lDisplayTitle)}</h1>
 
         <!-- Badges Row (Duration & Learning Mode) -->
         <div class="lesson-badges-row">
@@ -457,7 +489,7 @@ class NeuroClipsPlayer {
             </video>
             <div class="video-caption-bar">
               <span class="video-play-icon">▶</span>
-              <span>Lesson ${les.number || ''} Video Lesson</span>
+              <span>Lesson ${lNum} Video Lesson</span>
             </div>
           </div>
         ` : ''}
