@@ -540,6 +540,8 @@ Modular-NeuroClips/
 | **BRD-VOICE-02** | **Zero Marginal Cost Local Cloning Option** | Provide a hybrid approach: Premium cloud voice cloning (ElevenLabs Instant Voice Clone) alongside local reference-based zero-cost cloning (Kokoro / XTTS), preventing API cost blowouts. | Budget-conscious course creators, Higher Ed | P0 |
 | **BRD-DOC-01** | **Universal Document-to-Audio Ingestion** | Ingest raw educational materials (`.txt`, `.md`, `.docx`, `.pdf`) and automatically decompose them into pedagogical narration scenes aligned to any selected voice (cloned or pre-baked). | Curriculum Designers, Content Teams | P0 |
 | **BRD-DOC-02** | **SCORM 1.2 / 2004 Audio Package Assembly** | Turn any uploaded book chapter or lecture document into a fully packaged, interactive SCORM module with synchronized subtitles and knowledge checks in under 60 seconds. | Enterprise LMS Administrators | P1 |
+| **BRD-BATCH-01** | **Automated Curriculum Batch Video & Audio Pipeline** | Ingest full multi-module curriculum definitions and automatically synthesize neural speech, timing manifests, synchronous subtitles (.srt), and high-resolution Remotion/FFmpeg composite videos across all lessons unattended. | Course Directors, Instructional Ops | P0 |
+| **BRD-CLOUD-01** | **Direct Cloud LMS Ingestion (SCORM Cloud API v2)** | Programmatically upload and register generated SCORM packages into Rustici SCORM Cloud, retrieve test preview launch links, and configure learner dispatch without manual browser exports. | Enterprise LMS Integrators, Corporate L&D | P0 |
 
 ---
 
@@ -657,6 +659,47 @@ sequenceDiagram
     2. Master concatenated audio track normalized to -14 LUFS.
     3. Synchronized `.srt` and `.vtt` subtitle files.
     4. Optional one-click ADL SCORM 1.2 zip archive for direct LMS distribution.
+
+#### 7.2.5 Module 3: Automated Curriculum Batch Synthesis & Remotion Video Rendering (`CurriculumBatchRunner`)
+
+- **FRD-BATCH-01 (Matrix Traversal & Batch Voice Synthesis)**:
+  - System shall traverse all course modules (Modules 1 to 7) and generate structured audio slides named according to canonical schema: `M{m}_T{t}_L{l}_Slide{s}.mp3`.
+  - System shall generate synchronized sentence-level `.srt` subtitles alongside each slide audio file.
+  - System shall compile `batch_manifest.json` recording slide title, audio file relative path, exact duration in seconds, subtitle path, and frame count at 30fps.
+- **FRD-BATCH-02 (Remotion React Engine & FFmpeg Video Compositing)**:
+  - System shall feed `batch_manifest.json` into Remotion composition (`FintechAgentLesson`) or the FFmpeg hardware-accelerated video pipeline.
+  - System shall render complete lesson videos (`FINTECH_AGENTS_*.mp4`) combining visual slides, audio narration, kinetic typography subtitles, and animated avatar overlays.
+
+#### 7.2.6 Module 4: Rustici SCORM Cloud Direct Deployment (`SCORMCloudClient`)
+
+- **FRD-CLOUD-01 (API v2 Basic Auth & Cloud Course Ingestion)**:
+  - System shall connect to SCORM Cloud API v2 (`https://cloud.scorm.com/api/v2`) using HTTP Basic Authentication (`SCORM_CLOUD_APP_ID` / `SCORM_CLOUD_SECRET_KEY`).
+  - System shall upload generated SCORM course packages directly using asynchronous import jobs (`POST /courses/uploadJobs`).
+- **FRD-CLOUD-02 (Course Preview & Registration Dispatch)**:
+  - System shall support generating preview launch links (`POST /courses/{course_id}/preview`) for instant verification in browser.
+  - System shall support creating learner registrations and generating tracked launch links (`POST /registrations/{registration_id}/launchLink`).
+
+```mermaid
+flowchart TD
+    %% Workflow 3: Batch Curriculum Pipeline
+    subgraph WF3["Workflow 3: Automated Batch Video Synthesis (CurriculumBatchRunner)"]
+        C1[Curriculum Course Definition] --> C2[Matrix Traversal: Modules 1..7]
+        C2 --> C3[VoiceDirector: Edge-TTS Neural Speech]
+        C3 --> C4[Per-Slide M{m}_T{t}_L{l}_Slide{s}.mp3 + .srt]
+        C4 --> C5[Compile batch_manifest.json with Millisecond Timing]
+        C5 --> C6[Remotion React Bundle / FFmpeg Compositor]
+        C6 --> C7([🎬 Production Lesson Video: FINTECH_AGENTS_*.mp4])
+    end
+
+    %% Workflow 4: SCORM Cloud Direct Deploy
+    subgraph WF4["Workflow 4: SCORM Cloud API v2 Direct Deployment"]
+        D1[SCORM 1.2 / 2004 ZIP Package] --> D2[SCORMCloudClient API v2 Ingestion]
+        D2 --> D3{POST /courses/uploadJobs}
+        D3 --> D4[Poll Job Status until Complete]
+        D4 --> D5[POST /courses/{course_id}/preview]
+        D5 --> D6([🚀 Instant Cloud LMS Launch Link])
+    end
+```
 
 ---
 

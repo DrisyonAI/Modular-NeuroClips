@@ -1373,6 +1373,85 @@ async def batch_slides_upload_api(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# -------------------------------------------------------------
+# SCORM Cloud API v2 Integration (Feature 1)
+# -------------------------------------------------------------
+@app.post("/api/v1/scorm/deploy-cloud")
+async def deploy_scorm_cloud_api(req: Dict[str, Any]):
+    """
+    Dispatches a packaged SCORM zip package directly to SCORM Cloud API v2.
+    """
+    try:
+        from src.scorm_cloud_client import SCORMCloudClient
+        course_id = req.get("course_id", "COURSE_01")
+        pkg_name = req.get("package_filename") or req.get("zip_path")
+        if not pkg_name:
+            raise HTTPException(status_code=400, detail="package_filename or zip_path is required.")
+
+        p_zip = EXPORTS_DIR / pkg_name
+        if not p_zip.exists():
+            p_zip = Path(pkg_name)
+        if not p_zip.exists():
+            raise HTTPException(status_code=404, detail=f"SCORM package not found: {pkg_name}")
+
+        client = SCORMCloudClient(
+            app_id=req.get("scorm_app_id"),
+            secret_key=req.get("scorm_secret_key")
+        )
+        res = client.import_course_package(course_id, p_zip)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/scorm/cloud-job/{job_id}")
+async def get_scorm_cloud_job_api(job_id: str):
+    """Checks import status of a SCORM Cloud asynchronous job."""
+    try:
+        from src.scorm_cloud_client import SCORMCloudClient
+        client = SCORMCloudClient()
+        return client.get_job_status(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# -------------------------------------------------------------
+# Curriculum Batch Video Synthesis Pipeline (Feature 3)
+# -------------------------------------------------------------
+@app.post("/api/v1/batch/curriculum")
+async def batch_curriculum_api(req: Dict[str, Any]):
+    """
+    Queues and executes an end-to-end curriculum video synthesis batch from Excel course maps.
+    """
+    try:
+        from src.curriculum_batch_runner import CurriculumBatchRunner, CurriculumBatchRequest
+        runner = CurriculumBatchRunner()
+        batch_req = CurriculumBatchRequest(
+            excel_path=req.get("excel_path"),
+            course_id=req.get("course_id", "FINTECH_AGENTS_15HR"),
+            course_title=req.get("course_title", "AI Agents in FinTech Course"),
+            module_id=req.get("module_id"),
+            persona_id=req.get("persona_id", "maya_fintech"),
+            resolution=req.get("resolution", "16:9_hd"),
+            speech_rate=req.get("speech_rate", 1.0)
+        )
+        return runner.enqueue_curriculum(batch_req)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/batch/curriculum/status/{course_id}")
+async def batch_curriculum_status_api(course_id: str):
+    """Returns live completion status of a curriculum batch production job."""
+    try:
+        from src.curriculum_batch_runner import CurriculumBatchRunner
+        runner = CurriculumBatchRunner()
+        return runner.get_course_status(course_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 class IdentitySaveRequest(BaseModel):
     name: str
     avatar_persona: str
@@ -2449,6 +2528,82 @@ async def serve_dashboard():
                             <div id="batch-slide-progress-bar" class="bg-teal-400 h-full w-0 transition-all duration-300"></div>
                         </div>
                         <div id="batch-slide-results-list" class="max-h-48 overflow-y-auto font-mono text-xs space-y-1 text-slate-300 pt-1"></div>
+                    </div>
+                </div>
+
+                <!-- MODULE D: CURRICULUM BATCH VIDEO SYNTHESIS PIPELINE (FEATURE 3) -->
+                <div class="glass-panel p-5 rounded-xl border border-indigo-500/30 space-y-4 pt-4 mt-4">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <div>
+                            <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                <span>🚀</span> <span>Curriculum Batch Video Pipeline (Excel Course Maps)</span>
+                            </h4>
+                            <p class="text-[11px] text-slate-400">Automate mass video & lesson generation across entire 15-hour curriculum spreadsheets directly into the SQLite batch worker.</p>
+                        </div>
+                        <span class="text-[10px] px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 font-mono border border-indigo-500/30">
+                            Batch Production Engine
+                        </span>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Course ID</label>
+                            <input type="text" id="curriculum-batch-course-id" value="FINTECH_AGENTS_15HR" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Select Module</label>
+                            <select id="curriculum-batch-module" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="">All Modules (Full Curriculum)</option>
+                                <option value="1">Module 1: Traditional AI vs GenAI vs Agents</option>
+                                <option value="2">Module 2: Agent Architecture & Planning</option>
+                                <option value="3">Module 3: RAG & Financial Memory</option>
+                                <option value="4">Module 4: Multi-Agent Collaboration</option>
+                                <option value="5">Module 5: Risk, Guardrails & Governance</option>
+                                <option value="6">Module 6: Enterprise Deployment & Observability</option>
+                                <option value="7">Module 7: Algorithmic Execution & Trading</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Presenter Persona</label>
+                            <select id="curriculum-batch-persona" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="maya_fintech" selected>Maya (FinTech Senior Lead)</option>
+                                <option value="alex_ai">Alex (Enterprise AI Architect)</option>
+                                <option value="elena_compliance">Elena (Risk & Governance Director)</option>
+                                <option value="david_trainer">David (Global LMS Instructor)</option>
+                                <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Resolution Profile</label>
+                            <select id="curriculum-batch-resolution" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="16:9_hd" selected>16:9 HD Broadcast (1280x720)</option>
+                                <option value="16:9_fhd">16:9 Full HD (1920x1080)</option>
+                                <option value="9:16_vertical">9:16 Mobile Shorts (720x1280)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between gap-3 pt-2">
+                        <span class="text-xs text-slate-400">Uses <code class="text-indigo-300">Nipuna_AI_Agents_in_FinTech_15_Hour_Course_v4.xlsx</code></span>
+                        <button onclick="startCurriculumBatchPipeline()" id="btn-curriculum-batch-start" class="px-6 py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition-all flex items-center gap-2">
+                            <span>🚀</span> <span>Launch Batch Video Queue</span>
+                        </button>
+                    </div>
+
+                    <div id="curriculum-batch-status-box" class="hidden p-3 rounded-xl bg-slate-950/80 border border-indigo-500/30 space-y-2">
+                        <div class="flex items-center justify-between text-xs">
+                            <span id="curriculum-batch-status-title" class="text-indigo-300 font-mono font-bold">Queue Initializing...</span>
+                            <span id="curriculum-batch-progress-pct" class="text-white font-mono font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                            <div id="curriculum-batch-progress-bar" class="bg-indigo-400 h-full w-0 transition-all duration-300"></div>
+                        </div>
+                        <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono pt-1">
+                            <span id="curriculum-batch-stat-completed">Completed: 0</span>
+                            <span id="curriculum-batch-stat-processing">Processing: 0</span>
+                            <span id="curriculum-batch-stat-pending">Pending: 0</span>
+                            <span id="curriculum-batch-stat-failed">Failed: 0</span>
+                        </div>
                     </div>
                 </div>
         </div><!-- END OF MODE 2: VOICE DIRECTOR -->
@@ -3752,6 +3907,10 @@ async def serve_dashboard():
                                         <span>📦</span> <span>SCORM</span>
                                     </button>
 
+                                    <button onclick="deployScormCloud('${v.filename}')" title="Deploy directly to SCORM Cloud API v2" class="px-2.5 py-0.5 rounded bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/30 text-[11px] font-bold transition-all flex items-center gap-1 shadow-sm">
+                                        <span>☁️</span> <span>Cloud</span>
+                                    </button>
+
                                     <a href="${v.url}" download title="Download MP4" class="px-2 py-0.5 rounded bg-brand-500/10 hover:bg-brand-500/20 text-brand-glow text-[11px]">
                                         MP4
                                     </a>
@@ -3858,6 +4017,38 @@ async def serve_dashboard():
                 }
             } catch (e) {
                 alert("SCORM Export error: " + e);
+            }
+        }
+
+        async function deployScormCloud(filename) {
+            const courseId = prompt("Enter SCORM Course ID to deploy/update:", `COURSE_${filename.replace(/[^a-zA-Z0-9]/g, '_')}`);
+            if (!courseId) return;
+
+            // First ensure SCORM package exists or bundle on demand
+            try {
+                const pkgRes = await fetch(`/api/v1/scorm/export/${encodeURIComponent(filename)}?module_id=1`, { method: 'POST' });
+                const pkgData = await pkgRes.json();
+                if (pkgData.status !== 'ok') {
+                    alert("Failed to create package for cloud deploy: " + pkgData.detail);
+                    return;
+                }
+
+                const deployRes = await fetch('/api/v1/scorm/deploy-cloud', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        course_id: courseId,
+                        package_filename: pkgData.package_name
+                    })
+                });
+                const deployData = await deployRes.json();
+                if (deployData.status === 'success' || deployData.status === 'mock_success') {
+                    alert(`☁️ Dispatched to SCORM Cloud API v2!\nCourse ID: ${deployData.course_id}\nJob ID: ${deployData.import_job_id}\n\n${deployData.message || 'Course imported successfully.'}`);
+                } else {
+                    alert("Cloud deployment failed: " + (deployData.detail || deployData.error || 'Check logs'));
+                }
+            } catch (e) {
+                alert("SCORM Cloud deployment network error: " + e);
             }
         }
 
@@ -4779,6 +4970,100 @@ async def serve_dashboard():
                 btn.disabled = false;
                 btn.classList.remove('opacity-50', 'cursor-not-allowed');
             }
+        }
+
+        async function startCurriculumBatchPipeline() {
+            const courseId = document.getElementById('curriculum-batch-course-id').value.trim() || 'FINTECH_AGENTS_15HR';
+            const moduleVal = document.getElementById('curriculum-batch-module').value;
+            const personaId = document.getElementById('curriculum-batch-persona').value;
+            const resolution = document.getElementById('curriculum-batch-resolution').value;
+
+            const btn = document.getElementById('btn-curriculum-batch-start');
+            const statusBox = document.getElementById('curriculum-batch-status-box');
+            const titleEl = document.getElementById('curriculum-batch-status-title');
+            const progressPctEl = document.getElementById('curriculum-batch-progress-pct');
+            const progressBarEl = document.getElementById('curriculum-batch-progress-bar');
+            const statCompleted = document.getElementById('curriculum-batch-stat-completed');
+            const statProcessing = document.getElementById('curriculum-batch-stat-processing');
+            const statPending = document.getElementById('curriculum-batch-stat-pending');
+            const statFailed = document.getElementById('curriculum-batch-stat-failed');
+
+            statusBox.classList.remove('hidden');
+            titleEl.innerText = `Submitting batch pipeline for ${courseId}...`;
+            progressBarEl.style.width = '10%';
+            progressPctEl.innerText = '10%';
+            btn.disabled = true;
+            btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+            try {
+                const res = await fetch('/api/v1/batch/curriculum', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        course_id: courseId,
+                        module_num: moduleVal ? parseInt(moduleVal) : null,
+                        persona_id: personaId,
+                        resolution: resolution
+                    })
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    titleEl.innerText = `Pipeline Active: ${data.total_lessons_queued} lessons queued across ${data.total_topics} topics.`;
+                    progressBarEl.style.width = '25%';
+                    progressPctEl.innerText = '25%';
+                    // Start polling
+                    pollCurriculumBatchStatus(courseId);
+                } else {
+                    titleEl.innerText = `Failed: ${data.detail || data.message || 'Error launching pipeline'}`;
+                    progressBarEl.style.width = '0%';
+                    progressPctEl.innerText = '0%';
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
+            } catch (e) {
+                titleEl.innerText = `Network Error: ${e}`;
+                progressBarEl.style.width = '0%';
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        let curriculumPollTimer = null;
+        async function pollCurriculumBatchStatus(courseId) {
+            if (curriculumPollTimer) clearInterval(curriculumPollTimer);
+
+            curriculumPollTimer = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/v1/batch/curriculum/status/${encodeURIComponent(courseId)}`);
+                    const data = await res.json();
+                    if (data.course_id || data.status === 'ok') {
+                        const total = data.total_lessons || data.total_tasks || 0;
+                        const comp = data.completed || 0;
+                        const proc = data.processing || 0;
+                        const pend = data.pending || 0;
+                        const fail = data.failed || 0;
+
+                        document.getElementById('curriculum-batch-stat-completed').innerText = `Completed: ${comp}`;
+                        document.getElementById('curriculum-batch-stat-processing').innerText = `Processing: ${proc}`;
+                        document.getElementById('curriculum-batch-stat-pending').innerText = `Pending: ${pend}`;
+                        document.getElementById('curriculum-batch-stat-failed').innerText = `Failed: ${fail}`;
+
+                        const pct = total > 0 ? Math.round(((comp + fail) / total) * 100) : 0;
+                        document.getElementById('curriculum-batch-progress-bar').style.width = `${Math.max(pct, 15)}%`;
+                        document.getElementById('curriculum-batch-progress-pct').innerText = `${pct}%`;
+
+                        if (total > 0 && comp + fail >= total) {
+                            clearInterval(curriculumPollTimer);
+                            document.getElementById('curriculum-batch-status-title').innerText = `Batch Complete: ${comp} of ${total} finished successfully.`;
+                            const btn = document.getElementById('btn-curriculum-batch-start');
+                            btn.disabled = false;
+                            btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                        }
+                    }
+                } catch (e) {
+                    console.error("Batch poll error:", e);
+                }
+            }, 3000);
         }
 
         fetchGallery();

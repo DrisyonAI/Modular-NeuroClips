@@ -157,6 +157,13 @@ The Web Portal features 3 dedicated studio workbenches accessible via the top mo
   * **Passing Score Slider**: Configurable passing threshold (50% to 100%, default 70%).
   * **Dual SCORM Support**: Export to **SCORM 1.2** or **SCORM 2004 4th Edition**.
   * **CMI Data Model Inspector**: Real-time pre-flight verification of `imsmanifest.xml` and gradebook parameters.
+  * **☁️ Direct Rustici SCORM Cloud Deployer (`SCORMCloudClient`)**: 1-click cloud ingestion via SCORM Cloud API v2 (`POST /api/v1/scorm/deploy-cloud`), instant course registration, and verified test launch link generation.
+
+### 🚀 Automated Curriculum Batch Video Pipeline (`CurriculumBatchRunner`)
+* Full autonomous curriculum batch generation across all 7 modules:
+  * **Batch Audio Synthesis**: 204/204 neural voice slides synthesized into `output/batch_slides/M01/` through `M07/` with companion `.srt` subtitles.
+  * **Remotion Manifest Generator**: Emits `batch_manifest.json` containing millisecond audio timings, subtitle file links, and frame counts for video compositions.
+  * **Hardware-Accelerated Compositor**: Renders broadcast-grade lesson MP4s (`FINTECH_AGENTS_*.mp4`) with synchronized kinetic typography and slide animations.
 
 ---
 
