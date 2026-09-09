@@ -653,7 +653,8 @@ from src.contracts.persona import (
     GenderEnum,
     RegionLocaleEnum,
     get_persona_contract,
-    load_custom_personas
+    load_custom_personas,
+    delete_custom_persona_contract
 )
 from src.contracts.script_contract import ScriptContract, ScriptScene
 from src.agents.voice_director import VoiceDirectorAgent
@@ -674,9 +675,20 @@ async def list_all_personas_api():
             "target_locale": p.target_locale.value if hasattr(p.target_locale, "value") else str(p.target_locale),
             "industry_domain": p.industry_domain,
             "canonical_voice": p.canonical_voice,
-            "elevenlabs_voice_id": p.elevenlabs_voice_id
+            "elevenlabs_voice_id": p.elevenlabs_voice_id,
+            "is_custom": p.demographic_ethnicity == "User Cloned" or pid not in ["maya_fintech", "alex_ai", "elena_compliance", "david_trainer", "rajesh_cloud"]
         })
     return {"status": "ok", "count": len(result), "personas": result}
+
+@app.delete("/api/v1/voice/personas/{persona_id}")
+async def delete_persona_api(persona_id: str):
+    """Deletes a custom cloned voice persona from the library."""
+    if persona_id in ["maya_fintech", "alex_ai", "elena_compliance", "david_trainer", "rajesh_cloud"]:
+        raise HTTPException(status_code=400, detail="Cannot delete certified canonical personas.")
+    deleted = delete_custom_persona_contract(persona_id)
+    if deleted:
+        return {"status": "ok", "message": f"Persona '{persona_id}' deleted successfully."}
+    raise HTTPException(status_code=404, detail="Persona not found in custom library.")
 
 @app.post("/api/v1/voice/clone")
 async def clone_user_voice_api(
@@ -2393,7 +2405,7 @@ async def serve_dashboard():
                         </div>
                         <p class="text-[11px] text-slate-400">Record 15–30s of clean speech via microphone or upload an audio file (.wav, .ogg, .mp3) to register a new permanent persona.</p>
                         
-                        <div class="grid grid-cols-2 gap-3">
+                        <div class="grid grid-cols-3 gap-3">
                             <div>
                                 <label class="block text-[11px] font-semibold text-slate-300 mb-1">Presenter Name</label>
                                 <input id="clone-display-name" type="text" placeholder="e.g. Dr. Srinivas Velaga" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white">
@@ -2408,6 +2420,14 @@ async def serve_dashboard():
                                     <option value="en-GB">en-GB (British)</option>
                                 </select>
                             </div>
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-300 mb-1">Gender</label>
+                                <select id="clone-gender" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white">
+                                    <option value="female" selected>Female</option>
+                                    <option value="male">Male</option>
+                                    <option value="non_binary">Non-Binary</option>
+                                </select>
+                            </div>
                         </div>
 
                         <!-- Recording Controls & File Upload -->
@@ -2418,9 +2438,9 @@ async def serve_dashboard():
                                 </button>
                                 <span class="text-[11px] text-slate-500">or upload:</span>
                                 <label for="clone-file-upload" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold cursor-pointer inline-flex items-center gap-1">
-                                    <span>📁</span> <span>Choose Audio</span>
+                                    <span>📁</span> <span id="clone-file-label">Choose Audio (.mp3, .ogg, .wav)</span>
                                 </label>
-                                <input type="file" id="clone-file-upload" accept="audio/*" class="hidden" onchange="handleAudioSampleSelected(this)">
+                                <input type="file" id="clone-file-upload" accept=".mp3,.ogg,.wav,.m4a,audio/*" class="hidden" onchange="handleAudioSampleSelected(this)">
                             </div>
                             <div id="clone-audio-preview-box" class="hidden pt-1">
                                 <audio id="clone-audio-preview" controls class="w-full h-8"></audio>
@@ -2430,6 +2450,21 @@ async def serve_dashboard():
                         <button onclick="submitVoiceClone()" id="btn-submit-clone" class="w-full py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition-all flex items-center justify-center gap-1.5">
                             <span>✨</span> <span>Clone Voice & Add to Catalog</span>
                         </button>
+
+                        <!-- Saved Cloned Voice Library Grid -->
+                        <div class="pt-3 border-t border-slate-800 space-y-2.5">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                                    <span>📚</span> <span>Saved Cloned Voice Library</span>
+                                </span>
+                                <span id="cloned-voice-count" class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono">0 Clones</span>
+                            </div>
+                            <div id="cloned-voice-library-grid" class="space-y-2 max-h-56 overflow-y-auto pr-1">
+                                <div class="text-[11px] text-slate-500 italic p-3 text-center bg-slate-900/50 rounded-lg border border-slate-800">
+                                    No custom cloned voices yet. Upload an .mp3 or .ogg file above to add one!
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Module B: Universal File-to-Speech Engine -->
@@ -2458,6 +2493,10 @@ async def serve_dashboard():
                                 <input type="checkbox" id="doc-export-scorm-chk" class="rounded accent-emerald-500 cursor-pointer">
                                 <label for="doc-export-scorm-chk" class="text-xs text-slate-300 cursor-pointer">Auto-package as SCORM 1.2 Zip</label>
                             </div>
+                            <button onclick="submitUniversalDocSpeech()" id="btn-doc-speech-run" class="px-5 py-2.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5">
+                                <span>⚡</span> <span>Synthesize Document Audio Master</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -4852,6 +4891,525 @@ async def serve_dashboard():
             });
         }
 
+        /* =========================================================================
+           VOICE LAB, CLONING & CLONED VOICE LIBRARY MANAGEMENT
+           ========================================================================= */
+        let clonedAudioBlob = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+
+        function updateVoiceLabMetrics() {
+            const text = document.getElementById('voice-lab-prompt')?.value || '';
+            const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+            const rate = parseFloat(document.getElementById('voice-lab-rate')?.value) || 1.0;
+            const minutes = (words / (145 * rate)).toFixed(1);
+            const stats = document.getElementById('voice-lab-stats');
+            if (stats) stats.innerText = `${words} words | ~${minutes} min`;
+        }
+
+        function insertVoiceLabTag(tag) {
+            const textarea = document.getElementById('voice-lab-prompt');
+            if (!textarea) return;
+            const start = textarea.selectionStart || textarea.value.length;
+            const end = textarea.selectionEnd || textarea.value.length;
+            const text = textarea.value;
+            textarea.value = text.substring(0, start) + tag + text.substring(end);
+            textarea.focus();
+            textarea.selectionStart = textarea.selectionEnd = start + tag.length;
+            updateVoiceLabMetrics();
+        }
+
+        async function expandPromptToVoiceScript() {
+            const textarea = document.getElementById('voice-lab-prompt');
+            const prompt = textarea?.value.trim();
+            if (!prompt) {
+                alert("Please enter a topic or short outline to expand.");
+                return;
+            }
+            const btn = document.getElementById('voice-lab-expand-btn');
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> <span>Expanding...</span>';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/v1/script/expand', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt, tone: 'instructional_fintech', duration_target_sec: 45 })
+                });
+                const data = await res.json();
+                if (data.status === 'ok' && data.script) {
+                    textarea.value = data.script;
+                    updateVoiceLabMetrics();
+                } else {
+                    alert("Script expansion failed: " + (data.detail || "Unknown error"));
+                }
+            } catch (err) {
+                alert("Script expansion error: " + err);
+            } finally {
+                btn.innerHTML = orig;
+                btn.disabled = false;
+            }
+        }
+
+        async function auditionVoiceLab() {
+            const promptInput = document.getElementById('voice-lab-prompt');
+            const text = promptInput?.value.trim() || "Auditioning high fidelity neural speech synthesis and directorial prosody.";
+            const voice = document.getElementById('voice-lab-voice')?.value || 'en-US-GuyNeural';
+            const rateVal = parseFloat(document.getElementById('voice-lab-rate')?.value) || 1.0;
+            const pitchNum = parseInt(document.getElementById('voice-lab-pitch')?.value) || 0;
+            const pitch = (pitchNum >= 0 ? '+' : '') + pitchNum + 'Hz';
+
+            const btn = document.getElementById('voice-lab-audition-btn');
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> <span>Auditioning...</span>';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/v1/voice/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: text.slice(0, 300),
+                        voice: voice,
+                        speech_rate: rateVal,
+                        pitch: pitch,
+                        volume: "+0%",
+                        format: "mp3"
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.audio_url;
+                    player.play();
+                    document.getElementById('voice-lab-player-badge').innerText = 'Auditioning';
+                } else {
+                    alert("Audition error: " + (data.detail || "Check voice settings"));
+                }
+            } catch (e) {
+                alert("Audition error: " + e);
+            } finally {
+                btn.innerHTML = orig;
+                btn.disabled = false;
+            }
+        }
+
+        async function exportVoiceLabMaster() {
+            const promptInput = document.getElementById('voice-lab-prompt');
+            const text = promptInput?.value.trim();
+            if (!text) {
+                alert("Please enter narration text or script first.");
+                return;
+            }
+            const voice = document.getElementById('voice-lab-voice')?.value || 'en-US-GuyNeural';
+            const rateVal = parseFloat(document.getElementById('voice-lab-rate')?.value) || 1.0;
+            const pitchNum = parseInt(document.getElementById('voice-lab-pitch')?.value) || 0;
+            const pitch = (pitchNum >= 0 ? '+' : '') + pitchNum + 'Hz';
+            const format = document.getElementById('voice-lab-format')?.value || 'mp3';
+
+            const btn = document.getElementById('voice-lab-export-btn');
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> <span>Exporting Master...</span>';
+            btn.disabled = true;
+
+            try {
+                const res = await fetch('/api/v1/voice/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: text,
+                        voice: voice,
+                        speech_rate: rateVal,
+                        pitch: pitch,
+                        volume: "+0%",
+                        format: format
+                    })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.audio_url;
+                    player.play();
+                    document.getElementById('voice-lab-player-badge').innerText = `Master ${data.format.toUpperCase()}`;
+
+                    const dlBox = document.getElementById('voice-lab-download-box');
+                    dlBox.classList.remove('hidden');
+                    const audioDl = document.getElementById('voice-lab-audio-dl');
+                    audioDl.href = data.audio_url;
+                    audioDl.setAttribute('download', data.filename);
+
+                    const srtDl = document.getElementById('voice-lab-srt-dl');
+                    if (data.subtitles_url) {
+                        srtDl.href = data.subtitles_url;
+                        srtDl.classList.remove('hidden');
+                    } else {
+                        srtDl.classList.add('hidden');
+                    }
+
+                    if (data.srt_content) {
+                        document.getElementById('voice-lab-srt-preview').innerText = data.srt_content;
+                    }
+                } else {
+                    alert("Master export failed: " + (data.detail || "Server error"));
+                }
+            } catch (e) {
+                alert("Export error: " + e);
+            } finally {
+                btn.innerHTML = orig;
+                btn.disabled = false;
+            }
+        }
+
+        function onVoiceLabLangChange() {
+            const lang = document.getElementById('voice-lab-lang').value;
+            const voiceSelect = document.getElementById('voice-lab-voice');
+            const langMap = {
+                'en-US': [['en-US-GuyNeural', 'Guy (Male - Deep Professional)'], ['en-US-AriaNeural', 'Aria (Female - Clear Instructional)'], ['en-US-ChristopherNeural', 'Christopher (Male - Authoritative)']],
+                'en-IN': [['en-IN-NeerjaNeural', 'Neerja (Female - Indian FinTech Specialist)'], ['en-IN-PrabhatNeural', 'Prabhat (Male - Indian Senior Architect)']],
+                'te-IN': [['te-IN-MohanNeural', 'Mohan (Male - Telugu Instructional)'], ['te-IN-ShrutiNeural', 'Shruti (Female - Telugu Clear)']],
+                'ta-IN': [['ta-IN-ValluvarNeural', 'Valluvar (Male - Tamil Senior)'], ['ta-IN-PallaviNeural', 'Pallavi (Female - Tamil Presenter)']],
+                'hi-IN': [['hi-IN-MadhurNeural', 'Madhur (Male - Hindi Standard)'], ['hi-IN-SwaraNeural', 'Swara (Female - Hindi Clear)']],
+                'es-ES': [['es-ES-AlvaroNeural', 'Álvaro (Male - Spanish Executive)'], ['es-ES-ElviraNeural', 'Elvira (Female - Spanish Clear)']],
+                'fr-FR': [['fr-FR-HenriNeural', 'Henri (Male - French Standard)'], ['fr-FR-DeniseNeural', 'Denise (Female - French Instructional)']],
+                'de-DE': [['de-DE-ConradNeural', 'Conrad (Male - German Technical)'], ['de-DE-KatjaNeural', 'Katja (Female - German Crisp)']],
+                'ja-JP': [['ja-JP-KeitaNeural', 'Keita (Male - Japanese Standard)'], ['ja-JP-NanamiNeural', 'Nanami (Female - Japanese Instructional)']]
+            };
+
+            const voices = langMap[lang] || langMap['en-US'];
+            voiceSelect.innerHTML = voices.map(v => `<option value="${v[0]}">${v[1]}</option>`).join('');
+            // Also append any custom cloned voices that match this locale or universally
+            fetchVoiceLibrary();
+        }
+
+        /* --- Instant Voice Cloning Handlers --- */
+        function handleAudioSampleSelected(input) {
+            if (input.files && input.files[0]) {
+                const file = input.files[0];
+                clonedAudioBlob = file;
+                const label = document.getElementById('clone-file-label');
+                if (label) label.innerText = file.name;
+                const preview = document.getElementById('clone-audio-preview');
+                const previewBox = document.getElementById('clone-audio-preview-box');
+                preview.src = URL.createObjectURL(file);
+                previewBox.classList.remove('hidden');
+            }
+        }
+
+        async function toggleMicRecording() {
+            const btn = document.getElementById('btn-record-mic');
+            const indicator = document.getElementById('record-indicator');
+            const text = document.getElementById('record-text');
+
+            if (!isRecording) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+
+                    mediaRecorder.ondataavailable = (e) => {
+                        if (e.data.size > 0) audioChunks.push(e.data);
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        clonedAudioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                        const preview = document.getElementById('clone-audio-preview');
+                        const previewBox = document.getElementById('clone-audio-preview-box');
+                        preview.src = URL.createObjectURL(clonedAudioBlob);
+                        previewBox.classList.remove('hidden');
+                        const label = document.getElementById('clone-file-label');
+                        if (label) label.innerText = 'Microphone Recording';
+                    };
+
+                    mediaRecorder.start();
+                    isRecording = true;
+                    btn.classList.replace('bg-red-600/80', 'bg-red-700');
+                    btn.classList.add('animate-pulse');
+                    indicator.innerText = '⏹️';
+                    text.innerText = 'Stop Recording';
+                } catch (e) {
+                    alert("Microphone access denied or not supported: " + e);
+                }
+            } else {
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                    mediaRecorder.stop();
+                    mediaRecorder.stream.getTracks().forEach(t => t.stop());
+                }
+                isRecording = false;
+                btn.classList.replace('bg-red-700', 'bg-red-600/80');
+                btn.classList.remove('animate-pulse');
+                indicator.innerText = '🔴';
+                text.innerText = 'Record from Mic';
+            }
+        }
+
+        async function submitVoiceClone() {
+            const displayName = document.getElementById('clone-display-name')?.value.trim();
+            if (!displayName) {
+                alert("Please enter a Presenter Name (e.g. 'Dr. Srinivas Velaga').");
+                return;
+            }
+            if (!clonedAudioBlob) {
+                alert("Please record audio via mic or upload an audio file (.mp3, .ogg, .wav).");
+                return;
+            }
+
+            const locale = document.getElementById('clone-locale')?.value || 'en-IN';
+            const gender = document.getElementById('clone-gender')?.value || 'female';
+            const btn = document.getElementById('btn-submit-clone');
+            const origHtml = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> <span>Cloning & Normalizing Audio Sample...</span>';
+            btn.disabled = true;
+
+            const formData = new FormData();
+            formData.append('display_name', displayName);
+            formData.append('locale', locale);
+            formData.append('gender', gender);
+            formData.append('sample_file', clonedAudioBlob, clonedAudioBlob.name || 'sample.wav');
+
+            try {
+                const res = await fetch('/api/v1/voice/clone', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    alert(`🎉 Voice Cloned Successfully!\nRegistered persona: ${data.persona.display_name} (${data.persona.locale})\nAdded to catalog as '${data.persona.persona_id}'.`);
+                    document.getElementById('clone-display-name').value = '';
+                    clonedAudioBlob = null;
+                    document.getElementById('clone-audio-preview-box').classList.add('hidden');
+                    const label = document.getElementById('clone-file-label');
+                    if (label) label.innerText = 'Choose Audio (.mp3, .ogg, .wav)';
+                    await fetchVoiceLibrary();
+                } else {
+                    alert("Voice cloning failed: " + (data.detail || data.message || "Unknown error"));
+                }
+            } catch (e) {
+                alert("Voice cloning error: " + e);
+            } finally {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+            }
+        }
+
+        /* --- Saved Voice Library & Cross-Studio Dropdown Synchronization --- */
+        async function fetchVoiceLibrary() {
+            try {
+                const res = await fetch('/api/v1/voice/personas');
+                const data = await res.json();
+                const personas = data.personas || [];
+
+                const customPersonas = personas.filter(p => p.is_custom === true);
+                const grid = document.getElementById('cloned-voice-library-grid');
+                const countBadge = document.getElementById('cloned-voice-count');
+                if (countBadge) countBadge.innerText = `${customPersonas.length} Clone${customPersonas.length === 1 ? '' : 's'}`;
+
+                if (grid) {
+                    if (customPersonas.length === 0) {
+                        grid.innerHTML = `<div class="text-[11px] text-slate-500 italic p-3 text-center bg-slate-900/50 rounded-lg border border-slate-800">
+                            No custom cloned voices yet. Upload an .mp3 or .ogg file above to add one!
+                        </div>`;
+                    } else {
+                        grid.innerHTML = customPersonas.map(p => `
+                            <div class="p-3 rounded-xl bg-slate-950/90 border border-indigo-500/30 space-y-2 text-xs">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <span class="text-sm">⭐</span>
+                                        <span class="font-bold text-white">${p.display_name}</span>
+                                        <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono">${p.locale} &bull; ${p.gender}</span>
+                                    </div>
+                                    <button onclick="deleteCustomVoice('${p.persona_id}', '${p.display_name}')" class="text-red-400 hover:text-red-300 text-[11px] transition-all" title="Delete voice">🗑️ Delete</button>
+                                </div>
+                                ${p.reference_sample_url ? `
+                                <div class="flex items-center gap-2 pt-1">
+                                    <span class="text-[10px] text-slate-400">Audition sample:</span>
+                                    <audio src="${p.reference_sample_url}" controls class="h-6 flex-1"></audio>
+                                </div>` : ''}
+                                <div class="flex items-center gap-2 pt-1 border-t border-slate-800/80">
+                                    <button onclick="useClonedVoice('${p.persona_id}', '${p.display_name}', 'voice_lab')" class="px-2.5 py-1 rounded bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold transition-all">
+                                        🎙️ Use in Voice Lab
+                                    </button>
+                                    <button onclick="useClonedVoice('${p.persona_id}', '${p.display_name}', 'video_studio')" class="px-2.5 py-1 rounded bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/30 text-[11px] font-bold transition-all">
+                                        🎬 Use in Video Studio
+                                    </button>
+                                </div>
+                            </div>
+                        `).join('');
+                    }
+                }
+
+                // Synchronize custom voices into all studio select dropdowns
+                populateAllVoiceDropdowns(personas);
+            } catch (err) {
+                console.error("Failed to fetch voice library:", err);
+            }
+        }
+
+        function populateAllVoiceDropdowns(personas) {
+            const customList = personas.filter(p => p.is_custom === true);
+            if (customList.length === 0) return;
+
+            // Target dropdowns
+            const dropdowns = [
+                { id: 'voice-lab-voice', prefix: '⭐ ' },
+                { id: 'voice-select', prefix: '⭐ ' },
+                { id: 'avatar-persona-select', prefix: '⭐ ' },
+                { id: 'batch-slide-persona', prefix: '⭐ ' },
+                { id: 'curriculum-batch-persona', prefix: '⭐ ' }
+            ];
+
+            dropdowns.forEach(({ id, prefix }) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+
+                // Remove existing custom options to prevent duplicates
+                const existingCustom = el.querySelectorAll('option[data-custom="true"]');
+                existingCustom.forEach(opt => opt.remove());
+
+                // Append custom cloned personas
+                customList.forEach(p => {
+                    const opt = document.createElement('option');
+                    // For voice-select and voice-lab-voice we can use edge_voice or persona_id
+                    opt.value = (id === 'voice-select' || id === 'voice-lab-voice') ? (p.edge_voice || p.persona_id) : p.persona_id;
+                    opt.textContent = `${prefix}${p.display_name} (${p.locale} Cloned)`;
+                    opt.setAttribute('data-custom', 'true');
+                    el.appendChild(opt);
+                });
+            });
+        }
+
+        function useClonedVoice(personaId, displayName, targetMode) {
+            if (targetMode === 'voice_lab') {
+                switchStudioMode('voice');
+                const labVoice = document.getElementById('voice-lab-voice');
+                if (labVoice) {
+                    for (let i = 0; i < labVoice.options.length; i++) {
+                        if (labVoice.options[i].value === personaId || labVoice.options[i].text.includes(displayName)) {
+                            labVoice.selectedIndex = i;
+                            break;
+                        }
+                    }
+                }
+                alert(`Selected '${displayName}' in Voice Director Studio.`);
+            } else if (targetMode === 'video_studio') {
+                switchStudioMode('video');
+                const voiceSelect = document.getElementById('voice-select');
+                const avatarSelect = document.getElementById('avatar-persona-select');
+                if (voiceSelect) {
+                    for (let i = 0; i < voiceSelect.options.length; i++) {
+                        if (voiceSelect.options[i].value === personaId || voiceSelect.options[i].text.includes(displayName)) {
+                            voiceSelect.selectedIndex = i;
+                            break;
+                        }
+                    }
+                }
+                if (avatarSelect) {
+                    for (let i = 0; i < avatarSelect.options.length; i++) {
+                        if (avatarSelect.options[i].value === personaId || avatarSelect.options[i].text.includes(displayName)) {
+                            avatarSelect.selectedIndex = i;
+                            break;
+                        }
+                    }
+                }
+                alert(`Selected '${displayName}' for AI Video Narration and Avatar.`);
+            }
+        }
+
+        async function deleteCustomVoice(personaId, displayName) {
+            if (!confirm(`Are you sure you want to delete the cloned voice '${displayName}' (${personaId}) from your library?`)) return;
+            try {
+                const res = await fetch(`/api/v1/voice/personas/${encodeURIComponent(personaId)}`, {
+                    method: 'DELETE'
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    alert(`Deleted cloned voice '${displayName}'.`);
+                    await fetchVoiceLibrary();
+                } else {
+                    alert("Delete failed: " + (data.detail || data.message || "Unknown error"));
+                }
+            } catch (e) {
+                alert("Delete request failed: " + e);
+            }
+        }
+
+        /* --- Universal Document Speech Ingestion --- */
+        let selectedDocSpeechFile = null;
+        function handleDocFileSelected(input) {
+            if (input.files && input.files[0]) {
+                selectedDocSpeechFile = input.files[0];
+                const nameEl = document.getElementById('selected-doc-name');
+                if (nameEl) nameEl.innerText = `📄 ${selectedDocSpeechFile.name} (${(selectedDocSpeechFile.size / 1024).toFixed(1)} KB)`;
+            }
+        }
+
+        async function submitUniversalDocSpeech() {
+            if (!selectedDocSpeechFile) {
+                alert("Please select a document file (.txt, .md, .docx, .pdf) first.");
+                return;
+            }
+
+            const btn = document.getElementById('btn-doc-speech-run');
+            const origHtml = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> <span>Ingesting Document & Synthesizing Audio Master...</span>';
+            btn.disabled = true;
+
+            const voice = document.getElementById('voice-lab-voice')?.value || 'en-US-GuyNeural';
+            const rateVal = parseFloat(document.getElementById('voice-lab-rate')?.value) || 1.0;
+            const pitchNum = parseInt(document.getElementById('voice-lab-pitch')?.value) || 0;
+            const pitch = (pitchNum >= 0 ? '+' : '') + pitchNum + 'Hz';
+            const format = document.getElementById('voice-lab-format')?.value || 'mp3';
+            const packageScorm = document.getElementById('doc-export-scorm-chk')?.checked || false;
+
+            const formData = new FormData();
+            formData.append('file', selectedDocSpeechFile);
+            formData.append('voice', voice);
+            formData.append('speech_rate', rateVal);
+            formData.append('pitch', pitch);
+            formData.append('format', format);
+            formData.append('package_scorm', packageScorm);
+
+            try {
+                const res = await fetch('/api/v1/voice/document-to-speech', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.audio_url;
+                    player.play();
+                    document.getElementById('voice-lab-player-badge').innerText = `Doc Master (${data.scenes_count || 1} scenes)`;
+
+                    const dlBox = document.getElementById('voice-lab-download-box');
+                    dlBox.classList.remove('hidden');
+                    const audioDl = document.getElementById('voice-lab-audio-dl');
+                    audioDl.href = data.audio_url;
+                    audioDl.setAttribute('download', data.filename);
+
+                    if (data.subtitles_url) {
+                        const srtDl = document.getElementById('voice-lab-srt-dl');
+                        srtDl.href = data.subtitles_url;
+                        srtDl.classList.remove('hidden');
+                    }
+
+                    if (data.srt_content) {
+                        document.getElementById('voice-lab-srt-preview').innerText = data.srt_content;
+                    }
+
+                    alert(`✅ Document audio synthesis complete!\nGenerated: ${data.filename} (${data.size_mb} MB)`);
+                } else {
+                    alert("Document synthesis failed: " + (data.detail || data.message || "Unknown error"));
+                }
+            } catch (e) {
+                alert("Document synthesis error: " + e);
+            } finally {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+            }
+        }
+
         const evtSource = new EventSource('/api/v1/telemetry/stream');
         evtSource.onmessage = function(e) {
             const data = JSON.parse(e.data);
@@ -5069,6 +5627,7 @@ async def serve_dashboard():
         fetchGallery();
         fetchIdentities();
         fetchVideoAssets();
+        fetchVoiceLibrary();
         updateScriptMetrics();
     </script>
 </body>

@@ -164,6 +164,22 @@ def register_custom_persona_contract(persona: PersonaIdentityContract) -> None:
     CUSTOM_PERSONAS_FILE.write_text(json.dumps(current_data, indent=2), encoding="utf-8")
 
 
+def delete_custom_persona_contract(persona_id: str) -> bool:
+    """Removes a custom persona from the catalog and custom_personas.json."""
+    if persona_id in PERSONA_CATALOG:
+        del PERSONA_CATALOG[persona_id]
+    if CUSTOM_PERSONAS_FILE.exists():
+        try:
+            current_data = json.loads(CUSTOM_PERSONAS_FILE.read_text(encoding="utf-8"))
+            if persona_id in current_data:
+                del current_data[persona_id]
+                CUSTOM_PERSONAS_FILE.write_text(json.dumps(current_data, indent=2), encoding="utf-8")
+                return True
+        except Exception as e:
+            print(f"[Persona Warning] Error deleting custom persona {persona_id}: {e}")
+    return False
+
+
 # Initial load of any existing custom personas on module import
 load_custom_personas()
 
