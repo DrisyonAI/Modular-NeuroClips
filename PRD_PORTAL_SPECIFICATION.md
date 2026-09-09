@@ -536,8 +536,9 @@ Modular-NeuroClips/
 
 | Requirement ID | Strategic Intent | Business Metric / Outcome | Target User | Priority |
 | :--- | :--- | :--- | :--- | :---: |
-| **BRD-VOICE-01** | **User Voice Cloning & Asset Ownership** | Enables trainers, SME executives, and professors to clone their real voice from a 15-30s audio recording and save it as an immutable persona asset. Eliminates generic, synthetic-sounding narrators. | Enterprise L&D, Solo Founders, Corporate Trainers | P0 |
+| **BRD-VOICE-01** | **User Voice Cloning & Asset Ownership** | Enables trainers, SME executives, and professors to clone their real voice from a 15-30s audio recording (.mp3, .ogg, .wav) and save it as an immutable persona asset. Eliminates generic, synthetic-sounding narrators. | Enterprise L&D, Solo Founders, Corporate Trainers | P0 |
 | **BRD-VOICE-02** | **Zero Marginal Cost Local Cloning Option** | Provide a hybrid approach: Premium cloud voice cloning (ElevenLabs Instant Voice Clone) alongside local reference-based zero-cost cloning (Kokoro / XTTS), preventing API cost blowouts. | Budget-conscious course creators, Higher Ed | P0 |
+| **BRD-VOICE-03** | **Persistent Voice Library & Cross-Studio Reuse** | Provide a centralized, cataloged Cloned Voice Library enabling immediate in-browser auditioning, sample management, deletion, and 1-click cross-studio reuse across Voice Director, Main Video Studio, Batch Slide Generation, and Curriculum Batch Pipelines. | Instructional Ops, Course Directors, Solo Founders | P0 |
 | **BRD-DOC-01** | **Universal Document-to-Audio Ingestion** | Ingest raw educational materials (`.txt`, `.md`, `.docx`, `.pdf`) and automatically decompose them into pedagogical narration scenes aligned to any selected voice (cloned or pre-baked). | Curriculum Designers, Content Teams | P0 |
 | **BRD-DOC-02** | **SCORM 1.2 / 2004 Audio Package Assembly** | Turn any uploaded book chapter or lecture document into a fully packaged, interactive SCORM module with synchronized subtitles and knowledge checks in under 60 seconds. | Enterprise LMS Administrators | P1 |
 | **BRD-BATCH-01** | **Automated Curriculum Batch Video & Audio Pipeline** | Ingest full multi-module curriculum definitions and automatically synthesize neural speech, timing manifests, synchronous subtitles (.srt), and high-resolution Remotion/FFmpeg composite videos across all lessons unattended. | Course Directors, Instructional Ops | P0 |
@@ -551,9 +552,9 @@ Modular-NeuroClips/
 
 ```mermaid
 flowchart TD
-    %% Workflow 1: Voice Cloning
-    subgraph WF1["Workflow 1: User Voice Ingestion & Library Registration"]
-        A1[Creator Records Mic or Uploads Audio .wav, .ogg, .mp3] --> A2[Audio Normalization Gate: 44.1kHz Mono WAV]
+    %% Workflow 1: Voice Cloning & Library
+    subgraph WF1["Workflow 1: User Voice Ingestion, Library Registration & Cross-Studio Reuse"]
+        A1[Creator Records Mic or Uploads Audio .mp3, .ogg, .wav, .m4a] --> A2[Audio Normalization Gate: 44.1kHz Mono WAV]
         A2 --> A3{Duration & SNR Check: 5s to 600s}
         A3 -->|Fail| A_Err[Reject with Duration/Noise Error]
         A3 -->|Pass| A4{Cloud Key Available?}
@@ -562,7 +563,8 @@ flowchart TD
         A5 --> A7[Persist Metadata to custom_personas.json]
         A6 --> A7
         A7 --> A8[Inject into PERSONA_CATALOG]
-        A8 --> A9([⭐ Custom Voice Available in All Dropdowns])
+        A8 --> A9[📚 Saved Cloned Voice Library Grid in Voice Director]
+        A9 --> A10([🎙️ Use in Voice Lab / 🎬 Use in Video Studio / ⚡ Batch Pipelines])
     end
 
     %% Workflow 2: Document-to-Speech & SCORM
@@ -591,55 +593,50 @@ sequenceDiagram
     participant UI as 🖥️ Voice Director Studio UI
     participant API as ⚡ FastAPI Control Plane
     participant Cloner as 🎙️ VoiceCloner Engine
-    participant Parser as 📄 DocumentParser
-    participant Lexicon as 📚 LexiconEngine
-    participant VoiceAgent as 👑 VoiceDirectorAgent
-    participant SCORM as 📦 SCORMPackager
+    participant Catalog as 🗃️ Persona Catalog
+    participant Studio as 🎬 Main Video & Batch Studios
 
-    %% Voice Cloning Cycle
-    Note over Creator,Cloner: Cycle 1: Custom Voice Cloning
-    Creator->>UI: Record 15-30s audio / upload sample
+    %% Voice Cloning & Library Cycle
+    Note over Creator,Cloner: Cycle 1: Voice Ingestion, Library Registration & Reuse
+    Creator->>UI: Upload .mp3 / .ogg / .wav audio sample (or live mic)
     UI->>API: POST /api/v1/voice/clone
     API->>Cloner: normalize_sample_audio()
     Cloner->>Cloner: FFmpeg highpass filter & 44.1kHz mono conversion
     Cloner->>Cloner: clone_voice_elevenlabs() / local profile
-    Cloner->>Cloner: register_custom_persona_contract()
-    Cloner-->>API: Return PersonaIdentityContract
-    API-->>UI: Persona registered & selectable in UI
-
-    %% Document Speech Cycle
-    Note over Creator,SCORM: Cycle 2: Universal Document-to-Speech & SCORM
-    Creator->>UI: Drop document (.txt/.md/.docx/.pdf) + select Voice
-    UI->>API: POST /api/v1/voice/synthesize-file (export_scorm=true)
-    API->>Parser: parse_file(temp_doc)
-    Parser->>Parser: extract_text() & slice_into_scenes()
-    Parser-->>API: DocumentParseResult (Scenes 1..N)
-    API->>Lexicon: apply_lexicon(narration)
-    Lexicon-->>API: Phonetically corrected text
-    API->>VoiceAgent: synthesize_voice_contract()
-    VoiceAgent->>VoiceAgent: SSML compilation & TTS synthesis
-    VoiceAgent->>VoiceAgent: EBU R128 -14 LUFS normalization
-    VoiceAgent->>VoiceAgent: generate_srt_subtitles()
-    VoiceAgent-->>API: VoiceContract (Master MP3 + .srt)
-    API->>SCORM: export_zip(manifest, HTML5 player, audio, srt)
-    SCORM-->>API: SCORM_DOC_SPEECH.zip
-    API-->>UI: Stream Master Audio + Download Links (.mp3, .srt, .zip)
-    UI-->>Creator: Audio playback active & SCORM course package ready
+    Cloner->>Catalog: register_custom_persona_contract()
+    Catalog-->>API: Persisted in custom_personas.json
+    API-->>UI: Return PersonaIdentityContract (is_custom=true)
+    UI->>UI: Render in Saved Cloned Voice Library with audition player
+    UI->>Studio: Dynamically inject ⭐ Persona into all Studio dropdowns
+    Creator->>UI: 1-Click "Use in Video Studio" / "Use in Voice Lab"
+    UI->>Studio: Configure voice, speed, pitch, and avatar layout
 ```
 
-#### 7.2.3 Module 1: User Voice Recording & Library Registration (`VoiceCloner`)
+#### 7.2.3 Module 1: User Voice Recording, Library & Cross-Studio Reuse (`VoiceCloner`)
 
-- **FRD-VC-01 (Audio Ingestion)**:
-  - System shall support in-browser microphone recording (`MediaRecorder` API, 16kHz/44.1kHz WAV/WebM/OGG) and file upload (`.wav`, `.mp3`, `.ogg`, `.m4a`).
+- **FRD-VC-01 (Multi-Format Audio Ingestion)**:
+  - System shall support in-browser microphone recording (`MediaRecorder` API) and audio file upload (`.mp3`, `.ogg`, `.wav`, `.m4a`).
   - System shall validate that audio length is between 5 seconds and 600 seconds and minimum size > 50KB.
+  - System shall provide explicit UI file-selection indicators and live in-browser audition previews.
 - **FRD-VC-02 (Storage & Normalization)**:
-  - System shall save raw sample to `assets_library/voices/<clean_name>_<timestamp>.<ext>`.
-  - System shall use FFmpeg to normalize the sample to 44.1kHz mono WAV with highpass filtering (`highpass=f=80,lowpass=f=12000`).
-- **FRD-VC-03 (Provider Binding)**:
+  - System shall save raw sample to `assets/voices/<clean_name>_<timestamp>.<ext>`.
+  - System shall use FFmpeg to normalize the sample to 44.1kHz mono WAV with band-pass filtering (`highpass=f=80,lowpass=f=12000,aresample=44100`).
+- **FRD-VC-03 (Provider Binding & Gender Classification)**:
+  - System shall capture presenter gender (`female`, `male`, `non_binary`) and regional locale (`en-IN`, `te-IN`, `hi-IN`, `en-US`, `en-GB`).
   - **Cloud Path (ElevenLabs)**: System shall call `POST https://api.elevenlabs.io/v1/voices/add` passing `name`, `description`, and `files=[sample_path]`. Stores returned `voice_id`.
-  - **Local Path (Reference Speaker Profiles)**: System shall compute voice speaker conditioning profile and save it in `assets_library/voices/`.
-- **FRD-VC-04 (Dynamic Persona Catalog Registry)**:
-  - System shall persist the new voice into `src/contracts/custom_personas.json` and dynamically inject it into `PERSONA_CATALOG` (`PersonaIdentityContract`), making it instantly selectable across all Studio and SCORM tabs.
+  - **Local Path (Reference Speaker Profiles)**: System shall compute voice speaker conditioning profile and save it in `assets/voices/`.
+- **FRD-VC-04 (Dynamic Persona Catalog Registry & Lifecycle)**:
+  - System shall persist the new voice into `src/contracts/custom_personas.json` and dynamically inject it into `PERSONA_CATALOG` (`PersonaIdentityContract`).
+  - System shall provide a `DELETE /api/v1/voice/personas/{persona_id}` endpoint to safely prune custom personas while protecting canonical identities.
+- **FRD-VC-05 (Saved Cloned Voice Library UI)**:
+  - System shall render a dedicated **Saved Cloned Voice Library** grid in the Voice Director tab showing:
+    - Display Name, Gender badge, Locale tag.
+    - Inline audio audition player for reference samples.
+    - Delete button with confirmation modal.
+- **FRD-VC-06 (1-Click Cross-Studio Reuse)**:
+  - `🎙️ Use in Voice Lab`: Automatically populates `#voice-lab-voice` and switches to the Voice Director tab.
+  - `🎬 Use in Video Studio`: Automatically switches to Multi-Agent Video Studio, selecting the custom voice in `#voice-select` and assigning matching avatar persona in `#avatar-persona-select`.
+  - System shall synchronize all custom cloned voices into `#batch-slide-persona` and `#curriculum-batch-persona` for batch automation.
 
 #### 7.2.4 Module 2: Universal File-to-Speech Ingestion (`DocumentVoiceEngine`)
 
