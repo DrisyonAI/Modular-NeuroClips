@@ -130,11 +130,13 @@ The Web Portal features 3 dedicated studio workbenches accessible via the top mo
 
 ### 🎙️ Voice Director Studio & Audio Master Exporter
 * Dedicated audio synthesis laboratory supporting:
-  * **Custom Voice Recording & Cloning (`VoiceCloner`)**:
-    * In-browser live microphone recording (`MediaRecorder` API) or audio file upload (`.wav`, `.ogg`, `.mp3`, `.m4a`).
-    * FFmpeg conditioning to 44.1kHz mono WAV with high-pass noise filtering.
+  * **Custom Voice Recording, Cloning & Saved Library (`VoiceCloner`)**:
+    * In-browser live microphone recording (`MediaRecorder` API) or audio file upload (`.mp3`, `.ogg`, `.wav`, `.m4a`).
+    * FFmpeg conditioning to 44.1kHz mono WAV with band-pass noise filtering (`80Hz`–`12kHz`).
     * Cloud cloning via ElevenLabs Instant Voice Clone API (`/v1/voices/add`) with local reference speaker fallback.
-    * Dynamic persona persistence into `src/contracts/custom_personas.json` and immediate registration in `PERSONA_CATALOG`.
+    * Dynamic persona persistence into `src/contracts/custom_personas.json` and immediate catalog registration in `PERSONA_CATALOG`.
+    * **📚 Saved Cloned Voice Library Manager**: In-browser card deck with inline audition audio player, metadata badges, and secure deletion.
+    * **1-Click Cross-Studio Reuse**: Direct injection into Voice Director (`#voice-lab-voice`), Video Studio (`#voice-select` / `#avatar-persona-select`), Batch Slide Studio (`#batch-slide-persona`), and Curriculum Batch Video Pipeline (`#curriculum-batch-persona`).
   * **Universal Document-to-Speech Engine (`DocumentParser`)**:
     * Multi-format ingestion: `.txt`, `.md`, `.docx`, and `.pdf` files up to 25MB.
     * Automatic decomposition into bounded pedagogical scenes (40–80 words / 20–40s per scene).
@@ -226,9 +228,10 @@ sequenceDiagram
 * `POST /api/v1/voice/expand-prompt`: Expands raw prompts into complete spoken scripts with directorial cues using `ScriptwriterAgent`.
 
 ### Voice Director & Document Speech Endpoints
-* `POST /api/v1/voice/clone`: Uploads/records audio sample, normalizes via FFmpeg, clones voice (ElevenLabs or local reference), and registers a custom persona.
+* `POST /api/v1/voice/clone`: Uploads/records audio sample (.mp3, .ogg, .wav), normalizes via FFmpeg, clones voice (ElevenLabs or local reference), and registers a custom persona.
 * `POST /api/v1/voice/synthesize-file`: Ingests `.txt`, `.md`, `.docx`, or `.pdf`, decomposes into scenes, applies pronunciation lexicon & SSML, and generates master audio, subtitles, and optional SCORM package.
-* `GET /api/v1/voice/personas`: Returns all active canonical and user-cloned personas.
+* `GET /api/v1/voice/personas`: Returns all active canonical and user-cloned personas with `is_custom` indicator.
+* `DELETE /api/v1/voice/personas/{persona_id}`: Deletes a custom cloned voice persona from the library and persists deletion.
 * `POST /api/v1/preview-voice`: Instant neural voice audition.
 * `POST /api/v1/voice/export`: Synthesizes and converts master audio to **MP3, WAV, M4A, OGG, FLAC** with synchronous `.srt` subtitles.
 
