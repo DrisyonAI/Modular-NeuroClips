@@ -668,14 +668,18 @@ async def list_all_personas_api():
     load_custom_personas()
     result = []
     for pid, p in PERSONA_CATALOG.items():
+        loc_str = p.target_locale.value if hasattr(p.target_locale, "value") else str(p.target_locale)
+        gen_str = p.gender.value if hasattr(p.gender, "value") else str(p.gender)
         result.append({
             "persona_id": p.persona_id,
             "display_name": p.display_name,
-            "gender": p.gender.value if hasattr(p.gender, "value") else str(p.gender),
-            "target_locale": p.target_locale.value if hasattr(p.target_locale, "value") else str(p.target_locale),
+            "gender": gen_str,
+            "target_locale": loc_str,
+            "locale": loc_str,
             "industry_domain": p.industry_domain,
             "canonical_voice": p.canonical_voice,
             "elevenlabs_voice_id": p.elevenlabs_voice_id,
+            "reference_sample_url": f"/static_assets/voices/{p.persona_id}_sample.wav" if (ASSETS_DIR / "voices" / f"{p.persona_id}_sample.wav").exists() else None,
             "is_custom": p.demographic_ethnicity == "User Cloned" or pid not in ["maya_fintech", "alex_ai", "elena_compliance", "david_trainer", "rajesh_cloud"]
         })
     return {"status": "ok", "count": len(result), "personas": result}
@@ -692,22 +696,30 @@ async def delete_persona_api(persona_id: str):
 
 @app.post("/api/v1/voice/clone")
 async def clone_user_voice_api(
-    audio_file: UploadFile = File(...),
+    audio_file: Optional[UploadFile] = File(None),
+    sample_file: Optional[UploadFile] = File(None),
     display_name: str = Form(...),
     gender: str = Form("female"),
-    target_locale: str = Form("en-IN"),
+    target_locale: Optional[str] = Form(None),
+    locale: Optional[str] = Form(None),
     elevenlabs_api_key: Optional[str] = Form(None)
 ):
     """
-    Ingests in-browser recorded audio or audio file upload, normalizes via FFmpeg,
+    Ingests in-browser recorded audio or audio file upload (.mp3, .ogg, .wav), normalizes via FFmpeg,
     registers voice with ElevenLabs or local profile, and creates an immutable custom persona.
     """
+    upload = audio_file or sample_file
+    if not upload:
+        raise HTTPException(status_code=400, detail="No audio sample file provided.")
+
+    loc_val = target_locale or locale or "en-IN"
+
     temp_dir = OUTPUT_DIR / "temp_voice_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_raw = temp_dir / f"raw_{uuid.uuid4().hex}_{audio_file.filename}"
+    temp_raw = temp_dir / f"raw_{uuid.uuid4().hex}_{upload.filename}"
 
     try:
-        content = await audio_file.read()
+        content = await upload.read()
         temp_raw.write_bytes(content)
 
         gender_enum = GenderEnum.FEMALE if gender.lower() == "female" else (
@@ -715,7 +727,7 @@ async def clone_user_voice_api(
         )
         locale_enum = RegionLocaleEnum.EN_IN
         for loc in RegionLocaleEnum:
-            if loc.value == target_locale:
+            if loc.value == loc_val:
                 locale_enum = loc
                 break
 
@@ -728,15 +740,17 @@ async def clone_user_voice_api(
         )
 
         return {
-            "status": "success",
+            "status": "ok",
             "message": f"Voice cloned and persona '{persona.display_name}' registered successfully.",
             "persona": {
                 "persona_id": persona.persona_id,
                 "display_name": persona.display_name,
                 "gender": persona.gender.value,
                 "target_locale": persona.target_locale.value,
+                "locale": persona.target_locale.value,
                 "canonical_voice": persona.canonical_voice,
-                "elevenlabs_voice_id": persona.elevenlabs_voice_id
+                "elevenlabs_voice_id": persona.elevenlabs_voice_id,
+                "is_custom": True
             }
         }
     except Exception as e:
@@ -749,12 +763,16 @@ async def clone_user_voice_api(
                 pass
 
 @app.post("/api/v1/voice/synthesize-file")
+@app.post("/api/v1/voice/document-to-speech")
 async def synthesize_document_speech_api(
-    document_file: UploadFile = File(...),
-    persona_id: str = Form("maya_fintech"),
+    document_file: Optional[UploadFile] = File(None),
+    file: Optional[UploadFile] = File(None),
+    persona_id: Optional[str] = Form(None),
+    voice: Optional[str] = Form(None),
     speech_rate: float = Form(1.0),
     pitch: str = Form("+0Hz"),
-    export_scorm: bool = Form(False),
+    export_scorm: Optional[bool] = Form(None),
+    package_scorm: Optional[bool] = Form(None),
     elevenlabs_api_key: Optional[str] = Form(None)
 ):
     """
@@ -762,12 +780,19 @@ async def synthesize_document_speech_api(
     applies FinTech pronunciation lexicon and SSML, and synthesizes master audio + SRT subtitles.
     Optionally packages as an ADL SCORM 1.2 e-learning zip.
     """
+    doc_upload = document_file or file
+    if not doc_upload:
+        raise HTTPException(status_code=400, detail="No document file provided.")
+
+    pid = persona_id or voice or "maya_fintech"
+    do_scorm = True if (export_scorm or package_scorm) else False
+
     temp_dir = OUTPUT_DIR / "temp_doc_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_doc = temp_dir / f"doc_{uuid.uuid4().hex}_{document_file.filename}"
+    temp_doc = temp_dir / f"doc_{uuid.uuid4().hex}_{doc_upload.filename}"
 
     try:
-        content = await document_file.read()
+        content = await doc_upload.read()
         temp_doc.write_bytes(content)
 
         # 1. Parse document into pedagogical scenes
@@ -790,7 +815,7 @@ async def synthesize_document_speech_api(
 
         script_contract = ScriptContract(
             course_title=parse_result.document_title,
-            persona_id=persona_id,
+            persona_id=pid,
             target_locale=RegionLocaleEnum.EN_IN,
             art_style_preset="Photorealistic 8K",
             total_word_count=parse_result.total_words,
@@ -799,7 +824,7 @@ async def synthesize_document_speech_api(
         )
 
         # 3. Resolve Persona & Synthesize
-        persona = get_persona_contract(persona_id)
+        persona = get_persona_contract(pid)
         voice_director = VoiceDirectorAgent(output_dir=OUTPUT_DIR)
 
         engine_to_use = "elevenlabs" if elevenlabs_api_key and elevenlabs_api_key.strip() else "edge_tts"
@@ -817,12 +842,12 @@ async def synthesize_document_speech_api(
         srt_filename = Path(voice_contract.subtitles_srt_path).name if voice_contract.subtitles_srt_path else None
 
         scorm_url = None
-        if export_scorm:
+        if do_scorm:
             # Package directly into SCORM 1.2 zip
             packager = SCORMPackager(
                 course_id=f"DOC_{uuid.uuid4().hex[:6].upper()}",
                 course_title=parse_result.document_title,
-                course_description=f"Generated from {document_file.filename} with voice {persona.display_name}",
+                course_description=f"Generated from {doc_upload.filename} with voice {persona.display_name}",
                 version="1.2"
             )
             packager.add_module(1, "Main Lecture", "Decomposed audio narration")
@@ -830,13 +855,13 @@ async def synthesize_document_speech_api(
                 packager.add_lesson(
                     module_id=1,
                     lesson_id=sc.scene_id,
-                    lesson_title=sc.visual_prompt[:40],
+                    lesson_title=sc.visual_description[:40],
                     topic="Document Audio",
                     description=sc.narration[:100],
                     video_path=voice_contract.master_audio_path,
                     audio_path=voice_contract.master_audio_path,
                     srt_path=voice_contract.subtitles_srt_path,
-                    runtime_seconds=float(sc.duration_seconds)
+                    runtime_seconds=float(sc.estimated_duration_sec)
                 )
             out_zip = packager.export_zip()
             scorm_url = f"/static_exports/{out_zip.name}"
