@@ -12,6 +12,7 @@ from src.config import BASE_DIR, OUTPUT_DIR, CURRICULUM_OUTPUT_DIR, EXPORTS_DIR
 from src.orchestrator import ScriptOrchestrator, VideoScript, VideoScene
 from src.pipeline import MediaGenerationEngine, VRAMGuard
 from src.compiler import compile_final_video, generate_srt_subtitles
+from src.scorm_packager import SCORMPackager
 
 COURSES_DIR = BASE_DIR / "courses"
 COURSES_DIR.mkdir(parents=True, exist_ok=True)
@@ -143,38 +144,25 @@ class BatchCourseManager:
 
         master_zip = EXPORTS_DIR / f"MASTER_COURSE_{self.course_id}.zip"
         
-        # Build Multi-Item IMS Manifest
-        items_xml = []
-        resources_xml = []
+        packager = SCORMPackager(
+            course_id=f"Course_{self.course_id}",
+            course_title=self.title,
+            course_description=f"Master course curriculum for {self.title}",
+            version="1.2"
+        )
         
-        for idx, ls in enumerate(lessons, start=1):
-            vid_filename = Path(ls["video_path"]).name if ls["video_path"] else f"lesson_{idx}.mp4"
-            items_xml.append(f"""
-        <item identifier="item_{ls['lesson_id']}" identifierref="res_{ls['lesson_id']}">
-          <title>{ls['module_title']} - {ls['lesson_title']}</title>
-        </item>""")
-            resources_xml.append(f"""
-    <resource identifier="res_{ls['lesson_id']}" type="webcontent" adlcp:scormtype="sco" href="{vid_filename}">
-      <file href="{vid_filename}"/>
-    </resource>""")
-
-        manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="Course_{self.course_id}" version="1.0" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p1p2">
-  <organizations default="org_{self.course_id}">
-    <organization identifier="org_{self.course_id}">
-      <title>{self.title}</title>
-      {"".join(items_xml)}
-    </organization>
-  </organizations>
-  <resources>
-    {"".join(resources_xml)}
-  </resources>
-</manifest>
-"""
-        with zipfile.ZipFile(master_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("imsmanifest.xml", manifest_xml)
-            for ls in lessons:
-                if ls["video_path"] and Path(ls["video_path"]).exists():
-                    zf.write(ls["video_path"], arcname=Path(ls["video_path"]).name)
-                    
+        for ls in lessons:
+            mod_id = str(ls.get("module_id") or "1")
+            mod_title = ls.get("module_title") or f"Module {mod_id}"
+            packager.add_lesson(
+                module_id=mod_id,
+                lesson_id=str(ls["lesson_id"]),
+                lesson_title=ls.get("lesson_title") or f"Lesson {ls['lesson_id']}",
+                topic=ls.get("topic") or ls.get("lesson_title") or "",
+                video_path=ls.get("video_path"),
+                srt_path=ls.get("srt_path"),
+                audio_path=ls.get("audio_path")
+            )
+            
+        packager.export_zip(master_zip)
         return str(master_zip)

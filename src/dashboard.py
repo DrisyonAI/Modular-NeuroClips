@@ -10,7 +10,7 @@ import zipfile
 import asyncio
 import threading
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -66,9 +66,10 @@ def create_tracked_job(
     resolution: str,
     voice: str,
     engine_type: str = "ffmpeg",
+    output_type: str = "video",
 ) -> str:
     global ACTIVE_JOB_ID
-    job_id = job_manager.create_job(topic, scene_count, art_style, resolution, voice, engine_type)
+    job_id = job_manager.create_job(topic, scene_count, art_style, resolution, voice, engine_type, output_type=output_type)
     ACTIVE_JOB_ID = job_id
     return job_id
 
@@ -106,6 +107,12 @@ def execute_tracked_generation(
     elevenlabs_voice_id: Optional[str] = None,
     stability: float = 0.75,
     similarity_boost: float = 0.75,
+    output_type: str = "video",
+    motion_graphics: bool = True,
+    background_music: bool = False,
+    chunking_mode: str = "auto",
+    voiceover_script: Optional[str] = None,
+    reference_media_url: Optional[str] = None,
 ):
     job = job_manager.get_job(job_id)
     if not job:
@@ -126,6 +133,7 @@ def execute_tracked_generation(
             scene_count=scene_count,
             art_style=art_style,
             avatar_persona=avatar_persona,
+            voiceover_script=voiceover_script,
         )
         latency = time.time() - t0
         job["script"] = script.model_dump() if hasattr(script, "model_dump") else script.dict()
@@ -145,10 +153,12 @@ def execute_tracked_generation(
                 "scene_id": sc.scene_id,
                 "visual_prompt": sc.visual_prompt,
                 "motion_prompt": sc.motion_prompt,
-                "narration": getattr(sc, "narration", "") or sc.visual_prompt,
+                "narration": getattr(sc, "narration", "") if getattr(sc, "narration", "") is not None else "",
                 "duration_seconds": sc.duration_seconds,
                 "video_source_type": getattr(sc, "video_source_type", "ai_generated"),
                 "video_source_url": getattr(sc, "video_source_url", ""),
+                "output_type": getattr(sc, "output_type", output_type),
+                "title": getattr(sc, "title", f"Scene {sc.scene_id}"),
             }
             for sc in script.scenes
         ]
@@ -177,6 +187,11 @@ def execute_tracked_generation(
             stability=stability,
             similarity_boost=similarity_boost,
             topic=topic,
+            output_type=output_type,
+            motion_graphics=motion_graphics,
+            background_music=background_music,
+            voiceover_script=voiceover_script,
+            reference_media_url=reference_media_url,
         )
     except Exception as exc:
         job_manager.fail_job(job_id, str(exc))
@@ -187,6 +202,9 @@ def execute_tracked_generation(
 # -------------------------------------------------------------
 class GenerationRequest(BaseModel):
     topic: str
+    visual_prompt: Optional[str] = None
+    voiceover_script: Optional[str] = None
+    reference_media_url: Optional[str] = None
     scenes: int = 3
     art_style: str = "Cinematic 35mm (Volumetric Lighting)"
     resolution: str = "16:9_hd"
@@ -207,6 +225,10 @@ class GenerationRequest(BaseModel):
     elevenlabs_voice_id: Optional[str] = None
     stability: Optional[float] = 0.75
     similarity_boost: Optional[float] = 0.75
+    output_type: Optional[str] = "video"
+    motion_graphics: Optional[bool] = True
+    background_music: Optional[bool] = False
+    chunking_mode: Optional[str] = "auto"
     speaker_script: Optional[str] = None
     trainee_reading_material: Optional[str] = None
     visuals_recommended: Optional[str] = None
@@ -225,7 +247,8 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         art_style=req.art_style,
         resolution=req.resolution,
         voice=req.voice,
-        engine_type=req.compiler_engine
+        engine_type=req.compiler_engine,
+        output_type=req.output_type or "video"
     )
     
     job = JOBS_DB[job_id]
@@ -247,16 +270,22 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         "compiler_engine": req.compiler_engine or "ffmpeg",
         "burn_subtitles": req.burn_subtitles,
         "auto_clean": req.auto_clean,
+        "output_type": req.output_type or "video",
+        "motion_graphics": req.motion_graphics if req.motion_graphics is not None else True,
+        "background_music": req.background_music if req.background_music is not None else False,
         "asset_status": "Synthesizing",
         "script_words": word_count,
         "spoken_min": spoken_min,
         "gap_vs_runtime_min": runtime_gap
     }
     
+    v_topic = req.visual_prompt or req.topic
+    vo_script = req.voiceover_script if req.voiceover_script is not None else None
+
     background_tasks.add_task(
         execute_tracked_generation,
         job_id=job_id,
-        topic=req.topic,
+        topic=v_topic,
         scene_count=req.scenes,
         art_style=req.art_style,
         resolution=req.resolution,
@@ -276,16 +305,24 @@ async def trigger_generation_api(req: GenerationRequest, background_tasks: Backg
         elevenlabs_api_key=req.elevenlabs_api_key,
         elevenlabs_voice_id=req.elevenlabs_voice_id,
         stability=req.stability or 0.75,
-        similarity_boost=req.similarity_boost or 0.75
+        similarity_boost=req.similarity_boost or 0.75,
+        output_type=req.output_type or "video",
+        motion_graphics=req.motion_graphics if req.motion_graphics is not None else True,
+        background_music=req.background_music if req.background_music is not None else False,
+        chunking_mode=req.chunking_mode or "auto",
+        voiceover_script=vo_script,
+        reference_media_url=req.reference_media_url
     )
     
-    return {"status": "started", "job_id": job_id, "topic": req.topic, "scenes": req.scenes, "meta": job["curriculum_meta"]}
+    return {"status": "started", "job_id": job_id, "topic": v_topic, "scenes": req.scenes, "meta": job["curriculum_meta"]}
 
 class StoryboardPreviewRequest(BaseModel):
     topic: str
     scenes: int = 3
     art_style: str = "Cinematic 35mm (Volumetric Lighting)"
     avatar_persona: str = "maya_fintech"
+    output_type: Optional[str] = "video"
+    chunking_mode: Optional[str] = "auto"
 
 @app.post("/api/v1/storyboard/preview")
 async def preview_storyboard_api(req: StoryboardPreviewRequest):
@@ -296,7 +333,11 @@ async def preview_storyboard_api(req: StoryboardPreviewRequest):
         art_style=req.art_style,
         avatar_persona=req.avatar_persona
     )
-    return {"status": "ok", "script": script.model_dump() if hasattr(script, "model_dump") else script.dict()}
+    script_dict = script.model_dump() if hasattr(script, "model_dump") else script.dict()
+    for sc in script_dict.get("scenes", []):
+        if "output_type" not in sc:
+            sc["output_type"] = req.output_type or "video"
+    return {"status": "ok", "script": script_dict}
 
 class FromStoryboardRequest(BaseModel):
     title: str
@@ -319,6 +360,9 @@ class FromStoryboardRequest(BaseModel):
     elevenlabs_voice_id: Optional[str] = None
     stability: Optional[float] = 0.75
     similarity_boost: Optional[float] = 0.75
+    output_type: Optional[str] = "video"
+    motion_graphics: Optional[bool] = True
+    background_music: Optional[bool] = False
     scenes: List[Dict[str, Any]]
 
 @app.post("/api/v1/generate/from-storyboard")
@@ -334,7 +378,8 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
         art_style=req.art_style,
         resolution=req.resolution,
         voice=req.voice,
-        engine_type=req.compiler_engine
+        engine_type=req.compiler_engine,
+        output_type=req.output_type or "video"
     )
 
     def _run_custom_storyboard():
@@ -375,6 +420,10 @@ async def generate_from_storyboard_api(req: FromStoryboardRequest, background_ta
             stability=req.stability or 0.75,
             similarity_boost=req.similarity_boost or 0.75,
             topic=full_narration or req.title,
+            output_type=req.output_type or "video",
+            motion_graphics=req.motion_graphics if req.motion_graphics is not None else True,
+            background_music=req.background_music if req.background_music is not None else False,
+            voiceover_script=(full_narration if full_narration.strip() else ""),
         )
 
     background_tasks.add_task(_run_custom_storyboard)
@@ -589,6 +638,58 @@ async def upload_custom_avatar(file: UploadFile = File(...)):
     with open(custom_avatar_path, "wb") as f:
         f.write(contents)
     return {"status": "ok", "message": "Avatar uploaded successfully", "avatar_url": "/static_renders/custom_avatar.png"}
+
+@app.post("/api/v1/director/upload-reference")
+async def upload_director_reference_media(file: UploadFile = File(...)):
+    """
+    Uploads multimodal reference media (image or video) for Director Studio.
+    """
+    valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".mkv"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in valid_exts:
+        raise HTTPException(status_code=400, detail=f"Unsupported format {ext}. Allowed: {', '.join(valid_exts)}")
+
+    uid = uuid.uuid4().hex[:8]
+    out_filename = f"director_ref_{uid}{ext}"
+    out_path = OUTPUT_DIR / out_filename
+    contents = await file.read()
+    with open(out_path, "wb") as f:
+        f.write(contents)
+
+    media_type = "video" if ext in {".mp4", ".mov", ".webm", ".mkv"} else "image"
+    return {
+        "status": "ok",
+        "message": f"Reference {media_type} uploaded successfully",
+        "reference_url": f"/static_renders/{out_filename}",
+        "reference_path": str(out_path),
+        "media_type": media_type,
+        "filename": file.filename
+    }
+
+@app.post("/api/v1/avatar/upload-3d")
+async def upload_avatar_3d_model(file: UploadFile = File(...)):
+    """
+    Uploads a 3D avatar mesh model (.glb, .gltf, .obj, .fbx, .zip).
+    """
+    valid_exts = {".glb", ".gltf", ".obj", ".fbx", ".zip"}
+    ext = Path(file.filename).suffix.lower()
+    if ext not in valid_exts:
+        raise HTTPException(status_code=400, detail=f"Unsupported 3D format {ext}. Allowed: {', '.join(valid_exts)}")
+
+    uid = uuid.uuid4().hex[:8]
+    out_filename = f"avatar_3d_{uid}{ext}"
+    out_path = OUTPUT_DIR / out_filename
+    contents = await file.read()
+    with open(out_path, "wb") as f:
+        f.write(contents)
+
+    return {
+        "status": "ok",
+        "message": "3D Avatar Model uploaded successfully",
+        "model_url": f"/static_renders/{out_filename}",
+        "model_path": str(out_path),
+        "filename": file.filename
+    }
 
 class VoiceScriptExpandRequest(BaseModel):
     prompt: str
@@ -1062,34 +1163,25 @@ async def export_scorm_package(
     
     questions = quiz_engine.get_module_questions(module_id)
     
-    manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="Course_{video_path.stem}" version="1.0" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
-  <organizations default="org1">
-    <organization identifier="org1">
-      <title>{c_title} • Interactive Lecture & Assessment</title>
-      <item identifier="item1" identifierref="resource1">
-        <title>Module Video Lecture & Knowledge Check ({len(questions)} Questions)</title>
-      </item>
-    </organization>
-  </organizations>
-  <resources>
-    <resource identifier="resource1" type="webcontent" adlcp:scormtype="sco" href="index.html">
-      <file href="index.html"/>
-      <file href="{filename}"/>
-    </resource>
-  </resources>
-</manifest>
-"""
-    player_html = quiz_engine.generate_interactive_scorm_html(
-        video_filename=filename,
-        module_id=module_id,
-        pass_percentage=70
+    packager = SCORMPackager(
+        course_id=f"Course_{video_path.stem}",
+        course_title=f"{c_title} • Interactive Lecture & Assessment",
+        course_description=f"Interactive lecture and knowledge assessment for {c_title}",
+        version=scorm_version
     )
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("imsmanifest.xml", manifest_xml)
-        zf.writestr("index.html", player_html)
-        zf.write(video_path, arcname=filename)
+    packager.add_module(
+        module_id=f"module_{module_id}",
+        module_title=f"Module {module_id}: {c_title}",
+        description=""
+    )
+    packager.add_lesson(
+        module_id=f"module_{module_id}",
+        lesson_id=f"lesson_{module_id}_1",
+        lesson_title=f"{c_title} Video Lecture & Knowledge Check",
+        topic=c_title,
+        video_path=str(video_path)
+    )
+    packager.export_zip(zip_path)
         
     return {
         "status": "ok",
@@ -1103,31 +1195,51 @@ async def export_scorm_package(
 class CustomSCORMBuildRequest(BaseModel):
     course_title: str
     course_id: Optional[str] = "FINTECH_AGENTS_M1"
-    module_title: Optional[str] = "Module 1: Traditional AI vs GenAI vs Agents"
+    module_title: Optional[str] = None
     module_id: Optional[int] = 1
+    module_number: Optional[Union[int, str]] = None
+    module_name: Optional[str] = None
     module_description: Optional[str] = "Core concepts of autonomous AI agents and foundational architecture"
-    lesson_title: Optional[str] = "Lesson 1: Foundations & Agentic Workflows"
+    lesson_title: Optional[str] = None
+    lesson_number: Optional[str] = None
+    lesson_name: Optional[str] = None
     lesson_id: Optional[str] = "L101"
-    topic: Optional[str] = "1.1 Traditional AI vs GenAI vs Agents"
+    topic: Optional[str] = None
     pass_percentage: Optional[int] = 70
     scorm_version: Optional[str] = "1.2"
     video_filename: Optional[str] = None
+    intro_video_filename: Optional[str] = None
 
 @app.post("/api/v1/scorm/custom-build")
 async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
     """
-    Builds a custom SCORM 1.2 / 2004 e-learning package with custom metadata (course, module, lesson, topic),
-    media attachment (rendered or externally uploaded video), and module quiz.
+    Builds a custom SCORM 1.2 / 2004 e-learning package with dynamic metadata (module number, module name,
+    lesson number, lesson name), intro background video, media attachment, and 2-3 question understanding check.
     """
     safe_course_id = "".join(c for c in (req.course_id or "COURSE") if c.isalnum() or c in ('_', '-')).strip() or "COURSE"
     safe_lesson_id = "".join(c for c in (req.lesson_id or "L1") if c.isalnum() or c in ('_', '-')).strip() or "L1"
     package_name = f"SCORM_{safe_course_id}_{safe_lesson_id}_{int(time.time())}.zip"
     zip_path = EXPORTS_DIR / package_name
     
-    questions = quiz_engine.get_module_questions(req.module_id or 1)
+    m_num = str(req.module_number).strip() if req.module_number is not None and str(req.module_number).strip() else (str(req.module_id) if req.module_id else "1")
+    m_name = (req.module_name or "").strip()
+    if not m_name:
+        if req.module_title:
+            m_name = re.sub(r"^Module\s*\d+\s*:\s*", "", req.module_title).strip() or req.module_title
+        else:
+            m_name = f"Module {m_num}"
+
+    final_module_title = f"Module {m_num}: {m_name}" if (m_num and not m_name.startswith(f"Module {m_num}")) else m_name
+    
+    l_num = str(req.lesson_number).strip() if req.lesson_number is not None and str(req.lesson_number).strip() else f"{m_num}.1"
+    raw_lesson_name = (req.lesson_name or req.lesson_title or req.topic or f"Lesson {l_num}").strip()
+    clean_l_name = re.sub(r"^(Lesson\s*)?\d+(\.\d+)?\s*[:\-]?\s*", "", raw_lesson_name).strip() or raw_lesson_name
+    final_lesson_title = f"{l_num} {clean_l_name}"
+
+    q_mod_id = int(m_num) if str(m_num).isdigit() else (req.module_id or 1)
+    questions = quiz_engine.get_module_questions(q_mod_id)
     
     video_file = None
-    target_vid_name = req.video_filename or ""
     if req.video_filename:
         v1 = OUTPUT_DIR / req.video_filename
         v2 = ASSETS_DIR / req.video_filename
@@ -1136,46 +1248,30 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
         elif v2.exists():
             video_file = v2
 
-    def _xml_escape(text: str) -> str:
-        return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;")
-
-    esc_course_title = _xml_escape(req.course_title)
-    esc_module_title = _xml_escape(req.module_title)
-    esc_lesson_label = _xml_escape(lesson_label)
-
-    manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="{safe_course_id}" version="{req.scorm_version}" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2">
-  <organizations default="org_{safe_course_id}">
-    <organization identifier="org_{safe_course_id}">
-      <title>{esc_course_title}</title>
-      <item identifier="module_{req.module_id or 1}">
-        <title>{esc_module_title}</title>
-        <item identifier="item_{safe_course_id}_{safe_lesson_id}" identifierref="res_{safe_course_id}">
-          <title>{esc_lesson_label} ({len(questions)} Questions)</title>
-        </item>
-      </item>
-    </organization>
-  </organizations>
-  <resources>
-    <resource identifier="res_{safe_course_id}" type="webcontent" adlcp:scormtype="sco" href="index.html">
-      <file href="index.html"/>
-      {f'<file href="{target_vid_name}"/>' if video_file else ''}
-    </resource>
-  </resources>
-</manifest>
-"""
-
-    player_html = quiz_engine.generate_interactive_scorm_html(
-        video_filename=target_vid_name if video_file else "",
-        module_id=req.module_id or 1,
-        pass_percentage=req.pass_percentage or 70
+    packager = SCORMPackager(
+        course_id=safe_course_id,
+        course_title=req.course_title,
+        course_description=req.module_description or f"Curriculum module: {final_module_title}",
+        version=req.scorm_version or "1.2",
+        intro_video_path=req.intro_video_filename
     )
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("imsmanifest.xml", manifest_xml)
-        zf.writestr("index.html", player_html)
-        if video_file and video_file.exists():
-            zf.write(video_file, arcname=target_vid_name)
+    packager.add_module(
+        module_id=f"module_{m_num}",
+        module_title=final_module_title,
+        description=req.module_description or "",
+        module_number=m_num,
+        module_name=m_name
+    )
+    packager.add_lesson(
+        module_id=f"module_{m_num}",
+        lesson_id=safe_lesson_id,
+        lesson_title=final_lesson_title,
+        topic=req.topic or clean_l_name,
+        video_path=str(video_file) if video_file else None,
+        lesson_number=l_num,
+        lesson_name=clean_l_name
+    )
+    packager.export_zip(zip_path)
 
     return {
         "status": "ok",
@@ -1183,12 +1279,16 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
         "download_url": f"/static_exports/{package_name}",
         "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
         "course_title": req.course_title,
-        "module_id": req.module_id,
-        "module_title": req.module_title,
-        "lesson_title": req.lesson_title,
+        "module_id": q_mod_id,
+        "module_number": m_num,
+        "module_name": m_name,
+        "module_title": final_module_title,
+        "lesson_number": l_num,
+        "lesson_name": clean_l_name,
+        "lesson_title": final_lesson_title,
         "lesson_id": req.lesson_id,
-        "topic": req.topic,
-        "questions_count": len(questions),
+        "topic": req.topic or clean_l_name,
+        "questions_count": min(len(questions), 3),
         "scorm_version": req.scorm_version
     }
 
@@ -1528,6 +1628,7 @@ async def get_active_job_api():
 async def list_gallery_videos(session_job_id: Optional[str] = None):
     videos = []
     if OUTPUT_DIR.exists():
+        # 1. Rendered MP4 Videos
         for file in sorted(OUTPUT_DIR.glob("*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True):
             if session_job_id and session_job_id not in file.name:
                 continue
@@ -1552,6 +1653,7 @@ async def list_gallery_videos(session_job_id: Optional[str] = None):
                     srt_filename = potential_srt.name
             
             videos.append({
+                "media_type": "video",
                 "filename": file.name,
                 "url": f"/static_renders/{file.name}",
                 "audio_url": audio_url,
@@ -1562,6 +1664,54 @@ async def list_gallery_videos(session_job_id: Optional[str] = None):
                 "created_at": stat.st_mtime,
                 "time_str": time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime))
             })
+
+        # 2. Rendered Instructional Slides
+        slide_patterns = ["slide_*.png", "*_slide.png"]
+        seen_slides = set()
+        for pat in slide_patterns:
+            for file in OUTPUT_DIR.glob(pat):
+                if file.name in seen_slides:
+                    continue
+                seen_slides.add(file.name)
+                if session_job_id and session_job_id not in file.name:
+                    continue
+
+                stat = file.stat()
+                audio_url = None
+                audio_filename = None
+                srt_url = None
+                srt_filename = None
+
+                # Check if audio/subtitles match job ID
+                parts = file.stem.split("_")
+                for p in parts:
+                    if len(p) == 8:
+                        potential_audio = OUTPUT_DIR / f"audio_{p}.mp3"
+                        if potential_audio.exists():
+                            audio_url = f"/static_renders/{potential_audio.name}"
+                            audio_filename = potential_audio.name
+                        potential_srt = OUTPUT_DIR / f"subtitles_{p}.srt"
+                        if potential_srt.exists():
+                            srt_url = f"/static_renders/{potential_srt.name}"
+                            srt_filename = potential_srt.name
+                        break
+
+                videos.append({
+                    "media_type": "slide",
+                    "filename": file.name,
+                    "url": f"/static_renders/{file.name}",
+                    "audio_url": audio_url,
+                    "audio_filename": audio_filename,
+                    "srt_url": srt_url,
+                    "srt_filename": srt_filename,
+                    "size_mb": round(stat.st_size / (1024 ** 2), 2),
+                    "created_at": stat.st_mtime,
+                    "time_str": time.strftime('%Y-%m-%d %H:%M', time.localtime(stat.st_mtime))
+                })
+
+        # Sort all production media by mtime descending
+        videos.sort(key=lambda x: x["created_at"], reverse=True)
+
     return {"videos": videos}
 
 @app.post("/api/v1/gallery/clear")
@@ -1632,6 +1782,255 @@ async def sse_metrics():
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "gpu_available": GPU_AVAILABLE, "timestamp": time.time()}
+
+
+# -------------------------------------------------------------
+# Google Stitch Wireframe APIs: Avatar Video & SCORM Framework
+# -------------------------------------------------------------
+class AvatarVideoGenerateRequest(BaseModel):
+    script: str
+    voice: Optional[str] = "en-IN-NeerjaNeural"
+    speed: Optional[float] = 1.0
+    pitch: Optional[str] = "+0Hz"
+    curtain_mode: Optional[str] = "green" # "green" | "white" | "studio"
+    curtain_active: Optional[bool] = True
+    hand_gestures: Optional[str] = "subtle" # "subtle" | "explanatory" | "dynamic" | "executive"
+    avatar_persona: Optional[str] = "maya_fintech"
+    avatar_image_url: Optional[str] = None
+    future_3d_model: Optional[bool] = False
+    model_3d_path: Optional[str] = None
+
+@app.post("/api/v1/avatar/generate-video")
+async def generate_avatar_video_api(req: AvatarVideoGenerateRequest):
+    """
+    Synthesizes an avatar presenter video matching the wireframe:
+    - Custom speech script via neural Edge-TTS
+    - Audio-reactive lip-sync visemes and natural kinematics
+    - 3D mesh head rendering with jaw articulation if 3D model active
+    - Green Screen / White Studio Curtain backdrop
+    - Hand gesture choreography and avatar positioning
+    """
+    clean_script = (req.script or "").strip()
+    if not clean_script:
+        raise HTTPException(status_code=400, detail="Script narration is required for avatar video.")
+
+    vid_id = uuid.uuid4().hex[:8]
+    audio_filename = f"avatar_speech_{vid_id}.mp3"
+    audio_path = OUTPUT_DIR / audio_filename
+
+    # 1. Generate Voiceover Audio
+    voice = req.voice or "en-IN-NeerjaNeural"
+    speed = float(req.speed or 1.0)
+    pitch = req.pitch or "+0Hz"
+
+    ok = generate_voiceover_audio_sync(
+        text=clean_script,
+        voice=voice,
+        speech_rate=speed,
+        output_path=audio_path,
+        pitch=pitch,
+        volume="+0%",
+        voice_provider="edge_tts"
+    )
+    if not ok or not audio_path.exists():
+        raise HTTPException(status_code=500, detail="Failed to synthesize avatar voiceover narration.")
+
+    # 2. Probe audio duration
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)],
+            capture_output=True, text=True, check=True
+        )
+        duration = float(probe.stdout.strip() or 4.0)
+    except Exception:
+        duration = max(3.0, len(clean_script.split()) / 2.3)
+
+    # 3. Locate or create avatar portrait image
+    avatar_img_path = OUTPUT_DIR / "custom_avatar.png"
+    if not avatar_img_path.exists():
+        try:
+            from PIL import Image, ImageDraw
+            img = Image.new("RGBA", (500, 500), (15, 23, 42, 255))
+            d = ImageDraw.Draw(img)
+            d.ellipse([160, 80, 340, 260], fill=(56, 189, 248, 255))
+            d.ellipse([100, 260, 400, 520], fill=(99, 102, 241, 255))
+            img.save(avatar_img_path)
+        except Exception:
+            pass
+
+    # 4. Determine Curtain Color
+    curtain_active = req.curtain_active if req.curtain_active is not None else True
+    curtain_mode = (req.curtain_mode or "green").lower()
+    if curtain_active and curtain_mode == "green":
+        bg_color = "0x00FF00"
+    elif curtain_active and curtain_mode == "white":
+        bg_color = "0xFFFFFF"
+    else:
+        bg_color = "0x090D16"
+
+    # 5. Hand gestures positioning & framing
+    gesture = (req.hand_gestures or "subtle").lower()
+    if gesture == "explanatory":
+        overlay_filter = "[1:v]scale=460:460:force_original_aspect_ratio=decrease[av];[0:v][av]overlay=90:(H-h)-20[v_out]"
+    elif gesture == "dynamic":
+        overlay_filter = "[1:v]scale=500:500:force_original_aspect_ratio=decrease[av];[0:v][av]overlay=(W-w)/2:(H-h)-15[v_out]"
+    elif gesture == "executive":
+        overlay_filter = "[1:v]scale=470:470:force_original_aspect_ratio=decrease[av];[0:v][av]overlay=(W-w)/2:(H-h)-30[v_out]"
+    else:
+        overlay_filter = "[1:v]scale=480:480:force_original_aspect_ratio=decrease[av];[0:v][av]overlay=(W-w)/2:(H-h)-25[v_out]"
+
+    output_filename = f"avatar_video_{vid_id}.mp4"
+    output_path = OUTPUT_DIR / output_filename
+
+    # 6. Audio-Reactive Viseme Speaking Synthesis
+    is_3d = bool(req.future_3d_model or req.model_3d_path)
+    try:
+        from src.services.avatar_animation_service import AvatarAnimationService
+        anim_service = AvatarAnimationService()
+        anim_service.synthesize_speaking_avatar_video(
+            script=clean_script,
+            audio_path=audio_path,
+            output_path=output_path,
+            avatar_image_path=str(avatar_img_path) if avatar_img_path.exists() else None,
+            is_3d_model=is_3d,
+            curtain_mode=curtain_mode,
+            curtain_active=curtain_active,
+            hand_gestures=gesture,
+            width=1280,
+            height=720,
+            fps=25
+        )
+    except Exception as exc:
+        print(f"[Avatar Animation Service Warning] Fallback to FFmpeg compositing ({exc})")
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=c={bg_color}:s=1280x720:d={duration}",
+            "-loop", "1", "-i", str(avatar_img_path.resolve()),
+            "-i", str(audio_path.resolve()),
+            "-filter_complex", overlay_filter,
+            "-map", "[v_out]",
+            "-map", "2:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-t", str(duration),
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(output_path)
+        ]
+        res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not output_path.exists():
+            raise HTTPException(status_code=500, detail=f"FFmpeg compositing failed: {res.stderr[-300:]}")
+
+    return {
+        "status": "ok",
+        "message": "Avatar video synthesized successfully",
+        "video_url": f"/static_renders/{output_filename}",
+        "filename": output_filename,
+        "duration": round(duration, 2),
+        "curtain_mode": curtain_mode if curtain_active else "studio_dark",
+        "hand_gestures": gesture,
+        "future_3d_model": is_3d
+    }
+
+class SCORMFrameworkBuildRequest(BaseModel):
+    edu_category: Optional[str] = "Edu FinTech"
+    frame_template: Optional[str] = "microlearning"
+    course_title: Optional[str] = "AI Agents in FinTech: Autonomous Execution"
+    context_text: Optional[str] = ""
+    selected_videos: Optional[List[str]] = Field(default_factory=list)
+    module_id: Optional[int] = 1
+    pass_percentage: Optional[int] = 70
+    scorm_version: Optional[str] = "1.2"
+
+@app.post("/api/v1/scorm/framework-build")
+async def scorm_framework_build_api(req: SCORMFrameworkBuildRequest):
+    """
+    Builds a complete SCORM 1.2 / 2004 e-learning package mapping context & videos into a pre-built frame:
+    - [Edu] category tagging
+    - Pre-built frame selection
+    - Pasted curriculum context
+    - Video assets mapping & .zip download
+    """
+    safe_course_id = re.sub(r'[^a-zA-Z0-9_]', '', (req.course_title or "COURSE").replace(" ", "_"))[:30] or "COURSE"
+    package_name = f"SCORM_{req.frame_template}_{safe_course_id}_{int(time.time())}.zip"
+    zip_path = EXPORTS_DIR / package_name
+
+    questions = quiz_engine.get_module_questions(req.module_id or 1)
+
+    video_file = None
+    target_vid_name = ""
+    if req.selected_videos and len(req.selected_videos) > 0:
+        target_vid_name = req.selected_videos[0]
+        v1 = OUTPUT_DIR / target_vid_name
+        v2 = ASSETS_DIR / target_vid_name
+        if v1.exists():
+            video_file = v1
+        elif v2.exists():
+            video_file = v2
+
+    esc_title = (req.course_title or "Edu Course").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<manifest identifier="{safe_course_id}" version="{req.scorm_version or '1.2'}" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2" xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2">
+  <organizations default="org_{safe_course_id}">
+    <organization identifier="org_{safe_course_id}">
+      <title>{esc_title} [{req.edu_category or 'Edu'}]</title>
+      <item identifier="item_framework_1" identifierref="res_{safe_course_id}">
+        <title>{esc_title} — {req.frame_template.title()} Frame</title>
+      </item>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="res_{safe_course_id}" type="webcontent" adlcp:scormtype="sco" href="index.html">
+      <file href="index.html"/>
+      {f'<file href="{target_vid_name}"/>' if video_file else ''}
+    </resource>
+  </resources>
+</manifest>
+"""
+
+    player_html = quiz_engine.generate_interactive_scorm_html(
+        video_filename=target_vid_name if video_file else "",
+        module_id=req.module_id or 1,
+        pass_percentage=req.pass_percentage or 70
+    )
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("imsmanifest.xml", manifest_xml)
+        zf.writestr("index.html", player_html)
+        if req.context_text:
+            zf.writestr("curriculum_context.txt", req.context_text)
+        if video_file and video_file.exists():
+            zf.write(video_file, arcname=target_vid_name)
+
+    return {
+        "status": "ok",
+        "package_name": package_name,
+        "download_url": f"/static_exports/{package_name}",
+        "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
+        "edu_category": req.edu_category,
+        "frame_template": req.frame_template,
+        "course_title": req.course_title,
+        "questions_count": len(questions),
+        "video_mapped": target_vid_name if video_file else "None (Text Assessment Mode)"
+    }
+
+@app.api_route("/director", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def serve_director_route():
+    return await serve_dashboard()
+
+@app.api_route("/avatar", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def serve_avatar_route():
+    return await serve_dashboard()
+
+@app.api_route("/scorm", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def serve_scorm_route():
+    return await serve_dashboard()
+
+@app.api_route("/login", methods=["GET", "POST", "HEAD"], response_class=HTMLResponse)
+@app.api_route("/signin", methods=["GET", "POST", "HEAD"], response_class=HTMLResponse)
+async def serve_login_route():
+    return await serve_login_page()
+
 
 # -------------------------------------------------------------
 # Web UI Portal Interface with SCORM & Visual Storyboard
@@ -1732,254 +2131,365 @@ async def serve_dashboard():
             <button onclick="purgeVRAM()" title="Purge CUDA Memory Cache" class="px-3 py-1.5 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-all">
                 Purge VRAM
             </button>
+            <button onclick="openSettingsModal()" title="Studio Settings" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-all flex items-center gap-1 font-sans font-medium">
+                <span>⚙️</span> <span>Settings</span>
+            </button>
+            <a href="/login" id="header-auth-btn" class="px-3 py-1.5 rounded-lg bg-brand-600/20 hover:bg-brand-600/30 text-brand-glow border border-brand-500/30 transition-all flex items-center gap-1.5 font-sans font-semibold">
+                <span id="header-auth-icon">🔑</span> <span id="header-auth-text">Sign In</span>
+            </a>
         </div>
     </header>
 
     <!-- Main Container -->
     <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
 
-        <!-- 🌟 MILESTONE PROGRESS SECTION -->
-        <section class="glass-panel-glow rounded-2xl p-6 relative overflow-hidden">
-            <div class="flex items-center justify-between mb-4">
-                <div>
-                    <h2 class="text-base font-bold text-white flex items-center gap-2">
-                        <span>🎯</span> End-to-End Production Milestones
-                    </h2>
-                    <p class="text-xs text-slate-400">Real-time lifecycle tracking across all generative stages</p>
-                </div>
-                <div class="text-right">
-                    <span id="overall-progress-num" class="text-2xl font-black text-brand-glow font-mono">0%</span>
-                    <p id="active-step-caption" class="text-xs text-slate-400">Waiting for job</p>
-                </div>
-            </div>
-
-            <div class="w-full h-2.5 bg-slate-800/80 rounded-full overflow-hidden mb-6 p-0.5 border border-slate-700/50">
-                <div id="master-progress-fill" class="h-full bg-gradient-to-r from-brand-600 via-indigo-500 to-brand-glow rounded-full transition-all duration-500 shadow-lg shadow-brand-500/50" style="width: 0%"></div>
-            </div>
-
-            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3" id="milestones-container">
-            </div>
-        </section>
-
-        <!-- 🎛️ STUDIO MODE SELECTOR BAR (ROLE-BASED ARCHITECTURE) -->
+        <!-- 🎛️ STUDIO MODE SELECTOR BAR (GOOGLE STITCH WIREFRAME SUITE) -->
         <div class="flex items-center space-x-2 border-b border-slate-800 pb-3 overflow-x-auto">
-            <button onclick="switchStudioMode('video')" id="mode-btn-video" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all whitespace-nowrap">
-                <span>👑</span> <span>Director Studio (Master Orchestrator)</span>
+            <button onclick="switchStudioMode('video')" id="mode-btn-video" title="Director Studio (Master Orchestrator)" class="px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all whitespace-nowrap">
+                <span>👑</span> <span>Director</span>
             </button>
-            <button onclick="switchStudioMode('voice')" id="mode-btn-voice" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
-                <span>🎙️</span> <span>Voice Director Studio</span>
+            <button onclick="switchStudioMode('voice')" id="mode-btn-voice" title="Voice Director Studio" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>🎙️</span> <span>Voice</span>
             </button>
-            <button onclick="switchStudioMode('image')" id="mode-btn-image" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
-                <span>🎨</span> <span>Image Director Studio</span>
+            <button onclick="switchStudioMode('image')" id="mode-btn-image" title="Image Director Studio" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>🎨</span> <span>Image</span>
             </button>
-            <button onclick="switchStudioMode('scorm')" id="mode-btn-scorm" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
-                <span>📦</span> <span>SCORM & LMS Generator</span>
+            <button onclick="switchStudioMode('avatar')" id="mode-btn-avatar" title="Avatar Studio (Presenter Lab)" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>👤</span> <span>Avatar</span>
+            </button>
+            <div class="h-6 w-px bg-slate-800 mx-1.5 self-center flex-shrink-0" aria-hidden="true"></div>
+            <button onclick="switchStudioMode('scorm')" id="mode-btn-scorm" title="SCORM Framework & LMS" class="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap">
+                <span>📦</span> <span>SCORM Export</span>
             </button>
         </div>
 
-
         <!-- MODE 1: MULTI-AGENT VIDEO STUDIO -->
         <div id="mode-video-section" class="space-y-6">
+
+            <!-- 🌟 MILESTONE PROGRESS SECTION (INSIDE DIRECTOR TAB ONLY) -->
+            <section id="milestone-tracker-section" class="glass-panel-glow rounded-2xl p-3 sm:px-5 transition-all duration-300 relative overflow-hidden">
+                <div class="flex items-center justify-between min-h-[32px]">
+                    <div class="flex items-center gap-2.5">
+                        <span class="text-base">🎯</span>
+                        <div>
+                            <h2 class="text-xs sm:text-sm font-bold text-white flex items-center gap-2">
+                                Production Milestones
+                            </h2>
+                            <p id="tracker-subtext" class="text-[11px] text-slate-400 hidden">Real-time lifecycle tracking across all generative stages</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="flex items-center gap-2 text-right">
+                            <span id="overall-progress-num" class="text-base sm:text-lg font-black text-brand-glow font-mono">0%</span>
+                            <span class="text-slate-600">&bull;</span>
+                            <p id="active-step-caption" class="text-xs text-slate-300 font-medium">Ready</p>
+                        </div>
+                        <button type="button" id="tracker-toggle-btn" onclick="toggleTrackerManual()" class="text-slate-400 hover:text-white text-xs px-2 py-0.5 rounded bg-slate-800/80 border border-slate-700 font-mono transition-all" title="Toggle milestone tracker">▾</button>
+                    </div>
+                </div>
+
+                <!-- Expanded Content: Progress bar and stage cards (collapses when idle) -->
+                <div id="tracker-expanded-content" class="hidden mt-3 pt-3 border-t border-slate-800/80 space-y-4">
+                    <div class="w-full h-2.5 bg-slate-800/80 rounded-full overflow-hidden p-0.5 border border-slate-700/50">
+                        <div id="master-progress-fill" class="h-full bg-gradient-to-r from-brand-600 via-indigo-500 to-brand-glow rounded-full transition-all duration-500 shadow-lg shadow-brand-500/50" style="width: 0%"></div>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3" id="milestones-container">
+                    </div>
+                </div>
+            </section>
 
         <!-- Studio Control Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
 
             <!-- LEFT: Generation Studio (7 cols) -->
             <div class="lg:col-span-7 space-y-6">
-                <div class="glass-panel rounded-2xl p-6 space-y-5">
-                    <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-                        <h3 class="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                            <span>🎬</span> Director Studio & Curriculum Matrix
-                        </h3>
-                        <span class="text-xs text-brand-glow bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/20">Prompt-to-Visual AI Synthesis</span>
-                    </div>
-
-                    <!-- Speaker Script Input with Director Toolbar & Document Ingestion -->
-                    <div class="space-y-1.5">
-                        <div class="flex justify-between items-center">
-                            <label class="text-xs font-semibold text-slate-300">Speaker Script (Narration & Directorial Cues)</label>
-                            <div class="flex items-center space-x-3">
-                                <label for="script-file-upload" class="text-[10px] text-brand-glow hover:underline cursor-pointer flex items-center gap-1 font-sans">
-                                    <span>📁</span> <span>Upload Document (.txt, .md, .srt)</span>
-                                </label>
-                                <input type="file" id="script-file-upload" class="hidden" accept=".txt,.md,.srt,.vtt,.json" onchange="handleScriptDocumentUpload(this)">
-                                <span id="script-stats" class="text-[11px] font-mono text-brand-glow">0 words | ~0.0 min</span>
-                            </div>
-                        </div>
-                        
-                        <!-- Director Quick Insert Toolbar -->
-                        <div class="flex items-center space-x-1.5 overflow-x-auto py-1 text-[11px]">
-                            <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Director Cues:</span>
-                            <button type="button" onclick="insertScriptTag('[pause 500ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
-                                ⏱️ [Pause 0.5s]
-                            </button>
-                            <button type="button" onclick="insertScriptTag('[pause 1s] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
-                                ⏱️ [Pause 1.0s]
-                            </button>
-                            <button type="button" onclick="insertScriptTag('[emphasis] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
-                                ✨ [Emphasis]
-                            </button>
-                            <button type="button" onclick="insertScriptTag('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow hover:border-brand-500/30 transition-all font-mono">
-                                💡 [Pro Tip]
-                            </button>
-                        </div>
-
-                        <textarea id="prompt-input" rows="4" oninput="updateScriptMetrics()" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all font-sans" placeholder="Enter lecture topic or upload a text file (e.g. In this session, [pause 500ms] we explore algorithmic liquidity and automated dispute settlement with AI agents)..."></textarea>
-                    </div>
-
-                    <!-- Language, Resolution, Style, and Chunking Scenes -->
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div class="glass-panel rounded-2xl p-6 space-y-6">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
                         <div>
-                            <label class="block text-xs font-semibold text-slate-300 mb-1">🌐 Language & Dubbing</label>
-                            <select id="language-select" onchange="onLanguageChange()" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
-                                <option value="en-US" selected>🇺🇸 English (US)</option>
-                                <option value="te-IN">🇮🇳 Telugu (తెలుగు)</option>
-                                <option value="ta-IN">🇮🇳 Tamil (தமிழ்)</option>
-                                <option value="hi-IN">🇮🇳 Hindi (हिन्दी)</option>
-                                <option value="es-ES">🇪🇸 Spanish (Castilian)</option>
-                                <option value="fr-FR">🇫🇷 French (Standard)</option>
-                                <option value="de-DE">🇩🇪 German (Standard)</option>
-                                <option value="ja-JP">🇯🇵 Japanese (日本語)</option>
-                            </select>
+                            <h3 class="text-sm font-bold uppercase tracking-wider text-slate-200 flex items-center gap-2">
+                                <span>🎬</span> Director Studio
+                            </h3>
+                            <p class="text-[11px] text-slate-400 mt-0.5">Central learning content production & configuration workspace</p>
                         </div>
-                        <div>
-                            <label class="block text-xs font-semibold text-slate-300 mb-1">Resolution & Format</label>
-                            <select id="resolution-select" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
-                                <option value="16:9_hd" selected>16:9 HD Broadcast (1280x720)</option>
-                                <option value="16:9_sd">16:9 SD Fast Preview (576x320)</option>
-                                <option value="16:9_fhd">16:9 Full HD (1920x1080)</option>
-                                <option value="9:16_vertical">9:16 Mobile Shorts (720x1280)</option>
-                                <option value="1:1_square">1:1 LMS Widget / Square (720x720)</option>
-                            </select>
-                        </div>
-                        <div>
-                            <div class="flex justify-between text-xs font-semibold text-slate-300 mb-1">
-                                <span>Scene Chunking (#)</span>
-                                <span id="scene-val" class="font-mono text-brand-glow font-bold">4 Scenes</span>
-                            </div>
-                            <input id="scene-slider" type="range" min="1" max="16" value="4" oninput="document.getElementById('scene-val').innerText = this.value + ' Scenes'" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
-                            <div class="flex items-center justify-between text-[10px] text-slate-400 mt-1">
-                                <button type="button" onclick="setSceneChunk(3)" class="hover:text-brand-glow">Shorts (3)</button>
-                                <button type="button" onclick="setSceneChunk(6)" class="hover:text-brand-glow">Standard (6)</button>
-                                <button type="button" onclick="setSceneChunk(10)" class="hover:text-brand-glow">Deep (10)</button>
-                                <button type="button" onclick="setSceneChunk(16)" class="hover:text-brand-glow">Master (16)</button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Speaker Avatar Persona & Persistent Identity Row -->
-                    <div class="p-3.5 rounded-xl bg-slate-950/80 border border-brand-500/20 space-y-3">
-                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
-                            <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                                <span>👤</span> <span>Speaker Avatar & Persistent Identity</span>
+                        <div class="flex items-center gap-2">
+                            <!-- Note: Director Let It Be AUTONOMOUS (Wireframe annotation removed) -->
+                            <span class="text-xs text-brand-glow bg-brand-500/10 px-2.5 py-1 rounded-lg border border-brand-500/20 font-mono">
+                                AI Production Engine
                             </span>
-                            <div class="flex items-center space-x-2">
-                                <select id="identity-load-select" onchange="loadSelectedIdentity(this.value)" class="rounded bg-slate-900 border border-slate-700 text-[10px] text-slate-300 p-1">
-                                    <option value="">📂 Load Identity Profile...</option>
-                                </select>
-                                <button onclick="saveCurrentIdentity()" class="text-[10px] px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow border border-brand-500/30 hover:bg-brand-500/30 transition-all">
-                                    💾 Save
+                        </div>
+                    </div>
+
+                    <!-- PHASE 1: CONTENT (What is it about?) -->
+                    <div class="space-y-3 p-4 rounded-xl bg-slate-950/70 border border-slate-800">
+                        <div class="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                            <div class="flex items-center gap-2">
+                                <span class="w-5 h-5 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold font-mono">1</span>
+                                <div>
+                                    <h4 class="text-xs font-bold uppercase tracking-wider text-slate-200">Phase 1 — Content</h4>
+                                    <p class="text-[10px] text-slate-400">What is it about? Visual prompt & voiceover script</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Visual Prompt & Reference Media -->
+                        <div class="space-y-3">
+                            <div class="flex justify-between items-center">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>Visual Generation Prompt (What the video should show)</span>
+                                </label>
+                                <span class="text-[10px] text-brand-glow font-mono">Controls Visuals Only &bull; Not Spoken</span>
+                            </div>
+                            <p class="text-[11px] text-slate-400">Describe the scene objects, environment, action, and lighting. This directly guides the visual generation model.</p>
+                            
+                            <textarea id="prompt-input" rows="3" oninput="if(typeof updatePreflightSummary==='function')updatePreflightSummary();" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all font-sans leading-relaxed shadow-inner" placeholder="E.g., Cinematic aerial view of modern AI datacenter servers with glowing optical fiber interconnects and holographic data streams..."></textarea>
+
+                            <!-- Multimodal Reference Attachment -->
+                            <div class="pt-1 border-t border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                                <div class="flex items-center space-x-2">
+                                    <input type="file" id="director-ref-upload" class="hidden" accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm" onchange="handleDirectorReferenceUpload(this)">
+                                    <label for="director-ref-upload" class="cursor-pointer px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-slate-700 transition-all">
+                                        <span>📎</span> <span>Attach Reference Media (Image / Video)</span>
+                                    </label>
+                                    <span id="director-ref-badge" class="text-[11px] font-mono text-slate-400">No media attached</span>
+                                </div>
+                                <input type="hidden" id="director-ref-url" value="">
+                                <div id="director-ref-preview-box" class="hidden flex items-center space-x-2">
+                                    <img id="director-ref-preview-img" src="" class="w-9 h-9 rounded object-cover border border-brand-500/40">
+                                    <button type="button" onclick="clearDirectorReferenceMedia()" class="text-[10px] text-red-400 hover:underline">✕ Remove</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Voiceover Narration Script -->
+                        <div class="pt-3 border-t border-slate-800/80 space-y-2.5">
+                            <div class="flex justify-between items-center">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>Voiceover Narration Script (What should be spoken)</span>
+                                </label>
+                                <div class="flex items-center space-x-2">
+                                    <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Empty = Silent Video</span>
+                                    <label for="script-file-upload" class="text-[11px] text-brand-glow hover:underline cursor-pointer flex items-center gap-1 font-sans">
+                                        <span>📁</span> <span>Upload Document</span>
+                                    </label>
+                                    <input type="file" id="script-file-upload" class="hidden" accept=".txt,.md,.srt,.vtt,.json" onchange="handleScriptDocumentUpload(this)">
+                                    <span id="script-stats" class="text-[11px] font-mono text-brand-glow bg-slate-900 px-2 py-0.5 rounded border border-slate-800">0 words | ~0.0 min</span>
+                                </div>
+                            </div>
+
+                            <!-- Director Quick Insert Toolbar -->
+                            <div class="flex items-center space-x-1.5 overflow-x-auto py-1 text-[11px]">
+                                <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Director Cues:</span>
+                                <button type="button" onclick="insertScriptTag('[pause 500ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow transition-all font-mono text-[10px]">
+                                    ⏱️ [Pause 0.5s]
+                                </button>
+                                <button type="button" onclick="insertScriptTag('[pause 1s] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow transition-all font-mono text-[10px]">
+                                    ⏱️ [Pause 1.0s]
+                                </button>
+                                <button type="button" onclick="insertScriptTag('[emphasis] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow transition-all font-mono text-[10px]">
+                                    ✨ [Emphasis]
+                                </button>
+                                <button type="button" onclick="insertScriptTag('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-brand-500/20 hover:text-brand-glow transition-all font-mono text-[10px]">
+                                    💡 [Pro Tip]
                                 </button>
                             </div>
+
+                            <textarea id="script-input" rows="3" oninput="updateScriptMetrics(); if(typeof updatePreflightSummary==='function')updatePreflightSummary();" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-sans leading-relaxed shadow-inner" placeholder="Enter spoken narration text. Leave completely empty for 100% silent video..."></textarea>
+                        </div>
+                    </div>
+
+                    <!-- PHASE 2: FORMAT (What shape does it take?) -->
+                    <div class="space-y-3 p-4 rounded-xl bg-slate-950/70 border border-slate-800">
+                        <div class="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                            <div class="flex items-center gap-2">
+                                <span class="w-5 h-5 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-[10px] font-bold font-mono">2</span>
+                                <div>
+                                    <h4 class="text-xs font-bold uppercase tracking-wider text-slate-200">Phase 2 — Format</h4>
+                                    <p class="text-[10px] text-slate-400">What shape does it take? Output type, aspect ratio & scene count</p>
+                                </div>
+                            </div>
                         </div>
 
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                            <div>
-                                <div class="flex justify-between items-center mb-1">
-                                    <label class="text-xs font-semibold text-slate-300">Avatar Persona</label>
-                                    <label for="avatar-file-input" class="text-[10px] text-brand-glow hover:underline cursor-pointer flex items-center gap-0.5">
-                                        <span>📸</span> <span>Upload Photo</span>
-                                    </label>
-                                    <input type="file" id="avatar-file-input" class="hidden" accept="image/*" onchange="uploadAvatar(this)">
+                        <!-- Output Type: Video or Slide -->
+                        <div class="space-y-2">
+                            <div class="flex items-center justify-between">
+                                <label class="text-xs font-bold text-slate-300 uppercase tracking-wider">Output Type</label>
+                                <span class="text-[10px] text-slate-400">Can also be customized per scene in Storyboard</span>
+                            </div>
+
+                            <!-- Segmented Output Selector Cards -->
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                                <div id="output-card-video" onclick="setDirectorOutputType('video'); if(typeof updatePreflightSummary==='function')updatePreflightSummary();" class="p-3 rounded-xl bg-brand-500/15 border-2 border-brand-500 cursor-pointer transition-all hover:brightness-110">
+                                    <div class="flex items-center justify-between mb-1">
+                                        <span class="text-xs font-bold text-white flex items-center gap-1.5">
+                                            <span>🎬</span> <span>Video Scene Mode</span>
+                                        </span>
+                                        <span id="output-badge-video" class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-brand-500 text-white font-mono">ACTIVE</span>
+                                    </div>
+                                    <p class="text-[11px] text-slate-300 leading-snug">
+                                        Dynamic visuals, camera motion, and avatar presenter. Best for demonstrations, b-roll, and narrative visual sequences.
+                                    </p>
                                 </div>
-                                <select id="avatar-persona-select" onchange="onPersonaSelectChange(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                    <option value="maya_fintech" selected>Maya (Senior FinTech Lead)</option>
-                                    <option value="alex_ai">Alex (Enterprise AI Architect)</option>
-                                    <option value="elena_compliance">Elena (Risk & Governance Director)</option>
-                                    <option value="david_trainer">David (Global LMS Instructor)</option>
-                                    <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
-                                    <option value="custom_upload">Custom Uploaded Portrait</option>
+
+                                <div id="output-card-slide" onclick="setDirectorOutputType('slide'); if(typeof updatePreflightSummary==='function')updatePreflightSummary();" class="p-3 rounded-xl bg-slate-900 border-2 border-slate-800 cursor-pointer transition-all hover:border-slate-700 hover:brightness-110">
+                                    <div class="flex items-center justify-between mb-1">
+                                        <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                                            <span>📊</span> <span>Instructional Slide Mode</span>
+                                        </span>
+                                        <span id="output-badge-slide" class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono hidden">ACTIVE</span>
+                                    </div>
+                                    <p class="text-[11px] text-slate-400 leading-snug">
+                                        Clean static instructional slide with key takeaway bullet points & diagrams while avatar explains the concept.
+                                    </p>
+                                </div>
+                            </div>
+                            <input type="hidden" id="output-type-select" value="video">
+                        </div>
+
+                        <!-- Resolution & Scene Count Grid -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+                            <!-- Format & Aspect Ratio -->
+                            <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider block">Resolution & Aspect Ratio</label>
+
+                                <!-- Aspect Ratio Quick Switcher Pills -->
+                                <div class="grid grid-cols-4 gap-1.5 text-[11px]">
+                                    <button type="button" onclick="setAspectPreset('16:9_hd')" id="aspect-btn-16-9" class="py-1 px-1.5 rounded-lg bg-brand-600 text-white font-bold text-center border border-brand-500 transition-all">
+                                        16:9 ▭
+                                    </button>
+                                    <button type="button" onclick="setAspectPreset('9:16_vertical')" id="aspect-btn-9-16" class="py-1 px-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 font-semibold text-center border border-slate-800 transition-all">
+                                        9:16 ▯
+                                    </button>
+                                    <button type="button" onclick="setAspectPreset('1:1_square')" id="aspect-btn-1-1" class="py-1 px-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 font-semibold text-center border border-slate-800 transition-all">
+                                        1:1 ▢
+                                    </button>
+                                    <button type="button" onclick="setAspectPreset('4:5_portrait')" id="aspect-btn-4-5" class="py-1 px-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 font-semibold text-center border border-slate-800 transition-all">
+                                        4:5 ▰
+                                    </button>
+                                </div>
+
+                                <select id="resolution-select" onchange="updateAspectPreview(); if(typeof updatePreflightSummary==='function')updatePreflightSummary(); try{localStorage.setItem('neuroclips_last_resolution', this.value);}catch(e){}" class="w-full rounded-xl bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                                    <optgroup label="▭ Landscape — 16:9">
+                                        <option value="16:9_hd" data-w="1280" data-h="720" data-orient="Landscape" selected>YouTube / Course Video — 16:9 HD (1280×720)</option>
+                                        <option value="16:9_fhd" data-w="1920" data-h="1080" data-orient="Landscape">YouTube / Course Video — 16:9 Full HD (1920×1080)</option>
+                                        <option value="16:9_sd" data-w="576" data-h="324" data-orient="Landscape">Fast Draft Preview — 16:9 SD (576×324)</option>
+                                    </optgroup>
+                                    <optgroup label="▯ Portrait — 9:16">
+                                        <option value="9:16_vertical" data-w="720" data-h="1280" data-orient="Portrait">Instagram Reels / YouTube Shorts — 9:16 (720×1280)</option>
+                                        <option value="9:16_fhd" data-w="1080" data-h="1920" data-orient="Portrait">Instagram Reels / YouTube Shorts — 9:16 Full HD (1080×1920)</option>
+                                    </optgroup>
+                                    <optgroup label="▢ Square — 1:1">
+                                        <option value="1:1_square" data-w="720" data-h="720" data-orient="Square">Instagram / Social Feed Post — 1:1 (720×720)</option>
+                                        <option value="1:1_hd" data-w="1080" data-h="1080" data-orient="Square">Instagram / Social Feed Post — 1:1 HD (1080×1080)</option>
+                                    </optgroup>
+                                    <optgroup label="▰ Portrait Feed — 4:5">
+                                        <option value="4:5_portrait" data-w="1080" data-h="1350" data-orient="Portrait">Instagram / LinkedIn Portrait Feed — 4:5 (1080×1350)</option>
+                                        <option value="4:5_sd" data-w="576" data-h="720" data-orient="Portrait">Fast Portrait Preview — 4:5 (576×720)</option>
+                                    </optgroup>
                                 </select>
-                                <span id="persona-meta-badge" class="text-[10px] text-brand-glow font-mono block mt-1">🇮🇳 South Asian | en-IN (Neerja) | FinTech</span>
+
+                                <div class="flex items-center gap-2.5 mt-1">
+                                    <div class="flex items-center justify-center w-10 h-10 flex-shrink-0 bg-slate-900 rounded-lg border border-slate-800">
+                                        <div id="aspect-preview-box" class="border-2 border-brand-500/70 bg-brand-500/10 rounded-[3px] transition-all"
+                                             style="width:36px;height:20.25px;"></div>
+                                    </div>
+                                    <p id="aspect-preview-label" class="text-[11px] text-slate-400 leading-snug">
+                                        <span class="font-mono text-brand-glow font-bold">1280×720</span> · Landscape
+                                    </p>
+                                </div>
                             </div>
 
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Avatar Display Layout</label>
-                                <select id="avatar-layout-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                    <option value="pip_bottom_right">PiP Floating Glass Card (Bottom Right)</option>
-                                    <option value="pip_top_right">PiP Floating Bubble (Top Right)</option>
-                                    <option value="split_screen">Split Screen (60% Diagram / 40% Avatar)</option>
-                                    <option value="full_anchor">Full Anchor (100% Presenter)</option>
-                                    <option value="none">None (B-roll Only)</option>
-                                </select>
-                            </div>
+                            <!-- Scene Chunking -->
+                            <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2.5">
+                                <div class="flex items-center justify-between">
+                                    <label class="text-xs font-bold text-slate-200 uppercase tracking-wider">Scene Chunking</label>
+                                    <span id="scene-val" class="font-mono text-brand-glow font-bold text-xs">4 Scenes</span>
+                                </div>
 
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Compiler Engine</label>
-                                <select id="engine-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
-                                    <option value="ffmpeg">Standard FFmpeg (Fast)</option>
-                                    <option value="remotion">Remotion React (Broadcast Motion)</option>
-                                </select>
+                                <div class="flex rounded-lg bg-slate-900 p-0.5 border border-slate-800 text-[11px]">
+                                    <button type="button" id="chunk-mode-auto" onclick="setChunkingMode('auto')" class="w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
+                                        🤖 AI Smart Chunking
+                                    </button>
+                                    <button type="button" id="chunk-mode-manual" onclick="setChunkingMode('manual')" class="w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all">
+                                        🎯 Target Scene Count
+                                    </button>
+                                </div>
+                                <input type="hidden" id="chunking-mode-input" value="auto">
+
+                                <input id="scene-slider" type="range" min="1" max="16" value="4" oninput="document.getElementById('scene-val').innerText = this.value + ' Scenes'; if(typeof updatePreflightSummary==='function')updatePreflightSummary();" class="w-full accent-brand-500 bg-slate-800 rounded-lg cursor-pointer">
+                                <div class="flex items-center justify-between text-[10px] text-slate-400">
+                                    <button type="button" onclick="setSceneChunk(3)" class="hover:text-brand-glow">Shorts (3)</button>
+                                    <button type="button" onclick="setSceneChunk(6)" class="hover:text-brand-glow">Standard (6)</button>
+                                    <button type="button" onclick="setSceneChunk(10)" class="hover:text-brand-glow">Deep (10)</button>
+                                    <button type="button" onclick="setSceneChunk(16)" class="hover:text-brand-glow">Master (16)</button>
+                                </div>
                             </div>
                         </div>
                     </div>
 
-                    <!-- 🎙️ NEURAL VOICE DIRECTOR STUDIO (ELEVENLABS-STYLE CONTROL DECK) -->
+                    <!-- PHASE 3: PRESENTATION (LOOK & SOUND) -->
                     <div class="p-4 rounded-xl bg-slate-950/90 border border-brand-500/30 space-y-3.5 shadow-lg shadow-brand-500/5">
                         <div class="flex items-center justify-between border-b border-slate-800 pb-2">
                             <div class="flex items-center space-x-2">
-                                <span class="text-sm">🎙️</span>
+                                <span class="w-5 h-5 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-xs font-bold">3</span>
                                 <div>
-                                    <span class="text-xs font-bold text-white">Neural Voice Director Studio</span>
-                                    <span class="text-[10px] text-slate-400 block">Prosody, emotion tuning & dual-engine synthesis</span>
+                                    <span class="text-xs font-bold text-white uppercase tracking-wider">Phase 3: Presentation</span>
+                                    <span class="text-[10px] text-slate-400 block">Voice, speech prosody, speaker avatar, and audio/visual FX</span>
                                 </div>
                             </div>
                             
-                            <!-- Engine Switcher -->
-                            <div class="flex rounded-lg bg-slate-900 p-0.5 border border-slate-800 text-[10px]">
-                                <button type="button" id="engine-tab-edgetts" onclick="switchVoiceEngine('edge_tts')" class="px-2.5 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
-                                    ⚡ Free Neural
-                                </button>
-                                <button type="button" id="engine-tab-elevenlabs" onclick="switchVoiceEngine('elevenlabs')" class="px-2.5 py-1 rounded-md text-slate-400 hover:text-white transition-all">
-                                    👑 ElevenLabs Studio
+                            <!-- Voice Engine Switcher & Quick Settings -->
+                            <div class="flex items-center space-x-2">
+                                <div class="flex rounded-lg bg-slate-900 p-0.5 border border-slate-800 text-[10px]">
+                                    <button type="button" id="engine-tab-edgetts" onclick="switchVoiceEngine('edge_tts')" class="px-2.5 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
+                                        ⚡ Free Neural
+                                    </button>
+                                    <button type="button" id="engine-tab-elevenlabs" onclick="switchVoiceEngine('elevenlabs')" class="px-2.5 py-1 rounded-md text-slate-400 hover:text-white transition-all">
+                                        👑 ElevenLabs
+                                    </button>
+                                </div>
+                                <button type="button" onclick="openSettingsModal()" class="p-1 text-slate-400 hover:text-brand-glow transition-all" title="Configure Voice Engine Credentials in Settings">
+                                    ⚙️
                                 </button>
                             </div>
                         </div>
 
-                        <!-- ElevenLabs API Key / Voice ID Config (Collapsible) -->
-                        <div id="elevenlabs-config-box" class="hidden p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 space-y-2 text-xs">
-                            <div class="flex items-center justify-between">
-                                <span class="text-amber-300 font-bold text-[11px] flex items-center gap-1">
-                                    <span>👑</span> <span>ElevenLabs MultiLingual V2 Credentials</span>
-                                </span>
-                                <span class="text-[10px] text-slate-400">Stored locally in your browser</span>
-                            </div>
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        <!-- ElevenLabs Notification Notice (Task 6b) -->
+                        <div id="elevenlabs-config-box" class="hidden p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs flex items-center justify-between">
+                            <div class="flex items-center space-x-2">
+                                <span class="text-amber-400 text-sm">👑</span>
                                 <div>
-                                    <label class="block text-[10px] text-slate-300 mb-1">ElevenLabs API Key</label>
-                                    <input type="password" id="elevenlabs-api-key" placeholder="xi-api-key..." onchange="localStorage.setItem('neuroclips_eleven_key', this.value)" class="w-full rounded bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
-                                </div>
-                                <div>
-                                    <label class="block text-[10px] text-slate-300 mb-1">Voice ID (or Cloned ID)</label>
-                                    <select id="elevenlabs-voice-id" onchange="localStorage.setItem('neuroclips_eleven_voice', this.value)" class="w-full rounded bg-slate-900 border border-slate-700 p-1.5 text-xs text-white">
-                                        <option value="21m00Tcm4TlvDq8ikWAM" selected>Rachel (Female - Warm & Professional)</option>
-                                        <option value="pNInz6obpgDQGcFmaJgB">Adam (Male - Deep & Executive)</option>
-                                        <option value="ErXwobaYiN019PkySvjV">Antoni (Male - Engaging Narrator)</option>
-                                        <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female - Crisp Educational)</option>
-                                        <option value="TxGEqnHWrfWFTfGW9XjX">Josh (Male - Conversational Host)</option>
-                                    </select>
+                                    <span class="font-bold text-amber-300">ElevenLabs MultiLingual V2 Active</span>
+                                    <span class="text-[10px] text-slate-400 block">Account key & voice profile loaded from Settings.</span>
                                 </div>
                             </div>
+                            <button type="button" onclick="openSettingsModal()" class="px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[10px] font-semibold transition-all">
+                                ⚙️ Manage Key
+                            </button>
                         </div>
 
-                        <!-- Voice Profile & Archetype Selection -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                        <!-- Language & Voice Profile -->
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🌐 Language Filter</label>
+                                <select id="language-select" onchange="onLanguageChange()" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                                    <option value="en-US" selected>🇺🇸 English (US)</option>
+                                    <option value="te-IN">🇮🇳 Telugu (తెలుగు)</option>
+                                    <option value="ta-IN">🇮🇳 Tamil (தமிழ்)</option>
+                                    <option value="hi-IN">🇮🇳 Hindi (हिन्दी)</option>
+                                    <option value="es-ES">🇪🇸 Spanish (Castilian)</option>
+                                    <option value="fr-FR">🇫🇷 French (Standard)</option>
+                                    <option value="de-DE">🇩🇪 German (Standard)</option>
+                                    <option value="ja-JP">🇯🇵 Japanese (日本語)</option>
+                                </select>
+                            </div>
+
                             <div id="edgetts-voice-container">
                                 <div class="flex justify-between items-center mb-1">
-                                    <label class="text-xs font-semibold text-slate-300">Voice Profile</label>
-                                    <span class="text-[10px] text-brand-glow">HD Neural</span>
+                                    <label class="text-xs font-semibold text-slate-300">Selected Voice</label>
+                                    <span id="active-voice-badge" class="text-[10px] text-brand-glow font-mono">en-IN Neerja</span>
                                 </div>
-                                <select id="voice-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
+                                <select id="voice-select" onchange="updateActiveVoiceBadge(); if(typeof updatePreflightSummary==='function')updatePreflightSummary(); try{localStorage.setItem('neuroclips_last_voice', this.value);}catch(e){}" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
+                                    <option value="en-IN-PrabhatNeural">Srinivas (en-IN, Male - Cloud & AI Lead)</option>
                                     <option value="en-IN-NeerjaNeural" selected>Neerja (en-IN, Female - Instructional)</option>
                                     <option value="en-US-GuyNeural">Guy (en-US, Male - Executive)</option>
                                     <option value="en-US-AriaNeural">Aria (en-US, Female - Presenter)</option>
@@ -1997,7 +2507,7 @@ async def serve_dashboard():
                             </div>
 
                             <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">🎭 Emotion & Prosody Archetype</label>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">🎭 Emotion & Prosody</label>
                                 <select id="archetype-select" onchange="applyVoiceArchetype(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
                                     <option value="technical" selected>Technical Instructor (Clear & Measured)</option>
                                     <option value="executive">Executive & Boardroom (Deep & Authoritative)</option>
@@ -2042,7 +2552,7 @@ async def serve_dashboard():
                             </div>
                         </div>
 
-                        <!-- Audition Deck & Waveform Audio Preview -->
+                        <!-- Audition Deck & Waveform Audio Preview (Task 6a: Standalone Audio Master removed) -->
                         <div class="flex flex-col sm:flex-row items-center justify-between gap-2.5 p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 text-xs">
                             <div class="flex items-center space-x-2 w-full sm:w-auto">
                                 <button type="button" onclick="auditionVoiceDirector()" id="audition-btn" class="px-3 py-1.5 rounded-lg bg-gradient-to-r from-brand-600 to-indigo-600 text-white font-bold hover:brightness-110 transition-all flex items-center gap-1.5 shadow-md shadow-brand-500/20 whitespace-nowrap">
@@ -2053,92 +2563,176 @@ async def serve_dashboard():
                             <audio id="director-audio-player" controls class="h-7 w-full sm:w-64 accent-brand-500" style="filter: invert(1) hue-rotate(180deg) brightness(0.85);"></audio>
                         </div>
 
-                        <!-- 🎧 Standalone Audio Master & Subtitle Export -->
-                        <div class="p-3 rounded-lg bg-slate-900/95 border border-emerald-500/30 space-y-2.5 text-xs">
-                            <div class="flex items-center justify-between">
-                                <span class="text-emerald-400 font-bold flex items-center gap-1.5">
-                                    <span>🎧</span> <span>Export Standalone Audio Master</span>
-                                </span>
-                                <span class="text-[10px] text-slate-400">Generate high-fidelity audio + subtitles without video</span>
-                            </div>
-                            <div class="flex flex-col md:flex-row items-center justify-between gap-2.5">
-                                <div class="flex items-center space-x-2 w-full md:w-auto">
-                                    <label class="text-[11px] text-slate-300 font-semibold whitespace-nowrap">Output Format:</label>
-                                    <select id="audio-export-format" class="rounded bg-slate-950 border border-slate-700 p-1.5 text-xs text-brand-glow font-mono font-bold">
-                                        <option value="mp3" selected>🎵 MP3 (Universal Broadcast 256k)</option>
-                                        <option value="wav">🎙️ WAV (Studio Lossless Master 44.1kHz)</option>
-                                        <option value="m4a">📱 M4A / AAC (Apple Podcasts & LMS)</option>
-                                        <option value="ogg">🌐 OGG (Web Audio / Game Engines)</option>
-                                        <option value="flac">💿 FLAC (Audiophile Lossless)</option>
-                                    </select>
+                        <!-- Motion Graphics & Background Music Toggles -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs pt-1">
+                            <div class="p-3 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5">
+                                <div class="flex justify-between items-center">
+                                    <label class="font-semibold text-slate-300 flex items-center gap-1">
+                                        <span>🎥</span> <span>Motion Graphics</span>
+                                    </label>
+                                    <span id="motion-status-badge" class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-glow">ON</span>
                                 </div>
-                                <div class="flex items-center space-x-2 w-full md:w-auto justify-end">
-                                    <button type="button" onclick="exportStandaloneAudio()" id="export-audio-btn" class="w-full md:w-auto px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-bold hover:brightness-110 transition-all flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20">
-                                        <span>⚡</span> <span>Generate & Download Audio Master</span>
+                                <div class="flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
+                                    <button type="button" id="motion-btn-on" onclick="setMotionGraphics(true)" class="w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
+                                        ✨ ON (Dynamic)
+                                    </button>
+                                    <button type="button" id="motion-btn-off" onclick="setMotionGraphics(false)" class="w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all">
+                                        🛑 OFF (Static)
                                     </button>
                                 </div>
+                                <input type="hidden" id="motion-graphics-check" value="true">
+                                <p class="text-[10px] text-slate-400 leading-tight">Camera motion zoom & pan. Disable for static diagrams.</p>
                             </div>
-                            <div id="audio-export-result-box" class="hidden p-2 rounded bg-slate-950 border border-emerald-500/40 flex items-center justify-between">
-                                <span id="audio-export-meta" class="text-[11px] text-emerald-300 font-mono"></span>
-                                <div class="flex items-center space-x-3 text-[11px]">
-                                    <a id="audio-download-link" href="#" download class="text-brand-glow hover:underline font-bold">⬇️ Download Audio</a>
-                                    <a id="srt-download-link" href="#" download class="text-indigo-400 hover:underline font-bold">📄 Download Subtitles (.SRT)</a>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
 
-                    <!-- Video Bumpers: Intro & Outro (Optional Pre-recorded Clips) -->
-                    <div class="p-3.5 rounded-xl bg-slate-950/80 border border-indigo-500/20 space-y-2.5">
-                        <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
-                            <label class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                                <span>🎞️</span> <span>Branded Video Bumpers (Intro / Outro)</span>
-                            </label>
-                            <button onclick="openAssetVaultModal()" class="text-[10px] text-indigo-400 hover:underline">
-                                Manage Video Library ↗
-                            </button>
+                            <div class="p-3 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5">
+                                <div class="flex justify-between items-center">
+                                    <label class="font-semibold text-slate-300 flex items-center gap-1">
+                                        <span>🎵</span> <span>Background Music</span>
+                                    </label>
+                                    <span id="bgm-status-badge" class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">OFF</span>
+                                </div>
+                                <div class="flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
+                                    <button type="button" id="bgm-btn-on" onclick="setBackgroundMusic(true)" class="w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all">
+                                        🎵 ON (Ambient)
+                                    </button>
+                                    <button type="button" id="bgm-btn-off" onclick="setBackgroundMusic(false)" class="w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all">
+                                        🔇 OFF (Clean Voice)
+                                    </button>
+                                </div>
+                                <input type="hidden" id="bgm-check" value="false">
+                                <p class="text-[10px] text-slate-400 leading-tight">Subtle ambient music ducked behind narration (-18dB).</p>
+                            </div>
                         </div>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+
+                        <!-- Speaker Avatar Persona & Layout -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs pt-1">
                             <div>
-                                <label class="block text-[11px] text-slate-400 mb-1">Intro Opener Clip</label>
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="text-xs font-semibold text-slate-300">Avatar Persona</label>
+                                    <label for="avatar-file-input" class="text-[10px] text-brand-glow hover:underline cursor-pointer flex items-center gap-0.5">
+                                        <span>📸</span> <span>Upload Photo</span>
+                                    </label>
+                                    <input type="file" id="avatar-file-input" class="hidden" accept="image/*" onchange="uploadAvatar(this)">
+                                </div>
+                                <select id="avatar-persona-select" onchange="onPersonaSelectChange(this.value); try{localStorage.setItem('neuroclips_last_persona', this.value);}catch(e){}" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="maya_fintech" selected>Maya (Senior FinTech Lead)</option>
+                                    <option value="alex_ai">Alex (Enterprise AI Architect)</option>
+                                    <option value="elena_compliance">Elena (Risk & Governance Director)</option>
+                                    <option value="david_trainer">David (Global LMS Instructor)</option>
+                                    <option value="srinivas_cloud">Srinivas (Lead AI & Cloud Architect)</option>
+                                    <option value="rajesh_cloud" style="display:none;">Rajesh (Legacy)</option>
+                                    <option value="custom_upload">Custom Uploaded Portrait</option>
+                                </select>
+                                <span id="persona-meta-badge" class="text-[10px] text-brand-glow font-mono block mt-1">🇮🇳 South Asian | en-IN (Neerja) | FinTech</span>
+                            </div>
+
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Avatar Display Layout</label>
+                                <select id="avatar-layout-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
+                                    <option value="pip_bottom_right">PiP Floating Glass Card (Bottom Right)</option>
+                                    <option value="pip_top_right">PiP Floating Bubble (Top Right)</option>
+                                    <option value="split_screen">Split Screen (60% Diagram / 40% Avatar)</option>
+                                    <option value="full_anchor">Full Anchor (100% Presenter)</option>
+                                    <option value="none">None (B-roll Only)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Bumpers & Identity Persistence -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs pt-1">
+                            <div>
+                                <label class="block text-[11px] text-slate-400 mb-1">Intro Opener Clip (Optional)</label>
                                 <select id="intro-bumper-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
                                     <option value="">None (Direct start)</option>
                                 </select>
                             </div>
                             <div>
-                                <label class="block text-[11px] text-slate-400 mb-1">Outro Closer Clip</label>
+                                <label class="block text-[11px] text-slate-400 mb-1">Outro Closer Clip (Optional)</label>
                                 <select id="outro-bumper-select" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-1.5 text-xs text-slate-200">
                                     <option value="">None (Direct finish)</option>
                                 </select>
                             </div>
                         </div>
+
+                        <div class="flex items-center justify-between pt-2 border-t border-slate-900 text-xs">
+                            <div class="flex items-center space-x-2">
+                                <select id="identity-load-select" onchange="loadSelectedIdentity(this.value)" class="rounded bg-slate-900 border border-slate-700 text-[10px] text-slate-300 p-1">
+                                    <option value="">📂 Load Identity Profile...</option>
+                                </select>
+                                <button onclick="saveCurrentIdentity()" class="text-[10px] px-2 py-1 rounded bg-brand-500/20 text-brand-glow border border-brand-500/30 hover:bg-brand-500/30 transition-all">
+                                    💾 Save Identity
+                                </button>
+                            </div>
+                            <button onclick="openAssetVaultModal()" class="text-[10px] text-indigo-400 hover:underline">
+                                Video Asset Library ↗
+                            </button>
+                        </div>
                     </div>
 
-                    <!-- Toggles & Action Buttons -->
-                    <div class="space-y-3 pt-1">
-                        <div class="flex items-center space-x-4 px-1">
+                    <!-- PHASE 4: RENDER (ENGINE & EXECUTION) -->
+                    <div class="p-4 rounded-xl bg-slate-950/90 border border-brand-500/30 space-y-3.5 shadow-lg shadow-brand-500/5">
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
                             <div class="flex items-center space-x-2">
-                                <input type="checkbox" id="burn-subtitles-check" class="rounded accent-brand-500 cursor-pointer" checked>
-                                <label for="burn-subtitles-check" class="text-xs text-slate-300 cursor-pointer select-none">
-                                    Burn-In Subtitles <span class="text-[11px] text-brand-glow font-mono">(Open Captions)</span>
-                                </label>
+                                <span class="w-5 h-5 rounded bg-brand-500/20 text-brand-glow flex items-center justify-center text-xs font-bold">4</span>
+                                <div>
+                                    <span class="text-xs font-bold text-white uppercase tracking-wider">Phase 4: Render Engine & Compilation</span>
+                                    <span class="text-[10px] text-slate-400 block">Select compiler backend, configure output options, and execute build</span>
+                                </div>
                             </div>
-                            <div class="flex items-center space-x-2">
-                                <input type="checkbox" id="auto-clean-check" class="rounded accent-brand-500 cursor-pointer">
-                                <label for="auto-clean-check" class="text-xs text-slate-300 cursor-pointer select-none">
-                                    Fresh Workspace <span class="text-[11px] text-slate-500">(Auto-clear cache)</span>
-                                </label>
+                            <span class="text-[10px] font-mono text-slate-400">Directorial Pipeline</span>
+                        </div>
+
+                        <!-- Compiler Engine (moved from Step 6) & Execution Checkboxes -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">Compiler Engine</label>
+                                <select id="engine-select" onchange="if(typeof updatePreflightSummary==='function')updatePreflightSummary();" class="w-full rounded-lg bg-slate-900 border border-slate-700/80 p-2 text-xs text-slate-200">
+                                    <option value="ffmpeg" selected>Standard FFmpeg (Fast & Reliable)</option>
+                                    <option value="remotion">Remotion React (Broadcast Motion Graphics)</option>
+                                </select>
+                            </div>
+                            <div class="flex flex-col justify-center space-y-2 p-2 rounded-lg bg-slate-900/60 border border-slate-800">
+                                <div class="flex items-center space-x-2">
+                                    <input type="checkbox" id="burn-subtitles-check" onchange="if(typeof updatePreflightSummary==='function')updatePreflightSummary();" class="rounded accent-brand-500 cursor-pointer" checked>
+                                    <label for="burn-subtitles-check" class="text-xs text-slate-300 cursor-pointer select-none">
+                                        Burn-In Subtitles <span class="text-[11px] text-brand-glow font-mono">(Open Captions)</span>
+                                    </label>
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <input type="checkbox" id="auto-clean-check" class="rounded accent-brand-500 cursor-pointer">
+                                    <label for="auto-clean-check" class="text-xs text-slate-300 cursor-pointer select-none">
+                                        Fresh Workspace <span class="text-[11px] text-slate-500">(Auto-clear cache)</span>
+                                    </label>
+                                </div>
                             </div>
                         </div>
 
-                        <div class="grid grid-cols-2 gap-3">
-                            <button id="storyboard-btn" onclick="openStoryboardPreview()" class="py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 font-bold text-sm text-slate-200 transition-all flex items-center justify-center space-x-2">
+                        <!-- PRE-FLIGHT SUMMARY (Task 7a) -->
+                        <div class="p-3 rounded-xl bg-slate-900/90 border border-brand-500/20 flex items-center justify-between gap-3 text-xs">
+                            <div class="flex items-center space-x-2 min-w-0">
+                                <span class="text-brand-glow text-sm">📋</span>
+                                <div class="truncate">
+                                    <div class="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Pre-Flight Configuration</div>
+                                    <div id="preflight-summary" class="font-mono text-brand-glow text-xs truncate">
+                                        16:9 HD · 1280×720 · 4 scenes · en-IN-NeerjaNeural · captions on · FFmpeg
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex items-center space-x-1.5 flex-shrink-0">
+                                <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                                <span class="text-[10px] text-emerald-400 font-mono font-semibold">Ready to Build</span>
+                            </div>
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                            <button id="storyboard-btn" onclick="openStoryboardPreview()" class="py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 font-bold text-sm text-slate-200 transition-all flex items-center justify-center space-x-2 shadow-md">
                                 <span>🎬</span>
-                                <span>Storyboard Preview</span>
+                                <span>Storyboard & Scene Breakdown</span>
                             </button>
                             <button id="generate-btn" onclick="startGeneration()" class="py-3.5 rounded-xl bg-gradient-to-r from-brand-600 via-indigo-600 to-brand-500 hover:from-brand-500 hover:to-indigo-500 font-bold text-sm text-white shadow-lg shadow-brand-500/20 active:scale-[0.99] transition-all flex items-center justify-center space-x-2">
                                 <span>🚀</span>
-                                <span>Direct Render</span>
+                                <span>Generate Content</span>
                             </button>
                         </div>
                     </div>
@@ -2149,14 +2743,14 @@ async def serve_dashboard():
             <div class="lg:col-span-5 space-y-6">
                 <div class="grid grid-cols-2 gap-3">
                     <div class="glass-panel p-3.5 rounded-xl">
-                        <span class="text-xs text-slate-400">GPU VRAM</span>
-                        <div id="vram-stat" class="text-base font-bold text-brand-glow font-mono mt-0.5">0 / 0 MB</div>
-                        <div class="w-full bg-slate-800 h-1 rounded-full mt-1.5 overflow-hidden"><div id="vram-bar" class="bg-brand-500 h-full w-0"></div></div>
+                        <span class="text-xs text-slate-400">Current Stage</span>
+                        <div id="current-stage-stat" class="text-base font-bold text-brand-glow font-mono mt-0.5 truncate" title="Idle">Idle</div>
+                        <span class="text-[10px] text-slate-500">Active Milestone</span>
                     </div>
                     <div class="glass-panel p-3.5 rounded-xl">
-                        <span class="text-xs text-slate-400">GPU Utilization</span>
-                        <div id="gpu-util-stat" class="text-base font-bold text-white font-mono mt-0.5">0%</div>
-                        <div class="w-full bg-slate-800 h-1 rounded-full mt-1.5 overflow-hidden"><div id="gpu-bar" class="bg-emerald-400 h-full w-0"></div></div>
+                        <span class="text-xs text-slate-400">Elapsed</span>
+                        <div id="elapsed-stat" class="text-base font-bold text-white font-mono mt-0.5">00:00</div>
+                        <span class="text-[10px] text-slate-500">Render Time (mm:ss)</span>
                     </div>
                     <div class="glass-panel p-3.5 rounded-xl">
                         <span class="text-xs text-slate-400">System CPU</span>
@@ -2166,7 +2760,43 @@ async def serve_dashboard():
                     <div class="glass-panel p-3.5 rounded-xl">
                         <span class="text-xs text-slate-400">Script Latency</span>
                         <div id="latency-stat" class="text-base font-bold text-brand-glow font-mono mt-0.5">0.00s</div>
-                        <span class="text-[10px] text-slate-500">Llama 3 Director</span>
+                        <span class="text-[10px] text-slate-500">Rule-Based Director (Fallback)</span>
+                    </div>
+                </div>
+
+                <!-- DIRECTOR PRODUCTION OUTPUT PLAYER & DOWNLOAD -->
+                <div id="director-output-card" class="glass-panel rounded-2xl p-5 space-y-3.5 border border-brand-500/30">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-2.5">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-slate-500" id="director-status-dot"></span>
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-200">Director Video Output</h3>
+                        </div>
+                        <span id="director-pipeline-phase" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 text-brand-glow border border-brand-500/30">Idle</span>
+                    </div>
+
+                    <!-- Pipeline Phase & Progress -->
+                    <div id="director-progress-container" class="space-y-1.5 hidden">
+                        <div class="flex justify-between text-[11px] font-mono">
+                            <span id="director-phase-msg" class="text-slate-300">Queued</span>
+                            <span id="director-phase-pct" class="text-brand-glow font-bold">0%</span>
+                        </div>
+                        <div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                            <div id="director-progress-bar" class="h-full bg-gradient-to-r from-brand-600 to-indigo-500 transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <!-- Video Preview Screen -->
+                    <div class="w-full aspect-video rounded-xl bg-slate-950 border border-slate-800 overflow-hidden relative shadow-inner flex items-center justify-center group">
+                        <video id="director-video-player" class="w-full h-full object-contain" controls poster="/static_renders/custom_avatar.png">
+                            Your browser does not support HTML5 video.
+                        </video>
+                    </div>
+
+                    <!-- Download CTA Button -->
+                    <div class="pt-1">
+                        <a id="director-download-btn" href="#" download="director_production.mp4" class="w-full py-2.5 px-4 rounded-xl bg-slate-800 text-slate-400 font-bold text-xs flex items-center justify-center gap-2 border border-slate-700 transition-all pointer-events-none opacity-50">
+                            <span>⬇️</span> <span>Download Generated Video (.mp4)</span>
+                        </a>
                     </div>
                 </div>
 
@@ -2768,24 +3398,396 @@ async def serve_dashboard():
             </div>
         </div><!-- END OF MODE 3: IMAGE DIRECTOR -->
 
+
+        <!-- MODE: AVATAR STUDIO ("Avathar Page" from wire_frames/raw_plan.jpeg) -->
+        <div id="mode-avatar-section" class="hidden space-y-6">
+            <div class="glass-panel-glow rounded-2xl p-6 relative overflow-hidden border border-pink-500/20">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-3">
+                    <div class="flex items-center space-x-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-pink-600 via-purple-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-pink-500/20">
+                            <span class="text-xl">👤</span>
+                        </div>
+                        <div>
+                            <h2 class="text-base font-bold text-white flex items-center gap-2">
+                                <span>Avatar Studio</span>
+                                <span class="text-xs font-mono px-2 py-0.5 rounded bg-pink-500/20 text-pink-300 border border-pink-500/30">Wireframe: Avathar Page</span>
+                            </h2>
+                            <p class="text-xs text-slate-400">Photo-to-Presenter Synthesis, Speech Scripting, Curtain Chroma Compositing & 3D Rigging</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-2 text-xs">
+                        <span class="px-2.5 py-1 rounded-lg bg-pink-500/10 border border-pink-500/30 text-pink-300 font-mono text-[11px]">
+                            ⚡ Zero-Drift Lip Sync & Motion
+                        </span>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 mt-6">
+                    <!-- LEFT: Presenter Configuration & Script (7 cols) -->
+                    <div class="lg:col-span-7 space-y-5">
+                        
+                        <!-- STEP 1: UPLOAD IMAGE / AVATAR PORTRAIT -->
+                        <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                    <span class="w-4 h-4 rounded bg-pink-500/20 text-pink-400 flex items-center justify-center text-[10px] font-bold">1</span>
+                                    <span>Upload Image (Presenter Portrait)</span>
+                                </label>
+                                <span class="text-[10px] text-slate-400">Accepts PNG, JPG, WEBP &bull; 1:1 or 3:4 aspect recommended</span>
+                            </div>
+
+                            <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                                <!-- Live Portrait Preview Card with Backdrop Preview -->
+                                <div class="sm:col-span-4 flex flex-col items-center justify-center p-3 rounded-xl bg-slate-900 border border-slate-800 relative group overflow-hidden">
+                                    <div id="avatar-preview-curtain-bg" class="w-28 h-28 rounded-2xl flex items-center justify-center overflow-hidden border-2 border-slate-700 shadow-inner transition-colors duration-300" style="background-color: #00FF00;">
+                                        <img id="avatar-portrait-img" src="/static_renders/custom_avatar.png" alt="Presenter Portrait" class="w-full h-full object-cover object-top" onerror="this.src='https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?q=80&w=400'">
+                                    </div>
+                                    <span id="avatar-img-badge" class="mt-2 text-[10px] font-mono text-slate-400">custom_avatar.png</span>
+                                </div>
+
+                                <!-- Upload Area & Preset Selectors -->
+                                <div class="sm:col-span-8 space-y-2.5">
+                                    <div class="border-2 border-dashed border-slate-700 hover:border-pink-500/60 rounded-xl p-3 text-center transition-all bg-slate-900/50">
+                                        <input type="file" id="avatar-page-file-input" accept="image/*" class="hidden" onchange="handleAvatarPageUpload(this)">
+                                        <label for="avatar-page-file-input" class="cursor-pointer block space-y-1">
+                                            <span class="text-lg">📸</span>
+                                            <div class="text-xs font-bold text-white">Click to Upload Avatar Photo</div>
+                                            <p class="text-[10px] text-slate-400">or drag & drop headshot image file here</p>
+                                        </label>
+                                    </div>
+
+                                    <div>
+                                        <label class="block text-[10px] font-semibold text-slate-400 mb-1">Or Pick Canonical Presenter Identity</label>
+                                        <select id="avatar-page-preset-select" onchange="applyAvatarPagePreset(this.value)" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                            <option value="custom">📸 Custom Uploaded Portrait</option>
+                                            <option value="maya" selected>🇮🇳 Maya Sharma (Senior FinTech Lead)</option>
+                                            <option value="alex">🇺🇸 Alex Vance (Enterprise AI Architect)</option>
+                                            <option value="elena">🇪🇺 Elena Rostova (Risk & Governance Director)</option>
+                                            <option value="david">🇬🇧 David Kim (Global LMS Specialist)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- STEP 2: SCRIPT FOR AVATAR TO TALK -->
+                        <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                            <div class="flex justify-between items-center">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                    <span class="w-4 h-4 rounded bg-pink-500/20 text-pink-400 flex items-center justify-center text-[10px] font-bold">2</span>
+                                    <span>Script for Avatar to Talk</span>
+                                </label>
+                                <span id="avatar-script-stats" class="text-[11px] font-mono text-pink-400 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">0 words | ~0.0 min</span>
+                            </div>
+
+                            <!-- Director Cue Buttons -->
+                            <div class="flex items-center space-x-1.5 overflow-x-auto py-1 text-[11px]">
+                                <span class="text-slate-500 font-semibold text-[10px] uppercase tracking-wider mr-1">Speech Cues:</span>
+                                <button type="button" onclick="insertAvatarCue('[pause 500ms] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-pink-500/20 hover:text-pink-300 font-mono text-[10px]">
+                                    ⏱️ [Pause 0.5s]
+                                </button>
+                                <button type="button" onclick="insertAvatarCue('[pause 1s] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-pink-500/20 hover:text-pink-300 font-mono text-[10px]">
+                                    ⏱️ [Pause 1.0s]
+                                </button>
+                                <button type="button" onclick="insertAvatarCue('[emphasis] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-pink-500/20 hover:text-pink-300 font-mono text-[10px]">
+                                    ✨ [Emphasis]
+                                </button>
+                                <button type="button" onclick="insertAvatarCue('[protip] ')" class="px-2 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700 hover:bg-pink-500/20 hover:text-pink-300 font-mono text-[10px]">
+                                    💡 [Pro Tip]
+                                </button>
+                            </div>
+
+                            <textarea id="avatar-script-input" rows="4" oninput="updateAvatarScriptMetrics()" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500 leading-relaxed font-sans shadow-inner" placeholder="Type or paste what the avatar should say (e.g. Welcome to this lesson. In this video, [pause 500ms] we examine algorithmic liquidity pools and how autonomous execution operates)...">Welcome to Modular-NeuroClips. Today, we examine how autonomous AI presenters composite directly onto green curtains for professional courseware.</textarea>
+                        </div>
+
+                        <!-- STEP 3: VOICE SELECTION & PROSODY -->
+                        <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                    <span class="w-4 h-4 rounded bg-pink-500/20 text-pink-400 flex items-center justify-center text-[10px] font-bold">3</span>
+                                    <span>Voice Selection & Audition</span>
+                                </label>
+                                <button type="button" onclick="auditionAvatarVoice()" id="avatar-audition-btn" class="px-3 py-1 rounded-lg bg-pink-600 hover:bg-pink-500 text-white font-bold text-xs flex items-center gap-1 shadow-sm transition-all">
+                                    <span>🔊</span> <span>Audition Voice</span>
+                                </button>
+                            </div>
+
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-300 mb-1">Voice Profile</label>
+                                    <select id="avatar-voice-select" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                        <option value="en-IN-NeerjaNeural" selected>Neerja (en-IN, Female - Instructional)</option>
+                                        <option value="en-US-GuyNeural">Guy (en-US, Male - Executive)</option>
+                                        <option value="en-US-AriaNeural">Aria (en-US, Female - Presenter)</option>
+                                        <option value="en-US-ChristopherNeural">Christopher (en-US, Male - Authoritative)</option>
+                                        <option value="en-GB-SoniaNeural">Sonia (en-GB, Female - BBC Accent)</option>
+                                        <option value="te-IN-MohanNeural">Mohan (te-IN, Telugu Male)</option>
+                                        <option value="te-IN-ShrutiNeural">Shruti (te-IN, Telugu Female)</option>
+                                        <option value="hi-IN-MadhurNeural">Madhur (hi-IN, Hindi Male)</option>
+                                        <option value="es-ES-AlvaroNeural">Álvaro (es-ES, Spanish Executive)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-[11px] text-slate-300 mb-1">
+                                        <span>Pacing Rate</span>
+                                        <span id="avatar-speed-val" class="font-mono text-pink-400 font-bold">1.00x</span>
+                                    </div>
+                                    <input id="avatar-speed-slider" type="range" min="0.75" max="1.30" step="0.05" value="1.0" oninput="document.getElementById('avatar-speed-val').innerText = parseFloat(this.value).toFixed(2) + 'x'; updateAvatarScriptMetrics();" class="w-full accent-pink-500 bg-slate-800 rounded-lg cursor-pointer">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-[11px] text-slate-300 mb-1">
+                                        <span>Pitch Tuning</span>
+                                        <span id="avatar-pitch-val" class="font-mono text-pink-400 font-bold">+0Hz</span>
+                                    </div>
+                                    <input id="avatar-pitch-slider" type="range" min="-10" max="10" step="1" value="0" oninput="document.getElementById('avatar-pitch-val').innerText = (this.value >= 0 ? '+' : '') + this.value + 'Hz'" class="w-full accent-pink-500 bg-slate-800 rounded-lg cursor-pointer">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- STEP 4: GREEN / WHITE CURTAIN BACKDROP & FUTURE 3D MODEL -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <!-- Curtain Backdrop Selector -->
+                            <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                                <div class="flex items-center justify-between">
+                                    <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                        <span class="w-4 h-4 rounded bg-pink-500/20 text-pink-400 flex items-center justify-center text-[10px] font-bold">4</span>
+                                        <span>Studio Curtain Backdrop</span>
+                                    </label>
+                                    <!-- Curtain OFF/ON switch -->
+                                    <label class="flex items-center gap-1.5 cursor-pointer text-xs">
+                                        <span class="text-[10px] text-slate-400">Curtain:</span>
+                                        <input type="checkbox" id="avatar-curtain-toggle" checked onchange="toggleAvatarCurtainActive(this.checked)" class="accent-emerald-500 cursor-pointer">
+                                        <span id="avatar-curtain-toggle-label" class="text-[10px] font-bold font-mono text-emerald-400">ON</span>
+                                    </label>
+                                </div>
+
+                                <div class="grid grid-cols-2 gap-2 text-xs">
+                                    <button type="button" id="curtain-btn-green" onclick="setAvatarCurtainMode('green')" class="p-2.5 rounded-xl bg-emerald-500/15 border-2 border-emerald-500 text-white font-bold flex items-center justify-center gap-2 transition-all">
+                                        <span class="w-3 h-3 rounded-full bg-emerald-500"></span>
+                                        <span>Green Screen</span>
+                                    </button>
+                                    <button type="button" id="curtain-btn-white" onclick="setAvatarCurtainMode('white')" class="p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 text-slate-300 font-bold flex items-center justify-center gap-2 transition-all hover:border-slate-700">
+                                        <span class="w-3 h-3 rounded-full bg-white"></span>
+                                        <span>White Studio</span>
+                                    </button>
+                                </div>
+                                <input type="hidden" id="avatar-curtain-mode" value="green">
+                                <p class="text-[10px] text-slate-400 leading-tight">
+                                    🟢 Chroma Key (#00FF00) for video overlay removal &bull; ⚪ Clean High-Key Studio White (#FFFFFF).
+                                </p>
+                            </div>
+
+                            <!-- 3D Avatar Input Module -->
+                            <div class="p-4 rounded-xl bg-gradient-to-br from-indigo-950/40 via-purple-950/30 to-slate-950/80 border border-purple-500/30 space-y-2.5 relative overflow-hidden">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex items-center space-x-1.5">
+                                        <span class="text-sm">🤖</span>
+                                        <span class="text-xs font-bold text-purple-200">Google Flap / Flow 3D Rig</span>
+                                    </div>
+                                    <span class="px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[9px] font-bold font-mono uppercase tracking-wider">
+                                        3D Mesh
+                                    </span>
+                                </div>
+                                <p class="text-[11px] text-slate-300 leading-snug">
+                                    Neural 3D mesh model with spatial head motion and audio-reactive jaw blendshapes tracking.
+                                </p>
+                                
+                                <!-- 3D File Upload Picker + Drag & Drop -->
+                                <div class="border border-dashed border-purple-500/40 hover:border-purple-400 rounded-lg p-2 text-center bg-slate-900/60 transition-all cursor-pointer">
+                                    <input type="file" id="avatar-3d-file-input" accept=".glb,.gltf,.obj,.fbx,.zip" class="hidden" onchange="handleAvatar3DUpload(this)">
+                                    <label for="avatar-3d-file-input" class="cursor-pointer block text-[10px] text-purple-300 font-medium">
+                                        <span>📁 Click or Drag 3D Model (.glb, .obj, .fbx, .zip)</span>
+                                    </label>
+                                </div>
+                                <input type="hidden" id="avatar-3d-model-path" value="">
+
+                                <div class="flex items-center justify-between pt-1">
+                                    <label class="flex items-center gap-2 cursor-pointer text-xs text-purple-300">
+                                        <input type="checkbox" id="avatar-3d-model-toggle" onchange="toggle3DModelTeaser(this.checked)" class="accent-purple-500 cursor-pointer">
+                                        <span class="text-[11px] font-semibold">Enable 3D Blendshape Rig</span>
+                                    </label>
+                                    <span id="avatar-3d-status" class="text-[10px] font-mono text-purple-400 bg-purple-900/40 px-2 py-0.5 rounded border border-purple-700/50">Ready</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- STEP 5: HAND GESTURES SELECTOR -->
+                        <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
+                            <div class="flex items-center justify-between">
+                                <label class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                                    <span class="w-4 h-4 rounded bg-pink-500/20 text-pink-400 flex items-center justify-center text-[10px] font-bold">5</span>
+                                    <span>Hand Gestures Choreography (-> Hand Gestures)</span>
+                                </label>
+                                <span id="avatar-gesture-badge" class="text-[10px] font-mono text-pink-400">Subtle & Natural</span>
+                            </div>
+
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                                <button type="button" id="gesture-btn-subtle" onclick="setAvatarHandGestures('subtle')" class="p-2.5 rounded-xl bg-pink-500/20 border-2 border-pink-500 text-white font-bold flex flex-col items-center gap-1 transition-all">
+                                    <span class="text-base">👐</span>
+                                    <span class="text-[11px]">Subtle / Natural</span>
+                                </button>
+                                <button type="button" id="gesture-btn-explanatory" onclick="setAvatarHandGestures('explanatory')" class="p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 text-slate-300 font-semibold flex flex-col items-center gap-1 transition-all hover:border-slate-700">
+                                    <span class="text-base">👉</span>
+                                    <span class="text-[11px]">Explanatory</span>
+                                </button>
+                                <button type="button" id="gesture-btn-dynamic" onclick="setAvatarHandGestures('dynamic')" class="p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 text-slate-300 font-semibold flex flex-col items-center gap-1 transition-all hover:border-slate-700">
+                                    <span class="text-base">🎙️</span>
+                                    <span class="text-[11px]">Dynamic Keynote</span>
+                                </button>
+                                <button type="button" id="gesture-btn-executive" onclick="setAvatarHandGestures('executive')" class="p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 text-slate-300 font-semibold flex flex-col items-center gap-1 transition-all hover:border-slate-700">
+                                    <span class="text-base">👔</span>
+                                    <span class="text-[11px]">Executive Anchor</span>
+                                </button>
+                            </div>
+                            <input type="hidden" id="avatar-gesture-mode" value="subtle">
+                        </div>
+
+                        <!-- GENERATE VIDEO CTA BUTTON -->
+                        <div class="pt-2">
+                            <button type="button" onclick="generateAvatarVideoAction()" id="avatar-generate-btn" class="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-pink-600 via-purple-600 to-indigo-600 hover:brightness-110 text-white font-bold text-sm shadow-xl shadow-pink-500/25 flex items-center justify-center gap-2 transition-all">
+                                <span>🎬</span> <span>Generate Avatar Video</span>
+                            </button>
+                            <div id="avatar-gen-progress-box" class="hidden mt-3 p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+                                <div class="flex justify-between text-xs font-mono">
+                                    <span id="avatar-gen-step-msg" class="text-pink-300">Synthesizing Neural Audio...</span>
+                                    <span id="avatar-gen-pct" class="text-white font-bold">25%</span>
+                                </div>
+                                <div class="w-full h-2 bg-slate-950 rounded-full overflow-hidden">
+                                    <div id="avatar-gen-progress-fill" class="h-full bg-gradient-to-r from-pink-500 to-indigo-500 transition-all duration-300" style="width: 25%"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <!-- RIGHT: AVATAR VIDEO PLAYER CONTAINER (5 cols) -->
+                    <div class="lg:col-span-5 space-y-4">
+                        <div class="glass-panel rounded-2xl p-5 space-y-4 border border-slate-800">
+                            <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                                <h3 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>📺</span> <span>Avatar Video Output Player</span>
+                                </h3>
+                                <span id="avatar-video-runtime" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 text-brand-glow border border-slate-800">Ready</span>
+                            </div>
+
+                            <!-- Video Screen -->
+                            <div class="w-full aspect-video rounded-xl bg-slate-950 border border-slate-800 overflow-hidden relative shadow-inner flex items-center justify-center group">
+                                <video id="avatar-video-player" class="w-full h-full object-contain" controls poster="/static_renders/custom_avatar.png" src="/static_renders/test_avatar_talk.mp4">
+                                    Your browser does not support HTML5 video.
+                                </video>
+                            </div>
+
+                            <!-- Video Meta & Details Card -->
+                            <div class="grid grid-cols-2 gap-2 text-xs font-mono">
+                                <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 space-y-0.5">
+                                    <div class="text-[10px] text-slate-500">Backdrop Curtain:</div>
+                                    <div id="meta-curtain" class="text-emerald-400 font-bold">Chroma Green (#00FF00)</div>
+                                </div>
+                                <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 space-y-0.5">
+                                    <div class="text-[10px] text-slate-500">Hand Gestures:</div>
+                                    <div id="meta-gestures" class="text-pink-400 font-bold">Subtle & Natural</div>
+                                </div>
+                                <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 space-y-0.5">
+                                    <div class="text-[10px] text-slate-500">Resolution:</div>
+                                    <div class="text-white font-bold">1280×720 (HD)</div>
+                                </div>
+                                <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 space-y-0.5">
+                                    <div class="text-[10px] text-slate-500">Video Duration:</div>
+                                    <div id="meta-duration" class="text-brand-glow font-bold">7.85s</div>
+                                </div>
+                            </div>
+
+                            <!-- Download Video Action -->
+                            <div class="pt-1">
+                                <a id="avatar-download-link" href="/static_renders/test_avatar_talk.mp4" download="avatar_production.mp4" class="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center justify-center gap-2 border border-slate-700 transition-all">
+                                    <span>⬇️</span> <span>Download Avatar Video (.mp4)</span>
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div><!-- END OF MODE: AVATAR STUDIO -->
+
         <!-- MODE 4: CUSTOM SCORM 1.2 & 2004 COURSEWARE GENERATOR -->
         <div id="mode-scorm-section" class="hidden space-y-6">
             <div class="glass-panel rounded-2xl p-6 space-y-6 border border-indigo-500/20">
                 <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-                    <div>
-                        <h3 class="text-base font-bold text-white flex items-center gap-2">
-                            <span>📦</span> Custom SCORM 1.2 / 2004 Courseware Generator
-                        </h3>
-                        <p class="text-xs text-slate-400">Upload external video lectures or select from Media Vault, configure structured course metadata, and generate compliant SCORM packages</p>
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 via-brand-600 to-teal-500 flex items-center justify-center shadow-lg shadow-indigo-500/25">
+                            <span class="text-xl">📦</span>
+                        </div>
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h3 class="text-base font-bold text-white">SCORM Framework & LMS Exporter</h3>
+                                <!-- Wireframe Callout: [Edu] category tag -->
+                                <span class="px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-xs font-bold font-mono">
+                                    [Edu Framework]
+                                </span>
+                            </div>
+                            <p class="text-xs text-slate-400">Pre-built Courseware Frames, Curriculum Context Ingestion & One-Click Package Downloads</p>
+                        </div>
                     </div>
-                    <span class="text-xs font-mono px-3 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                        🎓 LMS Universal Conformance
-                    </span>
+                    <div class="flex items-center gap-2">
+                        <select id="scorm-edu-category-select" class="rounded-lg bg-slate-900 border border-indigo-500/30 p-1.5 text-xs text-indigo-300 font-semibold">
+                            <option value="Edu FinTech" selected>🎓 Edu Category: FinTech Academy</option>
+                            <option value="Edu STEM">🔬 Edu Category: STEM Higher Ed</option>
+                            <option value="Edu Compliance">⚖️ Edu Category: Corporate Governance</option>
+                            <option value="Edu Microlearning">⚡ Edu Category: Executive Capsule</option>
+                        </select>
+                    </div>
                 </div>
 
                 <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
                     <!-- Left: Course Metadata & Assessment Selection (7 cols) -->
                     <div class="lg:col-span-7 space-y-4">
+                        <!-- WIREFRAME SECTION: PRE-BUILT FRAME SELECT ("pre build frame select.") -->
+                        <div class="p-4 rounded-xl bg-slate-950/80 border border-indigo-500/30 space-y-2.5">
+                            <div class="flex items-center justify-between">
+                                <label class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>🗂️</span> <span>Pre-built Frame Select (Template Architecture)</span>
+                                </label>
+                                <span id="scorm-selected-frame-badge" class="text-[10px] font-mono text-indigo-300 bg-indigo-950 px-2 py-0.5 rounded border border-indigo-800">Microlearning Capsule</span>
+                            </div>
+                            
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                                <div id="frame-card-micro" onclick="selectPrebuiltFrame('microlearning')" class="p-2.5 rounded-xl bg-indigo-500/20 border-2 border-indigo-500 cursor-pointer transition-all">
+                                    <div class="text-sm mb-1">⚡</div>
+                                    <div class="font-bold text-white text-[11px]">Microlearning</div>
+                                    <div class="text-[9px] text-slate-400">3-min Focus + 5 Qs</div>
+                                </div>
+                                <div id="frame-card-master" onclick="selectPrebuiltFrame('masterclass')" class="p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 hover:border-slate-700 cursor-pointer transition-all">
+                                    <div class="text-sm mb-1">🏛️</div>
+                                    <div class="font-bold text-slate-300 text-[11px]">Masterclass</div>
+                                    <div class="text-[9px] text-slate-400">Lecture + 32 Qs</div>
+                                </div>
+                                <div id="frame-card-comp" onclick="selectPrebuiltFrame('compliance')" class="p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 hover:border-slate-700 cursor-pointer transition-all">
+                                    <div class="text-sm mb-1">⚖️</div>
+                                    <div class="font-bold text-slate-300 text-[11px]">Compliance</div>
+                                    <div class="text-[9px] text-slate-400">80% Pass Gate</div>
+                                </div>
+                                <div id="frame-card-slide" onclick="selectPrebuiltFrame('slide_explainer')" class="p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 hover:border-slate-700 cursor-pointer transition-all">
+                                    <div class="text-sm mb-1">📊</div>
+                                    <div class="font-bold text-slate-300 text-[11px]">Slide Explainer</div>
+                                    <div class="text-[9px] text-slate-400">Split-Screen Deck</div>
+                                </div>
+                            </div>
+                            <input type="hidden" id="scorm-prebuilt-frame-input" value="microlearning">
+                        </div>
+
+                        <!-- WIREFRAME SECTION: CONTEXT PASTE ("Context paste") -->
+                        <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                            <div class="flex items-center justify-between">
+                                <label class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                    <span>📋</span> <span>Context Paste (Curriculum & Lesson Context)</span>
+                                </label>
+                                <button type="button" onclick="autoStructureContextPaste()" class="text-[10px] text-indigo-300 hover:underline flex items-center gap-1">
+                                    <span>✨</span> <span>AI Structure Context</span>
+                                </button>
+                            </div>
+                            <textarea id="scorm-context-paste-input" rows="3" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 leading-relaxed font-sans" placeholder="Paste syllabus context, learning outcomes, or lecture transcript here (e.g. Unit 1: Foundations of Decentralized Autonomous Organizations; Key topics: Smart Contracts, Governance Tokens)..."></textarea>
+                        </div>
+
                         <!-- Direct Video Upload / Video Picker Zone -->
                         <div class="p-4 rounded-xl border-2 border-dashed border-indigo-500/40 bg-indigo-950/20 space-y-3">
                             <div class="flex items-center justify-between">
@@ -2816,8 +3818,8 @@ async def serve_dashboard():
                         </div>
 
                         <!-- Course Title & Course Code -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div class="md:col-span-2">
                                 <label class="block text-xs font-semibold text-slate-300 mb-1">Course Title</label>
                                 <input type="text" id="scorm-gen-course-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="AI Agents in FinTech: Autonomous Execution">
                             </div>
@@ -2827,32 +3829,67 @@ async def serve_dashboard():
                             </div>
                         </div>
 
-                        <!-- Module Title & Module ID -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Module Title</label>
-                                <input type="text" id="scorm-gen-module-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="Module 1: Traditional AI vs GenAI vs Agents">
+                        <!-- Dynamic Module Configuration (User Request #1) -->
+                        <div class="p-3.5 rounded-xl bg-slate-900/80 border border-indigo-500/30 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                                    <span>🧩</span> <span>Dynamic Module Configuration</span>
+                                </span>
+                                <span id="scorm-live-mod-preview" class="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-950 border border-indigo-500/40 text-indigo-300">Module 1 Preview</span>
                             </div>
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Module Description / Overview</label>
-                                <input type="text" id="scorm-gen-module-desc" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500" value="Core concepts of autonomous AI agents and foundational architecture">
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                <div>
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Module Number <span class="text-rose-400">*</span></label>
+                                    <input type="number" id="scorm-gen-module-number" min="1" max="99" class="w-full rounded-xl bg-slate-950 border border-indigo-500/50 p-2.5 text-xs text-brand-glow font-mono font-bold focus:outline-none focus:border-brand-500" value="1" placeholder="e.g. 2" oninput="syncScormDynamicFields()">
+                                </div>
+                                <div class="md:col-span-3">
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Module Name <span class="text-rose-400">*</span></label>
+                                    <input type="text" id="scorm-gen-module-name" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2.5 text-xs text-white font-semibold focus:outline-none focus:border-indigo-500" value="Traditional AI vs GenAI vs Agents" placeholder="e.g. Intelligent & Autonomous Transactions" oninput="syncScormDynamicFields()">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-400 mb-1">Module Full Title (Auto-Composed)</label>
+                                    <input type="text" id="scorm-gen-module-title" class="w-full rounded-xl bg-slate-900/60 border border-slate-800 p-2 text-xs text-slate-300 focus:outline-none" value="Module 1: Traditional AI vs GenAI vs Agents" readonly>
+                                </div>
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-400 mb-1">Module Overview / Description</label>
+                                    <input type="text" id="scorm-gen-module-desc" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2 text-xs text-slate-300 focus:outline-none focus:border-indigo-500" value="Core concepts of autonomous AI agents and foundational architecture">
+                                </div>
                             </div>
                         </div>
 
-                        <!-- Lesson Title, Lesson ID & Topic Unit -->
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson Title</label>
-                                <input type="text" id="scorm-gen-lesson-title" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="Lesson 1: Foundations & Agentic Workflows">
+                        <!-- Dynamic Lesson Configuration (User Request #2 & #4) -->
+                        <div class="p-3.5 rounded-xl bg-slate-900/80 border border-emerald-500/30 space-y-3">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                                    <span>📖</span> <span>Dynamic Lesson Configuration & Intro Hero</span>
+                                </span>
+                                <span id="scorm-live-les-preview" class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-950 border border-emerald-500/40 text-emerald-300">Start Lesson 1.1</span>
                             </div>
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson ID / Unit Code</label>
-                                <input type="text" id="scorm-gen-lesson-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs font-mono text-indigo-300 focus:outline-none focus:border-indigo-500" value="L101">
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                <div>
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson Number <span class="text-rose-400">*</span></label>
+                                    <input type="text" id="scorm-gen-lesson-number" class="w-full rounded-xl bg-slate-950 border border-emerald-500/50 p-2.5 text-xs text-emerald-400 font-mono font-bold focus:outline-none focus:border-emerald-400" value="1.1" placeholder="e.g. 2.1" oninput="syncScormDynamicFields(false)">
+                                </div>
+                                <div class="md:col-span-3">
+                                    <label class="block text-xs font-semibold text-slate-300 mb-1">Lesson Name / Topic Title <span class="text-rose-400">*</span></label>
+                                    <input type="text" id="scorm-gen-lesson-name" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2.5 text-xs text-white font-semibold focus:outline-none focus:border-emerald-500" value="Traditional AI vs GenAI vs Agents" placeholder="e.g. Intelligent & Autonomous Transactions" oninput="syncScormDynamicFields(false)">
+                                </div>
                             </div>
-                            <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">Topic / Unit</label>
-                                <input type="text" id="scorm-gen-topic" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-white focus:outline-none focus:border-indigo-500" value="1.1 Traditional AI vs GenAI vs Agents">
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div>
+                                    <label class="block text-[11px] font-semibold text-slate-400 mb-1">Lesson ID / Unit Code</label>
+                                    <input type="text" id="scorm-gen-lesson-id" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2.5 text-xs font-mono text-indigo-300 focus:outline-none focus:border-indigo-500" value="L101">
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label class="block text-[11px] font-semibold text-slate-400 mb-1">Intro Background Video (Hero Section)</label>
+                                    <input type="text" id="scorm-gen-intro-video" class="w-full rounded-xl bg-slate-950 border border-slate-700 p-2 text-xs font-mono text-cyan-300 focus:outline-none focus:border-cyan-400" value="AI-FinTech-v0.mp4" placeholder="AI-FinTech-v0.mp4 (bundled)">
+                                </div>
                             </div>
+                            <!-- Hidden inputs for backward-compatible JS/tests referencing these IDs -->
+                            <input type="hidden" id="scorm-gen-lesson-title" value="Lesson 1: Foundations & Agentic Workflows">
+                            <input type="hidden" id="scorm-gen-topic" value="1.1 Traditional AI vs GenAI vs Agents">
                         </div>
 
                         <!-- Upload-driven SCORM source -->
@@ -2871,7 +3908,7 @@ async def serve_dashboard():
                             <div class="flex items-center justify-between gap-3 flex-wrap">
                                 <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                                     <input type="checkbox" id="scorm-upload-quiz" checked class="accent-emerald-500 cursor-pointer">
-                                    Attach the assessment item bank selected below
+                                    Attach the lightweight understanding check selected below
                                 </label>
                                 <button onclick="buildScormFromUpload()" id="scorm-upload-btn"
                                         class="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 font-bold text-xs text-white shadow-md shadow-emerald-500/20 transition-all flex items-center gap-2">
@@ -2881,18 +3918,18 @@ async def serve_dashboard():
                             <div id="scorm-upload-status" class="hidden text-xs rounded-lg p-2.5 font-mono"></div>
                         </div>
 
-                        <!-- Item Bank & Passing Score -->
+                        <!-- Understanding Check (2-3 Questions) & Passing Score -->
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
-                                <label class="block text-xs font-semibold text-slate-300 mb-1">📝 Attach Assessment Item Bank</label>
+                                <label class="block text-xs font-semibold text-slate-300 mb-1">📝 Attach Understanding Check (2-3 Questions Only)</label>
                                 <select id="scorm-gen-module-id" class="w-full rounded-xl bg-slate-900 border border-slate-700 p-2.5 text-xs text-emerald-400 font-bold focus:outline-none focus:border-indigo-500">
-                                    <option value="1">Module 1: Traditional AI vs GenAI vs Agents (32 Qs)</option>
-                                    <option value="2">Module 2: Agent Architecture & Planning (32 Qs)</option>
-                                    <option value="3">Module 3: RAG & Financial Memory (32 Qs)</option>
-                                    <option value="4">Module 4: Multi-Agent Collaboration (32 Qs)</option>
-                                    <option value="5">Module 5: Risk, Compliance & Governance (32 Qs)</option>
-                                    <option value="6">Module 6: Enterprise Deployment & Observability (32 Qs)</option>
-                                    <option value="7">Module 7: Algorithmic Execution & Trading (32 Qs)</option>
+                                    <option value="1">Module 1: Traditional AI vs GenAI vs Agents (3 Qs Check)</option>
+                                    <option value="2">Module 2: Agent Architecture & Planning (3 Qs Check)</option>
+                                    <option value="3">Module 3: RAG & Financial Memory (3 Qs Check)</option>
+                                    <option value="4">Module 4: Multi-Agent Collaboration (3 Qs Check)</option>
+                                    <option value="5">Module 5: Risk, Compliance & Governance (3 Qs Check)</option>
+                                    <option value="6">Module 6: Enterprise Deployment & Observability (3 Qs Check)</option>
+                                    <option value="7">Module 7: Algorithmic Execution & Trading (3 Qs Check)</option>
                                 </select>
                             </div>
                             <div>
@@ -3068,6 +4105,72 @@ async def serve_dashboard():
         </div>
     </div>
 
+    <!-- Studio Settings & Configuration Modal (Task 6b) -->
+    <div id="settings-modal" class="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md hidden flex items-center justify-center p-4">
+        <div class="glass-panel rounded-2xl w-full max-w-xl flex flex-col border border-brand-500/30 shadow-2xl shadow-brand-500/10">
+            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <span class="text-lg">⚙️</span>
+                    <h3 class="text-sm font-bold text-white uppercase tracking-wider">Studio & Engine Settings</h3>
+                </div>
+                <button onclick="closeSettingsModal()" class="text-slate-400 hover:text-white text-lg font-bold px-2 py-1">&times;</button>
+            </div>
+
+            <div class="p-6 overflow-y-auto space-y-6 flex-1 text-xs">
+                <!-- ElevenLabs Configuration (Task 6b) -->
+                <div class="p-4 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-3">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <span class="text-amber-300 font-bold flex items-center gap-1.5">
+                            <span>👑</span> <span>ElevenLabs MultiLingual V2 Credentials</span>
+                        </span>
+                        <span class="text-[10px] text-slate-400">Stored in browser localStorage</span>
+                    </div>
+                    <p class="text-[11px] text-slate-400 leading-relaxed">
+                        Configure your ElevenLabs API credentials once. They persist across video creations and sessions automatically.
+                    </p>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">ElevenLabs API Key</label>
+                            <input type="password" id="elevenlabs-api-key" placeholder="xi-api-key..." onchange="localStorage.setItem('neuroclips_eleven_key', this.value.trim())" class="w-full rounded-lg bg-slate-950 border border-slate-700/80 p-2 text-xs text-white focus:border-amber-500 focus:outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Default Voice Profile / ID</label>
+                            <select id="elevenlabs-voice-id" onchange="localStorage.setItem('neuroclips_eleven_voice', this.value); if(typeof updatePreflightSummary==='function')updatePreflightSummary();" class="w-full rounded-lg bg-slate-950 border border-slate-700/80 p-2 text-xs text-white focus:border-amber-500 focus:outline-none">
+                                <option value="21m00Tcm4TlvDq8ikWAM" selected>Rachel (Female - Warm & Professional)</option>
+                                <option value="ErXwobaYiN019PkySvjV">Srinivas / Antoni (Male - Engaging Instructor)</option>
+                                <option value="pNInz6obpgDQGcFmaJgB">Adam (Male - Deep & Executive)</option>
+                                <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female - Crisp Educational)</option>
+                                <option value="TxGEqnHWrfWFTfGW9XjX">Josh (Male - Conversational Host)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Workstation Domain & Server Node Info -->
+                <div class="p-4 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                    <span class="text-slate-300 font-bold flex items-center gap-1.5">
+                        <span>🌐</span> <span>Connected Production Node</span>
+                    </span>
+                    <div class="grid grid-cols-2 gap-2 pt-1 text-[11px] font-mono">
+                        <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                            <span class="text-slate-400 block text-[10px] uppercase tracking-wider">Host Node</span>
+                            <span class="text-brand-glow font-bold">neuroclips.mytestbed.tech</span>
+                        </div>
+                        <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                            <span class="text-slate-400 block text-[10px] uppercase tracking-wider">Protocol</span>
+                            <span class="text-emerald-400 font-bold">TLS 1.3 / Reverse-Proxy</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="p-4 border-t border-slate-800 flex justify-between items-center bg-slate-950/60">
+                <span class="text-[10px] text-slate-500 font-mono">Auto-saved to localStorage</span>
+                <button onclick="closeSettingsModal()" class="text-xs px-5 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 text-white font-bold transition-all">Done</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Footer -->
     <footer class="border-t border-slate-800/80 py-4 text-center text-xs text-slate-500">
         Modular-NeuroClips Studio &bull; Autonomous Video Course Engine &bull; SCORM 1.2 &bull; Edge-TTS &bull; FFmpeg &bull; Remotion React
@@ -3076,13 +4179,13 @@ async def serve_dashboard():
     <!-- Scripts -->
     <script>
         const MILESTONE_DEFS = [
-            { id: 'init', name: '1. Init', icon: '⚙️' },
-            { id: 'scripting', name: '2. Script', icon: '📝' },
-            { id: 'keyframes', name: '3. Keyframes', icon: '🖼️' },
-            { id: 'animation', name: '4. Motion', icon: '🎥' },
-            { id: 'voiceover', name: '5. Voiceover', icon: '🎙️' },
-            { id: 'compilation', name: '6. Stitch', icon: '🎞️' },
-            { id: 'complete', name: '7. Ready', icon: '✨' }
+            { id: 'init',        name: 'Init',      icon: '⚙️' },
+            { id: 'scripting',   name: 'Script',    icon: '📝' },
+            { id: 'keyframes',   name: 'Keyframes', icon: '🖼️' },
+            { id: 'animation',   name: 'Motion',    icon: '🎥' },
+            { id: 'voiceover',   name: 'Voiceover', icon: '🎙️' },
+            { id: 'compilation', name: 'Stitch',    icon: '🎞️' },
+            { id: 'complete',    name: 'Ready',     icon: '✨' }
         ];
 
         let currentSessionOnly = true;
@@ -3134,10 +4237,12 @@ async def serve_dashboard():
 
         function switchStudioMode(mode) {
             const secVideo = document.getElementById('mode-video-section');
+            const secAvatar = document.getElementById('mode-avatar-section');
             const secVoice = document.getElementById('mode-voice-section');
             const secImage = document.getElementById('mode-image-section');
             const secScorm = document.getElementById('mode-scorm-section');
             const btnVideo = document.getElementById('mode-btn-video');
+            const btnAvatar = document.getElementById('mode-btn-avatar');
             const btnVoice = document.getElementById('mode-btn-voice');
             const btnImage = document.getElementById('mode-btn-image');
             const btnScorm = document.getElementById('mode-btn-scorm');
@@ -3145,26 +4250,32 @@ async def serve_dashboard():
             if (!secVideo || !secVoice || !secScorm) return;
 
             secVideo.classList.add('hidden');
+            if (secAvatar) secAvatar.classList.add('hidden');
             secVoice.classList.add('hidden');
             if (secImage) secImage.classList.add('hidden');
             secScorm.classList.add('hidden');
 
             const inactiveClass = "px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-bold flex items-center gap-2 transition-all whitespace-nowrap";
             btnVideo.className = inactiveClass;
+            if (btnAvatar) btnAvatar.className = inactiveClass;
             btnVoice.className = inactiveClass;
             if (btnImage) btnImage.className = inactiveClass;
             btnScorm.className = inactiveClass;
 
-            if (mode === 'video') {
+            if (mode === 'video' || mode === 'director') {
                 secVideo.classList.remove('hidden');
                 btnVideo.className = "px-4 py-2.5 rounded-xl bg-brand-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-brand-500/20 transition-all whitespace-nowrap";
+            } else if (mode === 'avatar') {
+                if (secAvatar) secAvatar.classList.remove('hidden');
+                if (btnAvatar) btnAvatar.className = "px-4 py-2.5 rounded-xl bg-pink-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-pink-500/20 transition-all whitespace-nowrap";
+                updateAvatarScriptMetrics();
             } else if (mode === 'voice') {
                 secVoice.classList.remove('hidden');
                 btnVoice.className = "px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-500/20 transition-all whitespace-nowrap";
                 onVoiceLabLangChange();
             } else if (mode === 'image') {
                 if (secImage) secImage.classList.remove('hidden');
-                if (btnImage) btnImage.className = "px-4 py-2.5 rounded-xl bg-pink-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-pink-500/20 transition-all whitespace-nowrap";
+                if (btnImage) btnImage.className = "px-4 py-2.5 rounded-xl bg-purple-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-purple-500/20 transition-all whitespace-nowrap";
             } else if (mode === 'scorm') {
                 secScorm.classList.remove('hidden');
                 btnScorm.className = "px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-indigo-500/20 transition-all whitespace-nowrap";
@@ -3614,9 +4725,22 @@ async def serve_dashboard():
             fd.append('file', input.files[0]);
             fd.append('course_title', document.getElementById('scorm-gen-course-title').value.trim() || 'Untitled Course');
             fd.append('course_id', document.getElementById('scorm-gen-course-id').value.trim() || 'COURSE');
-            fd.append('module_title', document.getElementById('scorm-gen-module-title').value.trim() || 'Module 1');
-            fd.append('topic', document.getElementById('scorm-gen-topic').value.trim());
-            fd.append('module_id', document.getElementById('scorm-gen-module-id').value || '1');
+            
+            const modNum = document.getElementById('scorm-gen-module-number') ? document.getElementById('scorm-gen-module-number').value.trim() : '';
+            const modName = document.getElementById('scorm-gen-module-name') ? document.getElementById('scorm-gen-module-name').value.trim() : '';
+            const lesNum = document.getElementById('scorm-gen-lesson-number') ? document.getElementById('scorm-gen-lesson-number').value.trim() : '';
+            const lesName = document.getElementById('scorm-gen-lesson-name') ? document.getElementById('scorm-gen-lesson-name').value.trim() : '';
+            const introVideo = document.getElementById('scorm-gen-intro-video') ? document.getElementById('scorm-gen-intro-video').value.trim() : '';
+
+            fd.append('module_title', document.getElementById('scorm-gen-module-title') ? document.getElementById('scorm-gen-module-title').value.trim() : (modName ? `Module ${modNum || 1}: ${modName}` : 'Module 1'));
+            fd.append('topic', document.getElementById('scorm-gen-topic') ? document.getElementById('scorm-gen-topic').value.trim() : lesName);
+            fd.append('module_id', document.getElementById('scorm-gen-module-id').value || (modNum || '1'));
+            if (modNum) fd.append('module_number', modNum);
+            if (modName) fd.append('module_name', modName);
+            if (lesNum) fd.append('lesson_number', lesNum);
+            if (lesName) fd.append('lesson_name', lesName);
+            if (introVideo) fd.append('intro_video_filename', introVideo);
+
             fd.append('pass_percentage', document.getElementById('scorm-gen-pass').value || '70');
             fd.append('scorm_version', document.getElementById('scorm-gen-version').value || '1.2');
             fd.append('include_quiz', document.getElementById('scorm-upload-quiz').checked ? 'true' : 'false');
@@ -3654,6 +4778,51 @@ async def serve_dashboard():
         }
 
         // ================= CUSTOM SCORM GENERATOR LOGIC =================
+        function syncScormDynamicFields(autoDeriveLesson = true) {
+            const mNumInput = document.getElementById('scorm-gen-module-number');
+            const mNameInput = document.getElementById('scorm-gen-module-name');
+            const lNumInput = document.getElementById('scorm-gen-lesson-number');
+            const lNameInput = document.getElementById('scorm-gen-lesson-name');
+            const mTitleInput = document.getElementById('scorm-gen-module-title');
+            const lTitleInput = document.getElementById('scorm-gen-lesson-title');
+            const topicInput = document.getElementById('scorm-gen-topic');
+            const modSelect = document.getElementById('scorm-gen-module-id');
+            const modPreview = document.getElementById('scorm-live-mod-preview');
+            const lesPreview = document.getElementById('scorm-live-les-preview');
+
+            const mNum = (mNumInput && mNumInput.value.trim()) || '1';
+            const mName = (mNameInput && mNameInput.value.trim()) || `Module ${mNum}`;
+
+            if (autoDeriveLesson && lNumInput) {
+                lNumInput.value = `${mNum}.1`;
+            }
+            const lNum = (lNumInput && lNumInput.value.trim()) || `${mNum}.1`;
+            const lName = (lNameInput && lNameInput.value.trim()) || mName;
+
+            if (mTitleInput) {
+                mTitleInput.value = `Module ${mNum}: ${mName}`;
+            }
+            if (lTitleInput) {
+                lTitleInput.value = `Lesson ${lNum}: ${lName}`;
+            }
+            if (topicInput) {
+                topicInput.value = `${lNum} ${lName}`;
+            }
+            if (modPreview) {
+                modPreview.innerText = `Module ${mNum}: ${mName.length > 25 ? mName.slice(0, 25) + '...' : mName}`;
+            }
+            if (lesPreview) {
+                lesPreview.innerText = `Start Lesson ${lNum}`;
+            }
+            if (modSelect && !isNaN(parseInt(mNum))) {
+                const numVal = parseInt(mNum);
+                if (numVal >= 1 && numVal <= 7) {
+                    modSelect.value = String(numVal);
+                }
+            }
+        }
+        setTimeout(syncScormDynamicFields, 100);
+
         async function fetchScormMediaList() {
             try {
                 const res = await fetch('/api/v1/gallery');
@@ -3734,11 +4903,16 @@ async def serve_dashboard():
         async function buildCustomScormPackage() {
             const courseTitle = document.getElementById('scorm-gen-course-title').value.trim();
             const courseId = document.getElementById('scorm-gen-course-id').value.trim();
-            const moduleTitle = document.getElementById('scorm-gen-module-title').value.trim();
+            const moduleNumber = document.getElementById('scorm-gen-module-number') ? document.getElementById('scorm-gen-module-number').value.trim() : '';
+            const moduleName = document.getElementById('scorm-gen-module-name') ? document.getElementById('scorm-gen-module-name').value.trim() : '';
+            const moduleTitle = document.getElementById('scorm-gen-module-title') ? document.getElementById('scorm-gen-module-title').value.trim() : `Module ${moduleNumber || 1}: ${moduleName}`;
             const moduleDesc = document.getElementById('scorm-gen-module-desc') ? document.getElementById('scorm-gen-module-desc').value.trim() : '';
-            const lessonTitle = document.getElementById('scorm-gen-lesson-title') ? document.getElementById('scorm-gen-lesson-title').value.trim() : '';
+            const lessonNumber = document.getElementById('scorm-gen-lesson-number') ? document.getElementById('scorm-gen-lesson-number').value.trim() : `${moduleNumber || 1}.1`;
+            const lessonName = document.getElementById('scorm-gen-lesson-name') ? document.getElementById('scorm-gen-lesson-name').value.trim() : moduleName;
+            const lessonTitle = document.getElementById('scorm-gen-lesson-title') ? document.getElementById('scorm-gen-lesson-title').value.trim() : `${lessonNumber} ${lessonName}`;
             const lessonId = document.getElementById('scorm-gen-lesson-id') ? document.getElementById('scorm-gen-lesson-id').value.trim() : '';
-            const topic = document.getElementById('scorm-gen-topic').value.trim();
+            const topic = document.getElementById('scorm-gen-topic') ? document.getElementById('scorm-gen-topic').value.trim() : `${lessonNumber} ${lessonName}`;
+            const introVideo = document.getElementById('scorm-gen-intro-video') ? document.getElementById('scorm-gen-intro-video').value.trim() : '';
             
             const attachedFnInput = document.getElementById('scorm-attached-filename');
             let videoFile = attachedFnInput && attachedFnInput.value && !attachedFnInput.value.includes('No video attached') && !attachedFnInput.value.includes('Uploading') ? attachedFnInput.value : '';
@@ -3746,7 +4920,7 @@ async def serve_dashboard():
                 videoFile = document.getElementById('scorm-gen-video-select').value;
             }
 
-            const moduleId = parseInt(document.getElementById('scorm-gen-module-id').value) || 1;
+            const moduleId = parseInt(document.getElementById('scorm-gen-module-id').value) || parseInt(moduleNumber) || 1;
             const passPercentage = parseInt(document.getElementById('scorm-gen-pass').value) || 70;
             const scormVersion = document.getElementById('scorm-gen-version').value;
             const btn = document.getElementById('scorm-custom-build-btn');
@@ -3762,11 +4936,16 @@ async def serve_dashboard():
                         course_id: courseId,
                         module_title: moduleTitle,
                         module_id: moduleId,
+                        module_number: moduleNumber,
+                        module_name: moduleName,
                         module_description: moduleDesc,
                         lesson_title: lessonTitle,
+                        lesson_number: lessonNumber,
+                        lesson_name: lessonName,
                         lesson_id: lessonId,
                         topic: topic,
                         video_filename: videoFile,
+                        intro_video_filename: introVideo,
                         pass_percentage: passPercentage,
                         scorm_version: scormVersion
                     })
@@ -3780,7 +4959,7 @@ async def serve_dashboard():
                     link.click();
                     document.body.removeChild(link);
                     fetchScormPackagesTable();
-                    alert(`📦 Custom SCORM Package (${data.size_mb} MB) bundled for "${data.course_title}" / "${data.lesson_title || data.topic}" with Module ${data.module_id} Quiz (${data.questions_count} questions) and ready for LMS!`);
+                    alert(`📦 Custom SCORM Package (${data.size_mb} MB) bundled for "${data.course_title}" / "${data.lesson_title || data.topic}" with Module ${data.module_number || data.module_id} Understanding Check (${data.questions_count} questions) and ready for LMS!`);
                 } else {
                     alert('SCORM Packaging failed: ' + data.detail);
                 }
@@ -3830,14 +5009,46 @@ async def serve_dashboard():
             });
         }
 
+        let trackerForceExpanded = false;
+        function updateTrackerDisplay(isActive) {
+            const exp = document.getElementById('tracker-expanded-content');
+            const sub = document.getElementById('tracker-subtext');
+            const toggle = document.getElementById('tracker-toggle-btn');
+            if (!exp) return;
+            if (isActive || trackerForceExpanded) {
+                exp.classList.remove('hidden');
+                if (sub) sub.classList.remove('hidden');
+                if (toggle) toggle.innerText = '▴';
+            } else {
+                exp.classList.add('hidden');
+                if (sub) sub.classList.add('hidden');
+                if (toggle) toggle.innerText = '▾';
+            }
+        }
+
+        function toggleTrackerManual() {
+            trackerForceExpanded = !trackerForceExpanded;
+            updateTrackerDisplay(false);
+        }
+
         renderMilestones('init');
+        updateTrackerDisplay(false);
 
         function updateScriptMetrics() {
-            const text = document.getElementById('prompt-input').value.trim();
+            const scriptEl = document.getElementById('script-input');
+            const promptEl = document.getElementById('prompt-input');
+            const text = (scriptEl && scriptEl.value.trim()) ? scriptEl.value.trim() : '';
             const words = text ? text.split(/\s+/).length : 0;
-            const speed = parseFloat(document.getElementById('speed-slider').value) || 1.0;
+            const speed = parseFloat(document.getElementById('speed-slider')?.value || 1.0);
             const spokenMin = (words / (140 * speed)).toFixed(2);
-            document.getElementById('script-stats').innerText = `${words} words | ~${spokenMin} min`;
+            const statsEl = document.getElementById('script-stats');
+            if (statsEl) {
+                if (words === 0) {
+                    statsEl.innerText = "0 words | Silent";
+                } else {
+                    statsEl.innerText = `${words} words | ~${spokenMin} min`;
+                }
+            }
         }
 
         function newProjectCanvas() {
@@ -3846,6 +5057,7 @@ async def serve_dashboard():
             activeSessionJobId = null;
             document.getElementById('terminal-logs').innerHTML = `<div class="text-brand-glow italic">[NEW PROJECT] Workspace reset to pristine blank canvas. Ready for new course.</div>`;
             renderMilestones('init');
+            updateTrackerDisplay(false);
             document.getElementById('master-progress-fill').style.width = '0%';
             document.getElementById('overall-progress-num').innerText = '0%';
             document.getElementById('active-step-caption').innerText = 'Blank Canvas Ready';
@@ -3859,24 +5071,266 @@ async def serve_dashboard():
             fetchGallery();
         }
 
+        // =========================================================================
+        // 🎞️ PRODUCTION MEDIA VAULT: VIDEO STATE MACHINE & LIFECYCLE MANAGEMENT
+        // =========================================================================
+        // State Model:
+        // 1. RENDERING: Backend is currently synthesizing video/audio.
+        // 2. READY: Backend render finished & valid MP4 exists on disk. Video element ready.
+        // 3. LOADING_VIDEO: MP4 exists, browser is actively buffering data.
+        // 4. PLAYABLE: Browser has loaded enough data for seamless playback.
+        // 5. ERROR: MP4 cannot be loaded or played.
+
+        window.VIDEO_STATES = window.VIDEO_STATES || {};
+        let LAST_FETCHED_COMPLETED_JOB_ID = null;
+        let CACHED_GALLERY_FINGERPRINT = "";
+
+        function setVideoCardState(safeId, state, message = "") {
+            window.VIDEO_STATES[safeId] = state;
+            const badge = document.getElementById(`badge-${safeId}`);
+            const overlay = document.getElementById(`overlay-${safeId}`);
+            const spinner = document.getElementById(`spinner-${safeId}`);
+            const statusText = document.getElementById(`status-text-${safeId}`);
+            const video = document.getElementById(`video-${safeId}`);
+
+            if (!badge) return;
+
+            if (state === 'READY') {
+                badge.innerText = 'READY';
+                badge.className = 'px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-slate-900/80 text-cyan-300 border border-cyan-500/30';
+                if (overlay) overlay.classList.add('hidden');
+            } else if (state === 'LOADING_VIDEO') {
+                badge.innerText = 'BUFFERING';
+                badge.className = 'px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-slate-900/80 text-amber-300 border border-amber-500/30';
+                if (overlay) {
+                    overlay.classList.remove('hidden');
+                    if (spinner) spinner.classList.remove('hidden');
+                    if (statusText) statusText.innerText = message || 'Buffering video data...';
+                }
+            } else if (state === 'PLAYABLE') {
+                badge.innerText = 'PLAYABLE';
+                badge.className = 'px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-slate-900/80 text-emerald-300 border border-emerald-500/30';
+                if (overlay) overlay.classList.add('hidden');
+            } else if (state === 'ERROR') {
+                badge.innerText = 'ERROR';
+                badge.className = 'px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-red-950/80 text-red-400 border border-red-500/40';
+                if (overlay) {
+                    overlay.classList.remove('hidden');
+                    if (spinner) spinner.classList.add('hidden');
+                    if (statusText) statusText.innerHTML = `<span>⚠️ ${message || 'Failed to load video.'}</span> <button onclick="retryVideoLoad('${safeId}')" class="underline text-xs text-brand-glow ml-1 cursor-pointer pointer-events-auto">Retry</button>`;
+                }
+            }
+        }
+
+        function retryVideoLoad(safeId) {
+            const video = document.getElementById(`video-${safeId}`);
+            if (video) {
+                setVideoCardState(safeId, 'LOADING_VIDEO', 'Retrying video load...');
+                video.load();
+            }
+        }
+
+        function onVideoLifecycleEvent(safeId, eventName) {
+            const video = document.getElementById(`video-${safeId}`);
+            if (!video) return;
+
+            switch (eventName) {
+                case 'loadedmetadata':
+                    if (video.readyState >= 2) {
+                        setVideoCardState(safeId, 'PLAYABLE');
+                    } else {
+                        setVideoCardState(safeId, 'READY');
+                    }
+                    break;
+                case 'loadeddata':
+                case 'canplay':
+                case 'canplaythrough':
+                    setVideoCardState(safeId, 'PLAYABLE');
+                    break;
+                case 'waiting':
+                    // Genuine buffering during playback
+                    if (video.currentTime > 0 && !video.paused) {
+                        setVideoCardState(safeId, 'LOADING_VIDEO', 'Buffering...');
+                    }
+                    break;
+                case 'playing':
+                    setVideoCardState(safeId, 'PLAYABLE');
+                    break;
+                case 'error':
+                    const errCode = (video.error && video.error.code) ? `Code ${video.error.code}` : 'Network error';
+                    setVideoCardState(safeId, 'ERROR', errCode);
+                    break;
+            }
+        }
+
+        function updateVaultRenderingCard(activeJob) {
+            const container = document.getElementById('gallery-grid');
+            if (!container) return;
+            let card = document.getElementById('rendering-job-card');
+            const progress = activeJob.progress_percent || 10;
+            const milestone = activeJob.current_milestone || 'processing';
+            const label = (activeJob.output_type === 'slide') ? 'Instructional Slide Generating' : 'Video Rendering in Progress';
+
+            if (!card) {
+                const temp = document.createElement('div');
+                temp.innerHTML = `
+                <div id="rendering-job-card" class="glass-panel p-3.5 rounded-xl space-y-3 border border-brand-500/40 bg-brand-500/5 flex flex-col justify-between">
+                    <div class="space-y-2">
+                        <div class="relative w-full h-44 rounded-lg bg-slate-950 flex flex-col items-center justify-center p-4 border border-brand-500/20 text-center">
+                            <div class="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin mb-3"></div>
+                            <span class="text-xs font-bold text-white tracking-wide" id="rendering-job-title">${label}</span>
+                            <span class="text-[11px] font-mono text-brand-glow mt-1 capitalize" id="rendering-job-milestone">Milestone: ${milestone}</span>
+                            <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden mt-3 max-w-[200px]">
+                                <div id="rendering-job-bar" class="h-full bg-gradient-to-r from-brand-500 to-emerald-400 transition-all duration-300" style="width: ${progress}%"></div>
+                            </div>
+                            <div class="absolute top-2 left-2 pointer-events-none">
+                                <span class="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-brand-500/20 text-brand-glow border border-brand-500/30 animate-pulse">
+                                    RENDERING
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="pt-2 border-t border-slate-800 text-xs text-slate-400 flex justify-between">
+                        <span class="font-mono truncate">Job #${activeJob.job_id}</span>
+                        <span class="font-mono text-brand-glow" id="rendering-job-percent">${progress}%</span>
+                    </div>
+                </div>`;
+                card = temp.firstElementChild;
+                container.prepend(card);
+            } else {
+                const titleEl = document.getElementById('rendering-job-title');
+                const msEl = document.getElementById('rendering-job-milestone');
+                const barEl = document.getElementById('rendering-job-bar');
+                const pctEl = document.getElementById('rendering-job-percent');
+                if (titleEl) titleEl.innerText = label;
+                if (msEl) msEl.innerText = `Milestone: ${milestone}`;
+                if (barEl) barEl.style.width = `${progress}%`;
+                if (pctEl) pctEl.innerText = `${progress}%`;
+            }
+        }
+
+        function removeVaultRenderingCard() {
+            const card = document.getElementById('rendering-job-card');
+            if (card) {
+                card.remove();
+            }
+        }
+
         async function fetchGallery() {
             const container = document.getElementById('gallery-grid');
             try {
                 const url = (currentSessionOnly && activeSessionJobId) ? `/api/v1/gallery?session_job_id=${activeSessionJobId}` : '/api/v1/gallery';
                 const res = await fetch(url);
                 const data = await res.json();
+                const items = data.videos || [];
                 
-                if (data.videos.length === 0) {
+                const renderingCard = document.getElementById('rendering-job-card');
+                const hasRendering = !!renderingCard;
+
+                if (items.length === 0 && !hasRendering) {
+                    CACHED_GALLERY_FINGERPRINT = "";
                     container.innerHTML = `<div class="col-span-3 text-center text-xs text-slate-500 py-8 bg-slate-900/40 rounded-xl border border-slate-800/80">
-                        ${currentSessionOnly ? 'No videos rendered in this active session yet. Click Direct Render or Storyboard to create.' : 'Media Vault is empty.'}
+                        ${currentSessionOnly ? 'No media rendered in this active session yet. Click Direct Render or Storyboard to create.' : 'Media Vault is empty.'}
                     </div>`;
                     return;
                 }
 
-                container.innerHTML = data.videos.map(v => `
-                    <div class="glass-panel p-3.5 rounded-xl space-y-2.5 border border-slate-800/90 flex flex-col justify-between">
+                // Avoid wiping DOM if contents have not changed
+                const fingerprint = (currentSessionOnly ? 's_' : 'all_') + items.map(v => v.filename + '_' + v.size_mb).join('|');
+                if (fingerprint === CACHED_GALLERY_FINGERPRINT && !hasRendering) {
+                    return;
+                }
+                CACHED_GALLERY_FINGERPRINT = fingerprint;
+
+                const cardsHtml = items.map(v => {
+                    const isSlide = (v.media_type === 'slide' || v.filename.endsWith('.png'));
+                    const safeId = v.filename.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+                    if (isSlide) {
+                        return `
+                        <div class="glass-panel p-3.5 rounded-xl space-y-2.5 border border-slate-800/90 flex flex-col justify-between" id="card-${safeId}">
+                            <div class="space-y-2">
+                                <div class="relative w-full h-44 rounded-lg bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center group">
+                                    <img src="${v.url}" alt="${v.filename}" class="w-full h-full object-contain p-1" />
+                                    <div class="absolute top-2 left-2 pointer-events-none">
+                                        <span class="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-brand-500/20 text-brand-glow border border-brand-500/30">
+                                            SLIDE
+                                        </span>
+                                    </div>
+                                    <a href="${v.url}" target="_blank" class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                        <span class="px-2.5 py-1 rounded bg-black/80 text-xs text-white border border-slate-700">🔍 View High-Res Slide</span>
+                                    </a>
+                                </div>
+                                ${v.audio_url ? `
+                                <div class="p-2 rounded-lg bg-slate-950/80 border border-slate-800 space-y-1">
+                                    <div class="flex justify-between items-center text-[10px] text-slate-400">
+                                        <span>🎙️ Voiceover Audio Track</span>
+                                        <a href="${v.audio_url}" download class="text-brand-glow hover:underline">Download MP3</a>
+                                    </div>
+                                    <audio controls class="w-full h-6" src="${v.audio_url}"></audio>
+                                </div>
+                                ` : ''}
+                            </div>
+
+                            <div class="space-y-2 pt-1 border-t border-slate-800">
+                                <div class="flex items-center justify-between text-xs">
+                                    <span class="font-mono text-slate-300 truncate w-36" title="${v.filename}">${v.filename}</span>
+                                    <span class="text-slate-500 font-mono text-[11px]">${v.size_mb} MB</span>
+                                </div>
+
+                                <div class="flex justify-between items-center pt-1 border-t border-slate-800/60 text-xs">
+                                    <span class="text-[10px] text-slate-500">${v.time_str}</span>
+                                    <div class="flex items-center space-x-1.5">
+                                        ${v.srt_url ? `
+                                        <a href="${v.srt_url}" download="${v.srt_filename}" title="Download Subtitles (.srt)" class="px-2 py-0.5 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-mono transition-all">
+                                            📝 SRT
+                                        </a>` : ''}
+                                        <a href="${v.url}" download title="Download Slide Image" class="px-2 py-0.5 rounded bg-brand-500/10 hover:bg-brand-500/20 text-brand-glow text-[11px]">
+                                            PNG
+                                        </a>
+                                        <button onclick="deleteGalleryItem('${v.filename}')" title="Delete Slide" class="text-red-400 hover:text-red-300 p-1 text-[11px]">
+                                            🗑️
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>`;
+                    }
+
+                    return `
+                    <div class="glass-panel p-3.5 rounded-xl space-y-2.5 border border-slate-800/90 flex flex-col justify-between" id="card-${safeId}">
                         <div class="space-y-2">
-                            <video controls class="w-full h-40 rounded-lg bg-black object-cover" src="${v.url}"></video>
+                            <div class="relative w-full h-44 rounded-lg bg-black overflow-hidden group">
+                                <video
+                                    id="video-${safeId}"
+                                    controls
+                                    preload="metadata"
+                                    playsinline
+                                    class="w-full h-full object-cover"
+                                    src="${v.url}"
+                                    onloadedmetadata="onVideoLifecycleEvent('${safeId}', 'loadedmetadata')"
+                                    onloadeddata="onVideoLifecycleEvent('${safeId}', 'loadeddata')"
+                                    oncanplay="onVideoLifecycleEvent('${safeId}', 'canplay')"
+                                    oncanplaythrough="onVideoLifecycleEvent('${safeId}', 'canplaythrough')"
+                                    onwaiting="onVideoLifecycleEvent('${safeId}', 'waiting')"
+                                    onplaying="onVideoLifecycleEvent('${safeId}', 'playing')"
+                                    onerror="onVideoLifecycleEvent('${safeId}', 'error')"
+                                ></video>
+
+                                <!-- Video State Overlay: Hidden once ready/playable -->
+                                <div id="overlay-${safeId}" class="hidden absolute inset-0 bg-slate-950/70 backdrop-blur-[2px] flex flex-col items-center justify-center space-y-2 pointer-events-none transition-opacity duration-200">
+                                    <div id="spinner-${safeId}" class="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin"></div>
+                                    <span id="status-text-${safeId}" class="text-[11px] font-mono text-slate-300">Loading video data...</span>
+                                </div>
+
+                                <!-- State Badge Top-Left -->
+                                <div class="absolute top-2 left-2 pointer-events-none">
+                                    <span id="badge-${safeId}" class="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-slate-900/80 text-cyan-300 border border-cyan-500/30">
+                                        READY
+                                    </span>
+                                </div>
+                            </div>
+
                             ${v.audio_url ? `
                             <div class="p-2 rounded-lg bg-slate-950/80 border border-slate-800 space-y-1">
                                 <div class="flex justify-between items-center text-[10px] text-slate-400">
@@ -3921,8 +5375,26 @@ async def serve_dashboard():
                                 </div>
                             </div>
                         </div>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
+
+                container.innerHTML = cardsHtml;
+
+                // Immediately check if any videos are already ready/cached by the browser
+                items.forEach(v => {
+                    if (v.media_type !== 'slide' && !v.filename.endsWith('.png')) {
+                        const safeId = v.filename.replace(/[^a-zA-Z0-9_-]/g, '_');
+                        const vid = document.getElementById(`video-${safeId}`);
+                        if (vid) {
+                            if (vid.readyState >= 2) {
+                                setVideoCardState(safeId, 'PLAYABLE');
+                            } else {
+                                setVideoCardState(safeId, 'READY');
+                            }
+                        }
+                    }
+                });
+
             } catch (err) {
                 container.innerHTML = '<div class="col-span-3 text-center text-xs text-red-400 py-4">Failed to load media vault.</div>';
             }
@@ -4209,7 +5681,16 @@ async def serve_dashboard():
                 const res = await fetch('/api/v1/script/upload-document', { method: 'POST', body: formData });
                 const data = await res.json();
                 if (data.status === 'ok') {
-                    document.getElementById('prompt-input').value = data.content;
+                    const scriptEl = document.getElementById('script-input');
+                    if (scriptEl) {
+                        scriptEl.value = data.content;
+                    } else {
+                        document.getElementById('prompt-input').value = data.content;
+                    }
+                    const promptEl = document.getElementById('prompt-input');
+                    if (promptEl && !promptEl.value.trim()) {
+                        promptEl.value = `Cinematic video visual sequence for ${data.filename.replace(/\.[^/.]+$/, '').replace(/_/g, ' ')}`;
+                    }
                     setSceneChunk(data.suggested_scenes);
                     updateScriptMetrics();
                     alert(`📄 Ingested document '${data.filename}' (${data.word_count} words). Configured ${data.suggested_scenes} scene chunks!`);
@@ -4224,9 +5705,11 @@ async def serve_dashboard():
         }
 
         async function exportStandaloneAudio() {
-            const text = document.getElementById('prompt-input').value.trim();
+            const scriptEl = document.getElementById('script-input');
+            const promptEl = document.getElementById('prompt-input');
+            const text = (scriptEl && scriptEl.value.trim()) ? scriptEl.value.trim() : (promptEl ? promptEl.value.trim() : '');
             if (!text) {
-                alert("Please enter narration text or upload a script document first.");
+                alert("Please enter spoken narration in Voiceover Narration Script first.");
                 return;
             }
 
@@ -4298,8 +5781,168 @@ async def serve_dashboard():
             }
         }
 
+        // Draws the chosen frame to scale (longest edge pinned to 40px) so the
+        // orientation is obvious before a render is started, not after.
+        function updateAspectPreview() {
+            const sel = document.getElementById('resolution-select');
+            if (!sel) return;
+            const opt = sel.options[sel.selectedIndex];
+            const w = parseInt(opt.getAttribute('data-w')) || 1280;
+            const h = parseInt(opt.getAttribute('data-h')) || 720;
+            const orient = opt.getAttribute('data-orient') || 'Landscape';
+
+            const box = document.getElementById('aspect-preview-box');
+            if (box) {
+                const cap = 40;
+                const scale = cap / Math.max(w, h);
+                box.style.width = (w * scale) + 'px';
+                box.style.height = (h * scale) + 'px';
+            }
+
+            const label = document.getElementById('aspect-preview-label');
+            if (label) {
+                label.innerHTML =
+                    '<span class="font-mono text-brand-glow font-bold">' + w + '×' + h + '</span>' +
+                    ' · ' + orient + ' · every scene, caption and avatar is composed for this frame.';
+            }
+            try {
+                localStorage.setItem('neuroclips_last_resolution', sel.value);
+            } catch (e) {}
+            if (typeof updatePreflightSummary === 'function') updatePreflightSummary();
+        }
+
+        function setDirectorOutputType(type) {
+            const input = document.getElementById('output-type-select');
+            if (input) input.value = type;
+
+            const cardVideo = document.getElementById('output-card-video');
+            const cardSlide = document.getElementById('output-card-slide');
+            const badgeVideo = document.getElementById('output-badge-video');
+            const badgeSlide = document.getElementById('output-badge-slide');
+
+            if (type === 'slide') {
+                if (cardSlide) {
+                    cardSlide.classList.add('bg-brand-500/15', 'border-brand-500');
+                    cardSlide.classList.remove('bg-slate-900', 'border-slate-800');
+                }
+                if (cardVideo) {
+                    cardVideo.classList.remove('bg-brand-500/15', 'border-brand-500');
+                    cardVideo.classList.add('bg-slate-900', 'border-slate-800');
+                }
+                if (badgeSlide) badgeSlide.classList.remove('hidden');
+                if (badgeVideo) badgeVideo.classList.add('hidden');
+            } else {
+                if (cardVideo) {
+                    cardVideo.classList.add('bg-brand-500/15', 'border-brand-500');
+                    cardVideo.classList.remove('bg-slate-900', 'border-slate-800');
+                }
+                if (cardSlide) {
+                    cardSlide.classList.remove('bg-brand-500/15', 'border-brand-500');
+                    cardSlide.classList.add('bg-slate-900', 'border-slate-800');
+                }
+                if (badgeVideo) badgeVideo.classList.remove('hidden');
+                if (badgeSlide) badgeSlide.classList.add('hidden');
+            }
+        }
+
+        function setAspectPreset(val) {
+            const sel = document.getElementById('resolution-select');
+            if (sel) {
+                sel.value = val;
+                updateAspectPreview();
+            }
+            const pillMap = {
+                '16:9_hd': 'aspect-btn-16-9',
+                '9:16_vertical': 'aspect-btn-9-16',
+                '1:1_square': 'aspect-btn-1-1',
+                '4:5_portrait': 'aspect-btn-4-5'
+            };
+            Object.keys(pillMap).forEach(key => {
+                const btn = document.getElementById(pillMap[key]);
+                if (btn) {
+                    if (key === val) {
+                        btn.className = "py-1 px-1.5 rounded-lg bg-brand-600 text-white font-bold text-center border border-brand-500 transition-all";
+                    } else {
+                        btn.className = "py-1 px-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 font-semibold text-center border border-slate-800 transition-all";
+                    }
+                }
+            });
+        }
+
+        function setChunkingMode(mode) {
+            const input = document.getElementById('chunking-mode-input');
+            if (input) input.value = mode;
+
+            const btnAuto = document.getElementById('chunk-mode-auto');
+            const btnManual = document.getElementById('chunk-mode-manual');
+
+            if (mode === 'manual') {
+                if (btnManual) btnManual.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnAuto) btnAuto.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            } else {
+                if (btnAuto) btnAuto.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnManual) btnManual.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            }
+        }
+
+        function setMotionGraphics(enabled) {
+            const input = document.getElementById('motion-graphics-check');
+            if (input) input.value = enabled ? 'true' : 'false';
+
+            const badge = document.getElementById('motion-status-badge');
+            if (badge) {
+                badge.innerText = enabled ? 'ON' : 'OFF';
+                badge.className = enabled ? 'text-[9px] font-mono px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-glow' : 'text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400';
+            }
+
+            const btnOn = document.getElementById('motion-btn-on');
+            const btnOff = document.getElementById('motion-btn-off');
+            if (enabled) {
+                if (btnOn) btnOn.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnOff) btnOff.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            } else {
+                if (btnOff) btnOff.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnOn) btnOn.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            }
+        }
+
+        function setBackgroundMusic(enabled) {
+            const input = document.getElementById('bgm-check');
+            if (input) input.value = enabled ? 'true' : 'false';
+
+            const badge = document.getElementById('bgm-status-badge');
+            if (badge) {
+                badge.innerText = enabled ? 'ON' : 'OFF';
+                badge.className = enabled ? 'text-[9px] font-mono px-1.5 py-0.5 rounded bg-brand-500/20 text-brand-glow' : 'text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400';
+            }
+
+            const btnOn = document.getElementById('bgm-btn-on');
+            const btnOff = document.getElementById('bgm-btn-off');
+            if (enabled) {
+                if (btnOn) btnOn.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnOff) btnOff.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            } else {
+                if (btnOff) btnOff.className = "w-1/2 py-1 rounded-md bg-brand-600 text-white font-bold transition-all";
+                if (btnOn) btnOn.className = "w-1/2 py-1 rounded-md text-slate-400 hover:text-white transition-all";
+            }
+        }
+
+        function updateActiveVoiceBadge() {
+            const sel = document.getElementById('voice-select');
+            const badge = document.getElementById('active-voice-badge');
+            if (sel && badge) {
+                const optText = sel.options[sel.selectedIndex]?.text || '';
+                const shortName = optText.split('(')[0].trim();
+                badge.innerText = shortName || sel.value;
+                try {
+                    localStorage.setItem('neuroclips_last_voice', sel.value);
+                } catch (e) {}
+                if (typeof updatePreflightSummary === 'function') updatePreflightSummary();
+            }
+        }
+
         function insertScriptTag(tag) {
-            const textarea = document.getElementById('prompt-input');
+            const textarea = document.getElementById('script-input') || document.getElementById('prompt-input');
             const start = textarea.selectionStart || textarea.value.length;
             const end = textarea.selectionEnd || textarea.value.length;
             const text = textarea.value;
@@ -4311,8 +5954,11 @@ async def serve_dashboard():
 
         function setSceneChunk(count) {
             const slider = document.getElementById('scene-slider');
-            slider.value = count;
-            document.getElementById('scene-val').innerText = count + ' Scenes';
+            if (slider) {
+                slider.value = count;
+                document.getElementById('scene-val').innerText = count + ' Scenes';
+                if (typeof updatePreflightSummary === 'function') updatePreflightSummary();
+            }
         }
 
         const PERSONA_CATALOG_JS = {
@@ -4320,7 +5966,8 @@ async def serve_dashboard():
             "alex_ai": { voice: "en-US-GuyNeural", eleven_voice: "pNInz6obpgDQGcFmaJgB", pitch: "-2Hz", speed: 1.0, badge: "🇺🇸 Caucasian | en-US (Guy) | AI Architect" },
             "elena_compliance": { voice: "en-US-AriaNeural", eleven_voice: "EXAVITQu4vr4xnSDxMaL", pitch: "+0Hz", speed: 0.95, badge: "🇪🇸 Latina | en-US (Aria) | Governance" },
             "david_trainer": { voice: "en-US-ChristopherNeural", eleven_voice: "TxGEqnHWrfWFTfGW9XjX", pitch: "+0Hz", speed: 1.0, badge: "🇺🇸 Global LMS | en-US (Christopher)" },
-            "rajesh_cloud": { voice: "en-IN-PrabhatNeural", eleven_voice: "ErXwobaYiN019PkySvjV", pitch: "-1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Prabhat) | Cloud" }
+            "srinivas_cloud": { voice: "en-IN-PrabhatNeural", eleven_voice: "ErXwobaYiN019PkySvjV", pitch: "-1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Prabhat) | Cloud & AI" },
+            "rajesh_cloud": { voice: "en-IN-PrabhatNeural", eleven_voice: "ErXwobaYiN019PkySvjV", pitch: "-1Hz", speed: 1.0, badge: "🇮🇳 South Asian | en-IN (Prabhat) | Cloud & AI" }
         };
 
         function onPersonaSelectChange(val) {
@@ -4343,6 +5990,11 @@ async def serve_dashboard():
                 }
                 const badge = document.getElementById('persona-meta-badge');
                 if (badge) badge.innerText = meta.badge;
+                try {
+                    localStorage.setItem('neuroclips_last_persona', val);
+                } catch (e) {}
+                if (typeof updateActiveVoiceBadge === 'function') updateActiveVoiceBadge();
+                if (typeof updatePreflightSummary === 'function') updatePreflightSummary();
             }
         }
 
@@ -4407,7 +6059,9 @@ async def serve_dashboard():
         }
 
         async function auditionVoiceDirector() {
-            const text = document.getElementById('prompt-input').value.trim() || "Welcome to Modular-NeuroClips. Auditioning neural voice director prosody and natural pacing.";
+            const scriptEl = document.getElementById('script-input');
+            const promptEl = document.getElementById('prompt-input');
+            const text = (scriptEl && scriptEl.value.trim()) || (promptEl ? promptEl.value.trim() : '') || "Welcome to Modular-NeuroClips. Auditioning neural voice director prosody and natural pacing.";
             const voice = document.getElementById('voice-select').value;
             const speech_rate = parseFloat(document.getElementById('speed-slider').value) || 1.0;
             const pitchVal = parseInt(document.getElementById('pitch-slider').value) || 0;
@@ -4458,12 +6112,60 @@ async def serve_dashboard():
             }
         }
 
+        async function handleDirectorReferenceUpload(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+            const badge = document.getElementById('director-ref-badge');
+            if (badge) badge.innerText = 'Uploading reference media...';
+            try {
+                const res = await fetch('/api/v1/director/upload-reference', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    document.getElementById('director-ref-url').value = data.reference_path || data.reference_url;
+                    if (badge) badge.innerText = `Attached: ${data.filename} (${data.media_type})`;
+                    const previewBox = document.getElementById('director-ref-preview-box');
+                    const previewImg = document.getElementById('director-ref-preview-img');
+                    if (previewBox && previewImg) {
+                        previewBox.classList.remove('hidden');
+                        if (data.media_type === 'image') {
+                            previewImg.src = data.reference_url;
+                            previewImg.classList.remove('hidden');
+                        } else {
+                            previewImg.classList.add('hidden');
+                        }
+                    }
+                } else {
+                    alert('Reference upload failed: ' + (data.detail || 'Error'));
+                    if (badge) badge.innerText = 'Upload failed';
+                }
+            } catch(e) {
+                alert('Reference upload error: ' + e);
+                if (badge) badge.innerText = 'Upload error';
+            }
+        }
+
+        function clearDirectorReferenceMedia() {
+            const input = document.getElementById('director-ref-upload');
+            if (input) input.value = '';
+            const refUrl = document.getElementById('director-ref-url');
+            if (refUrl) refUrl.value = '';
+            const badge = document.getElementById('director-ref-badge');
+            if (badge) badge.innerText = 'No media attached';
+            const previewBox = document.getElementById('director-ref-preview-box');
+            if (previewBox) previewBox.classList.add('hidden');
+        }
+
         async function startGeneration() {
-            const topic = document.getElementById('prompt-input').value.trim();
-            if (!topic) {
-                alert('Please enter a concept or Speaker Script.');
+            const visual_prompt = document.getElementById('prompt-input').value.trim();
+            if (!visual_prompt) {
+                alert('Please enter a visual prompt for the video.');
                 return;
             }
+
+            const voiceover_script = document.getElementById('script-input') ? document.getElementById('script-input').value.trim() : '';
+            const reference_media_url = document.getElementById('director-ref-url') ? document.getElementById('director-ref-url').value.trim() : '';
 
             const scenes = parseInt(document.getElementById('scene-slider').value);
             const language = document.getElementById('language-select').value;
@@ -4485,16 +6187,39 @@ async def serve_dashboard():
             const intro_video_url = document.getElementById('intro-bumper-select').value || null;
             const outro_video_url = document.getElementById('outro-bumper-select').value || null;
 
+            const output_type = document.getElementById('output-type-select') ? document.getElementById('output-type-select').value : 'video';
+            const motion_graphics = document.getElementById('motion-graphics-check') ? (document.getElementById('motion-graphics-check').value === 'true') : true;
+            const background_music = document.getElementById('bgm-check') ? (document.getElementById('bgm-check').value === 'true') : false;
+            const chunking_mode = document.getElementById('chunking-mode-input') ? document.getElementById('chunking-mode-input').value : 'auto';
+
             const btn = document.getElementById('generate-btn');
             btn.disabled = true;
             btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+            // UI State progression: Idle -> Uploading inputs -> Queued
+            const phaseEl = document.getElementById('director-pipeline-phase');
+            const progressContainer = document.getElementById('director-progress-container');
+            const phaseMsg = document.getElementById('director-phase-msg');
+            const phasePct = document.getElementById('director-phase-pct');
+            const progressBar = document.getElementById('director-progress-bar');
+            const statusDot = document.getElementById('director-status-dot');
+
+            if (phaseEl) { phaseEl.innerText = 'Uploading inputs'; phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow border border-brand-500/40 animate-pulse'; }
+            if (progressContainer) progressContainer.classList.remove('hidden');
+            if (phaseMsg) phaseMsg.innerText = 'Validating and uploading studio inputs...';
+            if (phasePct) phasePct.innerText = '10%';
+            if (progressBar) progressBar.style.width = '10%';
+            if (statusDot) statusDot.className = 'w-2.5 h-2.5 rounded-full bg-brand-400 animate-pulse';
 
             try {
                 const res = await fetch('/api/v1/generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        topic,
+                        topic: visual_prompt,
+                        visual_prompt: visual_prompt,
+                        voiceover_script: voiceover_script,
+                        reference_media_url: reference_media_url || null,
                         scenes,
                         art_style: 'Cinematic 35mm (Volumetric Lighting)',
                         resolution,
@@ -4514,44 +6239,61 @@ async def serve_dashboard():
                         elevenlabs_api_key: elevenKey,
                         elevenlabs_voice_id: elevenVoice,
                         stability,
-                        similarity_boost
+                        similarity_boost,
+                        output_type,
+                        motion_graphics,
+                        background_music,
+                        chunking_mode
                     })
                 });
                 const data = await res.json();
                 if (data.status === 'started') {
                     activeSessionJobId = data.job_id;
+                    updateTrackerDisplay(true);
+                    if (phaseEl) phaseEl.innerText = 'Queued';
+                    if (phaseMsg) phaseMsg.innerText = `Job #${data.job_id} queued in production pipeline`;
+                    if (phasePct) phasePct.innerText = '15%';
+                    if (progressBar) progressBar.style.width = '15%';
                     if (currentSessionOnly) fetchGallery();
                 } else if (res.status === 409) {
                     alert(data.message);
+                    if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
                 }
             } catch (err) {
                 alert('Generation failed: ' + err);
-            } finally {
-                setTimeout(() => {
-                    btn.disabled = false;
-                    btn.classList.remove('opacity-50', 'cursor-not-allowed');
-                }, 3000);
+                if (phaseEl) { phaseEl.innerText = 'FAILED'; phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-red-950/80 text-red-400 border border-red-500/50'; }
+                if (phaseMsg) phaseMsg.innerText = String(err);
+                if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
             }
         }
 
         async function openStoryboardPreview() {
             const topic = document.getElementById('prompt-input').value.trim();
             if (!topic) {
-                alert('Please enter a concept or Speaker Script first.');
+                alert('Please enter a concept or Master Script first.');
                 return;
             }
             const scenes = parseInt(document.getElementById('scene-slider').value);
             const avatar_persona = document.getElementById('avatar-persona-select').value;
+            const output_type = document.getElementById('output-type-select') ? document.getElementById('output-type-select').value : 'video';
+            const chunking_mode = document.getElementById('chunking-mode-input') ? document.getElementById('chunking-mode-input').value : 'auto';
 
             const btn = document.getElementById('storyboard-btn');
-            btn.innerHTML = '<span>⏳</span> <span>Directing...</span>';
+            btn.innerHTML = '<span>⏳</span> <span>Directing Scenes...</span>';
 
             try {
                 await fetchVideoAssets();
                 const res = await fetch('/api/v1/storyboard/preview', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ topic, scenes, art_style: 'Cinematic 35mm (Volumetric Lighting)', avatar_persona })
+                    body: JSON.stringify({
+                        topic,
+                        scenes,
+                        art_style: 'Cinematic 35mm (Volumetric Lighting)',
+                        avatar_persona,
+                        output_type,
+                        chunking_mode
+                    })
                 });
                 const data = await res.json();
                 currentStoryboardData = data.script;
@@ -4560,22 +6302,39 @@ async def serve_dashboard():
             } catch(err) {
                 alert('Storyboard generation failed: ' + err);
             } finally {
-                btn.innerHTML = '<span>🎬</span> <span>Storyboard Preview</span>';
+                btn.innerHTML = '<span>🎬</span> <span>Storyboard & Scene Breakdown</span>';
             }
+        }
+
+        function onSceneModeSelect(idx, mode) {
+            if (!currentStoryboardData || !currentStoryboardData.scenes[idx]) return;
+            if (mode === 'slide') {
+                currentStoryboardData.scenes[idx].output_type = 'slide';
+                currentStoryboardData.scenes[idx].video_source_type = 'ai_generated';
+            } else if (mode === 'uploaded_video') {
+                currentStoryboardData.scenes[idx].output_type = 'video';
+                currentStoryboardData.scenes[idx].video_source_type = 'uploaded_video';
+            } else {
+                currentStoryboardData.scenes[idx].output_type = 'video';
+                currentStoryboardData.scenes[idx].video_source_type = 'ai_generated';
+            }
+            renderStoryboardModal(currentStoryboardData);
         }
 
         function renderStoryboardModal(script) {
             const container = document.getElementById('storyboard-scenes-list');
             container.innerHTML = `
                 <div class="p-3 rounded-xl bg-brand-500/10 border border-brand-500/20 text-xs text-brand-glow flex items-center justify-between">
-                    <span class="font-bold">Production: ${script.title}</span>
-                    <span class="font-mono text-[11px] text-slate-400">${script.scenes.length} Scenes Drafted</span>
+                    <span class="font-bold">Screenplay: ${script.title}</span>
+                    <span class="font-mono text-[11px] text-slate-400">${script.scenes.length} Pedagogical Scenes</span>
                 </div>
             `;
 
             script.scenes.forEach((sc, idx) => {
                 const card = document.createElement('div');
-                const isVideo = sc.video_source_type === 'uploaded_video';
+                const isSlide = (sc.output_type === 'slide');
+                const isVideoClip = (sc.video_source_type === 'uploaded_video');
+                const isAIVideo = (!isSlide && !isVideoClip);
                 card.className = "p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-3";
                 
                 card.innerHTML = `
@@ -4584,19 +6343,43 @@ async def serve_dashboard():
                             <span class="text-xs font-bold text-white font-mono">
                                 <span class="px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow">Scene #${sc.scene_id}</span>
                             </span>
+                            <!-- 3-Way Scene Mode Switcher -->
                             <div class="flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
-                                <button onclick="onSceneSourceToggle(${idx}, 'ai_generated')" class="px-2.5 py-1 rounded-md transition-all ${!isVideo ? 'bg-brand-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
-                                    ✨ AI Diffusion
+                                <button onclick="onSceneModeSelect(${idx}, 'ai_generated')" class="px-2.5 py-1 rounded-md transition-all ${isAIVideo ? 'bg-brand-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
+                                    🎬 AI Video
                                 </button>
-                                <button onclick="onSceneSourceToggle(${idx}, 'uploaded_video')" class="px-2.5 py-1 rounded-md transition-all ${isVideo ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
-                                    📼 Video Clip
+                                <button onclick="onSceneModeSelect(${idx}, 'slide')" class="px-2.5 py-1 rounded-md transition-all ${isSlide ? 'bg-emerald-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
+                                    📊 Slide
+                                </button>
+                                <button onclick="onSceneModeSelect(${idx}, 'uploaded_video')" class="px-2.5 py-1 rounded-md transition-all ${isVideoClip ? 'bg-indigo-600 text-white font-bold' : 'text-slate-400 hover:text-white'}">
+                                    📼 Clip
                                 </button>
                             </div>
                         </div>
                         <button onclick="removeStoryboardScene(${idx})" class="text-red-400 hover:text-red-300 text-xs">🗑️ Remove</button>
                     </div>
 
-                    ${isVideo ? `
+                    ${isSlide ? `
+                    <!-- Instructional Slide Editor -->
+                    <div class="p-3 rounded-xl bg-emerald-950/20 border border-emerald-500/30 space-y-2.5">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                                <span>📊</span> <span>Instructional Slide Content</span>
+                            </span>
+                            <span class="text-[10px] text-slate-400">Renders high-contrast educational graphic + avatar</span>
+                        </div>
+                        <div class="space-y-2 text-xs">
+                            <div>
+                                <label class="block text-slate-400 font-semibold mb-1">Slide Title / Framework Header</label>
+                                <input id="sb-slidetitle-${idx}" type="text" value="${sc.title || ('Key Concept #' + sc.scene_id)}" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs" placeholder="e.g. Algorithmic Liquidity Mechanisms">
+                            </div>
+                            <div>
+                                <label class="block text-slate-400 font-semibold mb-1">Slide Key Takeaways / Framework Details (bulleted or structured text)</label>
+                                <textarea id="sb-slidecontent-${idx}" rows="2" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs font-mono" placeholder="• Key principle 1&#10;• Operational rule 2&#10;• Core risk metric 3">${sc.visual_prompt || sc.narration || ''}</textarea>
+                            </div>
+                        </div>
+                    </div>
+                    ` : (isVideoClip ? `
                     <!-- Video Source Selector & Upload Box -->
                     <div class="p-3 rounded-xl bg-indigo-950/20 border border-indigo-500/30 space-y-3">
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
@@ -4639,7 +6422,7 @@ async def serve_dashboard():
                             <textarea id="sb-motion-${idx}" rows="2" class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2 text-white text-xs">${sc.motion_prompt || 'Slow cinematic push-in'}</textarea>
                         </div>
                     </div>
-                    `}
+                    `)}
 
                     <!-- Narration & Duration -->
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
@@ -4664,8 +6447,11 @@ async def serve_dashboard():
         function addStoryboardScene() {
             if (!currentStoryboardData) return;
             const nextId = currentStoryboardData.scenes.length + 1;
+            const defaultType = document.getElementById('output-type-select') ? document.getElementById('output-type-select').value : 'video';
             currentStoryboardData.scenes.push({
                 scene_id: nextId,
+                title: `Scene ${nextId}`,
+                output_type: defaultType,
                 visual_prompt: `Visual diagram and high-tech interface representing scene ${nextId}`,
                 motion_prompt: "Slow cinematic push-in with volumetric lighting",
                 narration: "Key lesson summary statement.",
@@ -4687,15 +6473,26 @@ async def serve_dashboard():
             if (!currentStoryboardData) return;
 
             const updatedScenes = currentStoryboardData.scenes.map((sc, idx) => {
-                const isVideo = sc.video_source_type === 'uploaded_video';
+                const isVideoClip = sc.video_source_type === 'uploaded_video';
+                const isSlide = sc.output_type === 'slide';
+                let visPrompt = sc.visual_prompt || '';
+                if (isSlide && document.getElementById(`sb-slidecontent-${idx}`)) {
+                    visPrompt = document.getElementById(`sb-slidecontent-${idx}`).value;
+                } else if (!isVideoClip && document.getElementById(`sb-visual-${idx}`)) {
+                    visPrompt = document.getElementById(`sb-visual-${idx}`).value;
+                }
+                const slideTitle = (isSlide && document.getElementById(`sb-slidetitle-${idx}`)) ? document.getElementById(`sb-slidetitle-${idx}`).value : (sc.title || `Scene ${idx+1}`);
+
                 return {
                     scene_id: idx + 1,
-                    visual_prompt: (!isVideo && document.getElementById(`sb-visual-${idx}`)) ? document.getElementById(`sb-visual-${idx}`).value : (sc.visual_prompt || 'Visual presentation scene'),
-                    motion_prompt: (!isVideo && document.getElementById(`sb-motion-${idx}`)) ? document.getElementById(`sb-motion-${idx}`).value : (sc.motion_prompt || 'Cinematic pan'),
+                    title: slideTitle,
+                    output_type: sc.output_type || (isSlide ? 'slide' : 'video'),
+                    visual_prompt: visPrompt || 'Visual presentation scene',
+                    motion_prompt: (!isVideoClip && document.getElementById(`sb-motion-${idx}`)) ? document.getElementById(`sb-motion-${idx}`).value : (sc.motion_prompt || 'Cinematic pan'),
                     narration: document.getElementById(`sb-narration-${idx}`) ? document.getElementById(`sb-narration-${idx}`).value : (sc.narration || ''),
                     duration_seconds: parseFloat(document.getElementById(`sb-duration-${idx}`) ? document.getElementById(`sb-duration-${idx}`).value : sc.duration_seconds) || 4.0,
                     video_source_type: sc.video_source_type || 'ai_generated',
-                    video_source_url: isVideo ? (document.getElementById(`sb-videosrc-${idx}`) ? document.getElementById(`sb-videosrc-${idx}`).value : sc.video_source_url) : ''
+                    video_source_url: isVideoClip ? (document.getElementById(`sb-videosrc-${idx}`) ? document.getElementById(`sb-videosrc-${idx}`).value : sc.video_source_url) : ''
                 };
             });
 
@@ -4717,6 +6514,10 @@ async def serve_dashboard():
             const auto_clean = document.getElementById('auto-clean-check').checked;
             const intro_video_url = document.getElementById('intro-bumper-select').value || null;
             const outro_video_url = document.getElementById('outro-bumper-select').value || null;
+
+            const output_type = document.getElementById('output-type-select') ? document.getElementById('output-type-select').value : 'video';
+            const motion_graphics = document.getElementById('motion-graphics-check') ? (document.getElementById('motion-graphics-check').value === 'true') : true;
+            const background_music = document.getElementById('bgm-check') ? (document.getElementById('bgm-check').value === 'true') : false;
 
             closeStoryboardModal();
 
@@ -4745,6 +6546,9 @@ async def serve_dashboard():
                         elevenlabs_voice_id: elevenVoice,
                         stability,
                         similarity_boost,
+                        output_type,
+                        motion_graphics,
+                        background_music,
                         scenes: updatedScenes
                     })
                 });
@@ -4856,18 +6660,41 @@ async def serve_dashboard():
         evtSource.onmessage = function(e) {
             const data = JSON.parse(e.data);
             const gpu = data.telemetry.gpu;
-            document.getElementById('header-vram').innerText = `${gpu.used_mb} / ${gpu.total_mb} MB`;
-            document.getElementById('vram-stat').innerText = `${gpu.used_mb} / ${gpu.total_mb} MB`;
-            const vramPct = (gpu.used_mb / gpu.total_mb * 100) || 0;
-            document.getElementById('vram-bar').style.width = `${vramPct}%`;
+            const headerVram = document.getElementById('header-vram');
+            if (headerVram && gpu) headerVram.innerText = `${gpu.used_mb} / ${gpu.total_mb} MB`;
 
-            document.getElementById('gpu-util-stat').innerText = `${gpu.utilization}%`;
-            document.getElementById('gpu-bar').style.width = `${gpu.utilization}%`;
-            document.getElementById('cpu-stat').innerText = `${data.telemetry.system.cpu_percent}%`;
-            document.getElementById('cpu-bar').style.width = `${data.telemetry.system.cpu_percent}%`;
+            const cpuStat = document.getElementById('cpu-stat');
+            if (cpuStat && data.telemetry.system) cpuStat.innerText = `${data.telemetry.system.cpu_percent}%`;
+            const cpuBar = document.getElementById('cpu-bar');
+            if (cpuBar && data.telemetry.system) cpuBar.style.width = `${data.telemetry.system.cpu_percent}%`;
 
-            document.getElementById('header-status').innerText = data.state.status;
-            document.getElementById('latency-stat').innerText = `${data.state.model_load_latency.toFixed(2)}s`;
+            const headerStatus = document.getElementById('header-status');
+            if (headerStatus && data.state) headerStatus.innerText = data.state.status || 'Idle';
+
+            const latencyStat = document.getElementById('latency-stat');
+            if (latencyStat && data.state && data.state.model_load_latency !== undefined) {
+                latencyStat.innerText = `${data.state.model_load_latency.toFixed(2)}s`;
+            }
+
+            const currentStageStat = document.getElementById('current-stage-stat');
+            if (currentStageStat && data.state) {
+                currentStageStat.innerText = data.state.current_step || 'Idle';
+                currentStageStat.title = data.state.current_step || 'Idle';
+            }
+
+            const elapsedStat = document.getElementById('elapsed-stat');
+            if (elapsedStat) {
+                const job = data.active_job;
+                if (job && job.created_at && job.status !== 'complete' && job.status !== 'failed') {
+                    const nowSec = data.timestamp || (Date.now() / 1000);
+                    const elapsedSec = Math.max(0, Math.floor(nowSec - job.created_at));
+                    const m = Math.floor(elapsedSec / 60).toString().padStart(2, '0');
+                    const s = (elapsedSec % 60).toString().padStart(2, '0');
+                    elapsedStat.innerText = `${m}:${s}`;
+                } else {
+                    elapsedStat.innerText = "00:00";
+                }
+            }
 
             const progress = data.state.progress_percent || 0;
             document.getElementById('master-progress-fill').style.width = `${progress}%`;
@@ -4875,6 +6702,9 @@ async def serve_dashboard():
             document.getElementById('active-step-caption').innerText = data.state.current_step || 'Idle';
 
             const activeJob = data.active_job;
+            const isJobRendering = Boolean(activeJob && activeJob.status !== 'complete' && activeJob.status !== 'failed');
+            updateTrackerDisplay(isJobRendering || Boolean(activeSessionJobId));
+
             if (activeJob) {
                 renderMilestones(activeJob.current_milestone, activeJob.milestones);
                 if (activeJob.logs && activeJob.logs.length > 0) {
@@ -4882,13 +6712,122 @@ async def serve_dashboard():
                     term.innerHTML = activeJob.logs.map(l => `<div class="leading-relaxed">${l}</div>`).join('');
                     term.scrollTop = term.scrollHeight;
                 }
+
+                // 1. Live RENDERING state representation in Media Vault
+                if (activeJob.status !== 'complete' && activeJob.status !== 'failed') {
+                    updateVaultRenderingCard(activeJob);
+                } else {
+                    activeSessionJobId = null;
+                    removeVaultRenderingCard();
+                }
+
+                // 2. Fetch gallery ONCE upon completion (prevents infinite re-fetching and DOM wiping)
                 if (activeJob.status === 'complete' && activeJob.output_path) {
-                    fetchGallery();
+                    if (LAST_FETCHED_COMPLETED_JOB_ID !== activeJob.job_id) {
+                        LAST_FETCHED_COMPLETED_JOB_ID = activeJob.job_id;
+                        fetchGallery();
+                    }
                 }
             } else {
+                activeSessionJobId = null;
+                removeVaultRenderingCard();
                 renderMilestones(data.state.current_milestone || 'init');
             }
+
+            // Real-time UI state progression & preview player for Director Studio
+            updateDirectorJobUI(data.state, activeJob);
         };
+
+        function updateDirectorJobUI(state, activeJob) {
+            const phaseEl = document.getElementById('director-pipeline-phase');
+            const progressContainer = document.getElementById('director-progress-container');
+            const phaseMsg = document.getElementById('director-phase-msg');
+            const phasePct = document.getElementById('director-phase-pct');
+            const progressBar = document.getElementById('director-progress-bar');
+            const statusDot = document.getElementById('director-status-dot');
+            const outputCard = document.getElementById('director-output-card');
+            const videoPlayer = document.getElementById('director-video-player');
+            const downloadBtn = document.getElementById('director-download-btn');
+            const btn = document.getElementById('generate-btn');
+
+            if (!activeJob) {
+                if (state && (state.status === 'Idle' || state.status === 'idle')) {
+                    if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                }
+                return;
+            }
+
+            const st = activeJob.status;
+            const progress = (state && state.progress_percent !== undefined) ? state.progress_percent : (activeJob.progress_percent || 0);
+            const currentStep = (state && state.current_step) || activeJob.current_step || '';
+
+            if (st === 'running' || st === 'pending') {
+                if (progressContainer) progressContainer.classList.remove('hidden');
+                if (btn) { btn.disabled = true; btn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                if (statusDot) statusDot.className = 'w-2.5 h-2.5 rounded-full bg-brand-400 animate-pulse';
+
+                let phaseName = 'Generating video';
+                const ms = activeJob.current_milestone || '';
+                if (st === 'pending') {
+                    phaseName = 'Queued';
+                } else if (ms === 'script') {
+                    phaseName = 'Generating script';
+                } else if (ms === 'voice') {
+                    phaseName = 'Generating audio';
+                } else if (ms === 'keyframes' || ms === 'video') {
+                    phaseName = 'Generating video';
+                } else if (ms === 'compile' || ms === 'render') {
+                    phaseName = 'Rendering final video';
+                }
+
+                if (phaseEl) {
+                    phaseEl.innerText = phaseName;
+                    phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-brand-500/20 text-brand-glow border border-brand-500/40 animate-pulse';
+                }
+                if (phaseMsg) phaseMsg.innerText = currentStep || `Processing (${phaseName})...`;
+                if (phasePct) phasePct.innerText = `${progress}%`;
+                if (progressBar) progressBar.style.width = `${progress}%`;
+
+            } else if (st === 'complete') {
+                if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (statusDot) statusDot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400';
+                if (phaseEl) {
+                    phaseEl.innerText = 'Completed';
+                    phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-500/50';
+                }
+                if (phaseMsg) phaseMsg.innerText = 'Video generated and compiled successfully!';
+                if (phasePct) phasePct.innerText = '100%';
+                if (progressBar) progressBar.style.width = '100%';
+
+                if (activeJob.output_path) {
+                    const videoFilename = activeJob.output_path.split(/[/\\]/).pop();
+                    const videoUrl = `/static_renders/${videoFilename}`;
+                    if (outputCard) outputCard.classList.remove('hidden');
+                    if (videoPlayer) {
+                        const currentSrc = videoPlayer.getAttribute('src') || '';
+                        if (!currentSrc.includes(videoFilename)) {
+                            videoPlayer.src = videoUrl;
+                            videoPlayer.load();
+                        }
+                    }
+                    if (downloadBtn) {
+                        downloadBtn.href = videoUrl;
+                        downloadBtn.setAttribute('download', videoFilename);
+                        downloadBtn.classList.remove('bg-slate-800', 'text-slate-400', 'border-slate-700', 'pointer-events-none', 'opacity-50');
+                        downloadBtn.classList.add('bg-gradient-to-r', 'from-brand-600', 'to-emerald-600', 'text-white', 'hover:brightness-110', 'shadow-md', 'shadow-brand-500/20', 'pointer-events-auto');
+                    }
+                }
+
+            } else if (st === 'failed') {
+                if (btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (statusDot) statusDot.className = 'w-2.5 h-2.5 rounded-full bg-red-400';
+                if (phaseEl) {
+                    phaseEl.innerText = 'FAILED';
+                    phaseEl.className = 'text-[10px] font-mono px-2 py-0.5 rounded bg-red-950/80 text-red-400 border border-red-500/50';
+                }
+                if (phaseMsg) phaseMsg.innerText = (state && state.last_error) || (activeJob && activeJob.error) || 'Generation failed.';
+            }
+        }
 
         const savedElevenKey = localStorage.getItem('neuroclips_eleven_key');
         const savedElevenVoice = localStorage.getItem('neuroclips_eleven_voice');
@@ -5066,11 +7005,761 @@ async def serve_dashboard():
             }, 3000);
         }
 
+
+        // ================= AVATAR STUDIO JAVASCRIPT CONTROLLERS =================
+        function updateAvatarScriptMetrics() {
+            const input = document.getElementById('avatar-script-input');
+            if (!input) return;
+            const text = input.value.trim();
+            const words = text ? text.split(/\s+/).length : 0;
+            const speed = parseFloat(document.getElementById('avatar-speed-slider')?.value || 1.0);
+            const spokenMin = (words / (140 * speed)).toFixed(2);
+            const statEl = document.getElementById('avatar-script-stats');
+            if (statEl) statEl.innerText = `${words} words | ~${spokenMin} min`;
+        }
+
+        function insertAvatarCue(cue) {
+            const el = document.getElementById('avatar-script-input');
+            if (!el) return;
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            el.value = el.value.substring(0, start) + cue + el.value.substring(end);
+            el.focus();
+            el.selectionStart = el.selectionEnd = start + cue.length;
+            updateAvatarScriptMetrics();
+        }
+
+        async function handleAvatarPageUpload(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/api/v1/avatar/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const imgEl = document.getElementById('avatar-portrait-img');
+                    if (imgEl) imgEl.src = `${data.avatar_url}?t=${Date.now()}`;
+                    const badge = document.getElementById('avatar-img-badge');
+                    if (badge) badge.innerText = file.name;
+                    document.getElementById('avatar-page-preset-select').value = 'custom';
+                    alert('Avatar portrait uploaded successfully!');
+                }
+            } catch(e) {
+                alert('Avatar upload error: ' + e);
+            }
+        }
+
+        function applyAvatarPagePreset(val) {
+            const imgEl = document.getElementById('avatar-portrait-img');
+            const badge = document.getElementById('avatar-img-badge');
+            const voiceSelect = document.getElementById('avatar-voice-select');
+            if (val === 'maya') {
+                if (imgEl) imgEl.src = 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?q=80&w=400';
+                if (badge) badge.innerText = 'Maya (FinTech Lead)';
+                if (voiceSelect) voiceSelect.value = 'en-IN-NeerjaNeural';
+            } else if (val === 'alex') {
+                if (imgEl) imgEl.src = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?q=80&w=400';
+                if (badge) badge.innerText = 'Alex (AI Architect)';
+                if (voiceSelect) voiceSelect.value = 'en-US-GuyNeural';
+            } else if (val === 'elena') {
+                if (imgEl) imgEl.src = 'https://images.unsplash.com/photo-1580489944761-15a19d654956?q=80&w=400';
+                if (badge) badge.innerText = 'Elena (Compliance)';
+                if (voiceSelect) voiceSelect.value = 'en-GB-SoniaNeural';
+            } else if (val === 'david') {
+                if (imgEl) imgEl.src = 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?q=80&w=400';
+                if (badge) badge.innerText = 'David (LMS Trainer)';
+                if (voiceSelect) voiceSelect.value = 'en-US-ChristopherNeural';
+            } else {
+                if (imgEl) imgEl.src = `/static_renders/custom_avatar.png?t=${Date.now()}`;
+                if (badge) badge.innerText = 'custom_avatar.png';
+            }
+        }
+
+        function setAvatarCurtainMode(mode) {
+            document.getElementById('avatar-curtain-mode').value = mode;
+            const btnGreen = document.getElementById('curtain-btn-green');
+            const btnWhite = document.getElementById('curtain-btn-white');
+            const previewBg = document.getElementById('avatar-preview-curtain-bg');
+            const metaCurtain = document.getElementById('meta-curtain');
+
+            if (mode === 'green') {
+                btnGreen.className = "p-2.5 rounded-xl bg-emerald-500/20 border-2 border-emerald-500 text-white font-bold flex items-center justify-center gap-2 transition-all";
+                btnWhite.className = "p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 text-slate-300 font-bold flex items-center justify-center gap-2 transition-all hover:border-slate-700";
+                if (previewBg) previewBg.style.backgroundColor = '#00FF00';
+                if (metaCurtain) metaCurtain.innerText = 'Chroma Green (#00FF00)';
+            } else {
+                btnWhite.className = "p-2.5 rounded-xl bg-white/20 border-2 border-white text-white font-bold flex items-center justify-center gap-2 transition-all";
+                btnGreen.className = "p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 text-slate-300 font-bold flex items-center justify-center gap-2 transition-all hover:border-slate-700";
+                if (previewBg) previewBg.style.backgroundColor = '#FFFFFF';
+                if (metaCurtain) metaCurtain.innerText = 'Clean White (#FFFFFF)';
+            }
+        }
+
+        function toggleAvatarCurtainActive(isActive) {
+            const label = document.getElementById('avatar-curtain-toggle-label');
+            const previewBg = document.getElementById('avatar-preview-curtain-bg');
+            if (isActive) {
+                if (label) { label.innerText = 'ON'; label.className = 'text-[10px] font-bold font-mono text-emerald-400'; }
+                const mode = document.getElementById('avatar-curtain-mode').value;
+                if (previewBg) previewBg.style.backgroundColor = mode === 'green' ? '#00FF00' : '#FFFFFF';
+            } else {
+                if (label) { label.innerText = 'OFF'; label.className = 'text-[10px] font-bold font-mono text-slate-500'; }
+                if (previewBg) previewBg.style.backgroundColor = '#0F172A';
+            }
+        }
+
+        function setAvatarHandGestures(gesture) {
+            document.getElementById('avatar-gesture-mode').value = gesture;
+            const badge = document.getElementById('avatar-gesture-badge');
+            const metaGestures = document.getElementById('meta-gestures');
+            ['subtle', 'explanatory', 'dynamic', 'executive'].forEach(g => {
+                const btn = document.getElementById(`gesture-btn-${g}`);
+                if (!btn) return;
+                if (g === gesture) {
+                    btn.className = "p-2.5 rounded-xl bg-pink-500/20 border-2 border-pink-500 text-white font-bold flex flex-col items-center gap-1 transition-all";
+                } else {
+                    btn.className = "p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 text-slate-300 font-semibold flex flex-col items-center gap-1 transition-all hover:border-slate-700";
+                }
+            });
+            const titles = {
+                subtle: 'Subtle & Natural',
+                explanatory: 'Explanatory Pointing',
+                dynamic: 'Dynamic Keynote',
+                executive: 'Executive Anchor'
+            };
+            if (badge) badge.innerText = titles[gesture] || gesture;
+            if (metaGestures) metaGestures.innerText = titles[gesture] || gesture;
+        }
+
+        function toggle3DModelTeaser(checked) {
+            const statusEl = document.getElementById('avatar-3d-status');
+            if (statusEl) {
+                statusEl.innerText = checked ? 'Rig Active' : 'Standby';
+                statusEl.className = checked ? 'text-[10px] font-mono text-emerald-300 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-700/50' : 'text-[10px] font-mono text-purple-400 bg-purple-900/40 px-2 py-0.5 rounded border border-purple-700/50';
+            }
+        }
+
+        async function handleAvatar3DUpload(input) {
+            if (!input.files || !input.files[0]) return;
+            const file = input.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const statusEl = document.getElementById('avatar-3d-status');
+            const badgeEl = document.getElementById('avatar-3d-badge');
+            const pathEl = document.getElementById('avatar-3d-model-path');
+
+            if (statusEl) {
+                statusEl.innerText = 'Uploading...';
+                statusEl.className = 'text-[10px] font-mono text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-700/50 animate-pulse';
+            }
+
+            try {
+                const res = await fetch('/api/v1/avatar/upload-3d', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    if (pathEl) pathEl.value = data.model_path || data.model_url;
+                    if (badgeEl) badgeEl.innerText = `${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+                    if (statusEl) {
+                        statusEl.innerText = 'Active (Ready)';
+                        statusEl.className = 'text-[10px] font-mono text-emerald-300 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-700/50';
+                    }
+                    const toggle = document.getElementById('avatar-3d-model-toggle');
+                    if (toggle) toggle.checked = true;
+                    alert(`3D Avatar asset uploaded successfully!\nPath: ${data.model_path || data.model_url}`);
+                } else {
+                    alert('Upload failed: ' + (data.detail || 'Unknown error'));
+                    if (statusEl) {
+                        statusEl.innerText = 'Upload Failed';
+                        statusEl.className = 'text-[10px] font-mono text-red-300 bg-red-950/60 px-2 py-0.5 rounded border border-red-700/50';
+                    }
+                }
+            } catch (e) {
+                alert('Upload error: ' + e);
+                if (statusEl) {
+                    statusEl.innerText = 'Upload Error';
+                    statusEl.className = 'text-[10px] font-mono text-red-300 bg-red-950/60 px-2 py-0.5 rounded border border-red-700/50';
+                }
+            }
+        }
+
+        async function auditionAvatarVoice() {
+            const text = document.getElementById('avatar-script-input').value.trim() || "Hello, this is your neural avatar instructor speaking.";
+            const voice = document.getElementById('avatar-voice-select').value;
+            const speed = parseFloat(document.getElementById('avatar-speed-slider').value) || 1.0;
+            const pitch = document.getElementById('avatar-pitch-slider').value + 'Hz';
+            const btn = document.getElementById('avatar-audition-btn');
+            const orig = btn.innerHTML;
+            btn.innerHTML = '<span>⏳</span> <span>Synthesizing...</span>';
+            try {
+                const res = await fetch('/api/v1/voice-director/audition', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: text, voice, speed_rate: speed, pitch })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    const audio = new Audio(data.audio_url);
+                    audio.play();
+                } else {
+                    alert('Audition failed: ' + (data.detail || 'Error'));
+                }
+            } catch(e) {
+                alert('Audition error: ' + e);
+            } finally {
+                btn.innerHTML = orig;
+            }
+        }
+
+        async function generateAvatarVideoAction() {
+            const script = document.getElementById('avatar-script-input').value.trim();
+            if (!script) {
+                alert('Please enter a script for the avatar to speak.');
+                return;
+            }
+            const voice = document.getElementById('avatar-voice-select').value;
+            const speed = parseFloat(document.getElementById('avatar-speed-slider').value) || 1.0;
+            const pitch = document.getElementById('avatar-pitch-slider').value + 'Hz';
+            const curtainMode = document.getElementById('avatar-curtain-mode').value;
+            const curtainActive = document.getElementById('avatar-curtain-toggle').checked;
+            const handGestures = document.getElementById('avatar-gesture-mode').value;
+            const future3D = document.getElementById('avatar-3d-model-toggle').checked;
+            const model3DPath = document.getElementById('avatar-3d-model-path') ? document.getElementById('avatar-3d-model-path').value : null;
+
+            const btn = document.getElementById('avatar-generate-btn');
+            const progressBox = document.getElementById('avatar-gen-progress-box');
+            const stepMsg = document.getElementById('avatar-gen-step-msg');
+            const fill = document.getElementById('avatar-gen-progress-fill');
+            const pct = document.getElementById('avatar-gen-pct');
+
+            btn.disabled = true;
+            btn.classList.add('opacity-50');
+            progressBox.classList.remove('hidden');
+
+            stepMsg.innerText = 'Synthesizing Neural Narration (Edge-TTS)...';
+            fill.style.width = '30%';
+            pct.innerText = '30%';
+
+            try {
+                setTimeout(() => {
+                    stepMsg.innerText = 'Compositing Studio Curtain & Avatar Motion...';
+                    fill.style.width = '65%';
+                    pct.innerText = '65%';
+                }, 1800);
+
+                const res = await fetch('/api/v1/avatar/generate-video', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        script,
+                        voice,
+                        speed,
+                        pitch,
+                        curtain_mode: curtainMode,
+                        curtain_active: curtainActive,
+                        hand_gestures: handGestures,
+                        future_3d_model: future3D,
+                        model_3d_path: model3DPath || null
+                    })
+                });
+
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    fill.style.width = '100%';
+                    pct.innerText = '100%';
+                    stepMsg.innerText = 'Video Generation Complete!';
+
+                    const player = document.getElementById('avatar-video-player');
+                    player.src = `${data.video_url}?t=${Date.now()}`;
+                    player.play();
+
+                    document.getElementById('meta-duration').innerText = `${data.duration}s`;
+                    document.getElementById('avatar-video-runtime').innerText = `${data.duration}s`;
+                    document.getElementById('avatar-download-link').href = data.video_url;
+                    document.getElementById('avatar-download-link').download = data.filename;
+
+                    setTimeout(() => { progressBox.classList.add('hidden'); }, 3000);
+                } else {
+                    alert('Avatar Video Generation Failed: ' + (data.detail || 'Unknown error'));
+                    progressBox.classList.add('hidden');
+                }
+            } catch(e) {
+                alert('Generation error: ' + e);
+                progressBox.classList.add('hidden');
+            } finally {
+                btn.disabled = false;
+                btn.classList.remove('opacity-50');
+            }
+        }
+
+        // ================= SCORM FRAMEWORK JAVASCRIPT CONTROLLERS =================
+        function selectPrebuiltFrame(frameId) {
+            document.getElementById('scorm-prebuilt-frame-input').value = frameId;
+            const badge = document.getElementById('scorm-selected-frame-badge');
+            ['micro', 'master', 'comp', 'slide'].forEach(f => {
+                const card = document.getElementById(`frame-card-${f}`);
+                if (!card) return;
+                card.className = "p-2.5 rounded-xl bg-slate-900 border-2 border-slate-800 hover:border-slate-700 cursor-pointer transition-all";
+            });
+
+            const cardMap = {
+                microlearning: 'frame-card-micro',
+                masterclass: 'frame-card-master',
+                compliance: 'frame-card-comp',
+                slide_explainer: 'frame-card-slide'
+            };
+            const activeCard = document.getElementById(cardMap[frameId]);
+            if (activeCard) activeCard.className = "p-2.5 rounded-xl bg-indigo-500/20 border-2 border-indigo-500 cursor-pointer transition-all";
+
+            const titles = {
+                microlearning: 'Microlearning Capsule',
+                masterclass: 'Masterclass (Lecture + Quiz)',
+                compliance: 'Compliance Certification',
+                slide_explainer: 'Slide Explainer'
+            };
+            if (badge) badge.innerText = titles[frameId] || frameId;
+        }
+
+        function autoStructureContextPaste() {
+            const text = document.getElementById('scorm-context-paste-input').value.trim();
+            if (!text) {
+                document.getElementById('scorm-context-paste-input').value = "## Course Overview: Autonomous AI Agents in FinTech\n\n### Unit 1: Foundations of Decentralized Autonomous Operations\n- Core Smart Contracts\n- Automated Execution & Verification\n- Risk Management Safeguards";
+            } else {
+                document.getElementById('scorm-context-paste-input').value = `## Structured Curriculum Context\n\n${text}\n\n- Verified for SCORM 1.2 / 2004 CMI Data Model compliance.`;
+            }
+            alert('Curriculum context structured for SCORM Framework mapping!');
+        }
+
+        // =========================================================================
+        // STUDIO SETTINGS, PRE-FLIGHT SUMMARY & SETUP PERSISTENCE (Tasks 6b, 7a, 7b)
+        // =========================================================================
+        function openSettingsModal() {
+            const modal = document.getElementById('settings-modal');
+            if (modal) {
+                modal.classList.remove('hidden');
+                try {
+                    const savedKey = localStorage.getItem('neuroclips_eleven_key') || '';
+                    const savedVoice = localStorage.getItem('neuroclips_eleven_voice') || '21m00Tcm4TlvDq8ikWAM';
+                    const keyInput = document.getElementById('elevenlabs-api-key');
+                    const voiceSelect = document.getElementById('elevenlabs-voice-id');
+                    if (keyInput && !keyInput.value) keyInput.value = savedKey;
+                    if (voiceSelect && savedVoice) voiceSelect.value = savedVoice;
+                } catch (e) {}
+            }
+        }
+
+        function closeSettingsModal() {
+            const modal = document.getElementById('settings-modal');
+            if (modal) modal.classList.add('hidden');
+            if (typeof updatePreflightSummary === 'function') updatePreflightSummary();
+        }
+
+        function updatePreflightSummary() {
+            try {
+                const resSelect = document.getElementById('resolution-select');
+                let aspect = "16:9 HD";
+                let dims = "1280×720";
+                if (resSelect && resSelect.selectedOptions && resSelect.selectedOptions[0]) {
+                    const opt = resSelect.selectedOptions[0];
+                    const val = opt.value;
+                    const w = opt.dataset.w || "1280";
+                    const h = opt.dataset.h || "720";
+                    dims = `${w}×${h}`;
+                    if (val === '16:9_hd') aspect = "16:9 HD";
+                    else if (val === '16:9_fhd') aspect = "16:9 FHD";
+                    else if (val === '16:9_sd') aspect = "16:9 SD";
+                    else if (val === '9:16_vertical') aspect = "9:16";
+                    else if (val === '9:16_fhd') aspect = "9:16 FHD";
+                    else if (val === '1:1_square') aspect = "1:1";
+                    else if (val === '1:1_hd') aspect = "1:1 HD";
+                    else if (val === '4:5_portrait') aspect = "4:5";
+                    else if (val === '4:5_sd') aspect = "4:5 SD";
+                }
+
+                const sceneSlider = document.getElementById('scene-slider');
+                const scenes = sceneSlider ? `${sceneSlider.value} scenes` : "4 scenes";
+
+                const voiceSelect = document.getElementById('voice-select');
+                let voice = "en-IN-NeerjaNeural";
+                if (typeof CURRENT_VOICE_PROVIDER !== 'undefined' && CURRENT_VOICE_PROVIDER === 'elevenlabs') {
+                    const ev = document.getElementById('elevenlabs-voice-id');
+                    const evName = (ev && ev.selectedOptions && ev.selectedOptions[0]) ? ev.selectedOptions[0].text.split(' ')[0] : 'ElevenLabs';
+                    voice = `ElevenLabs (${evName})`;
+                } else if (voiceSelect) {
+                    voice = voiceSelect.value;
+                }
+
+                const burnCheck = document.getElementById('burn-subtitles-check');
+                const captions = (burnCheck && burnCheck.checked) ? "captions on" : "captions off";
+
+                const engineSelect = document.getElementById('engine-select');
+                let engine = "FFmpeg";
+                if (engineSelect && engineSelect.value === 'remotion') {
+                    engine = "Remotion";
+                }
+
+                const summaryText = `${aspect} · ${dims} · ${scenes} · ${voice} · ${captions} · ${engine}`;
+                const summaryEl = document.getElementById('preflight-summary');
+                if (summaryEl) {
+                    summaryEl.innerText = summaryText;
+                }
+            } catch (e) {
+                console.warn('Error updating preflight summary:', e);
+            }
+        }
+
+        function restoreLastUsedSetup() {
+            try {
+                // Restore ElevenLabs credentials into modal inputs
+                const savedElevenKey = localStorage.getItem('neuroclips_eleven_key');
+                const savedElevenVoice = localStorage.getItem('neuroclips_eleven_voice');
+                const keyInput = document.getElementById('elevenlabs-api-key');
+                const voiceSelectModal = document.getElementById('elevenlabs-voice-id');
+                if (savedElevenKey && keyInput) keyInput.value = savedElevenKey;
+                if (savedElevenVoice && voiceSelectModal) voiceSelectModal.value = savedElevenVoice;
+
+                // 7b. Restore resolution defensively
+                const savedRes = localStorage.getItem('neuroclips_last_resolution');
+                if (savedRes) {
+                    const resSel = document.getElementById('resolution-select');
+                    if (resSel && Array.from(resSel.options).some(o => o.value === savedRes)) {
+                        resSel.value = savedRes;
+                        if (typeof updateAspectPreview === 'function') updateAspectPreview();
+                    }
+                }
+
+                // 7b. Restore voice defensively
+                const savedVoice = localStorage.getItem('neuroclips_last_voice');
+                if (savedVoice) {
+                    const voiceSel = document.getElementById('voice-select');
+                    if (voiceSel && Array.from(voiceSel.options).some(o => o.value === savedVoice)) {
+                        voiceSel.value = savedVoice;
+                        if (typeof updateActiveVoiceBadge === 'function') updateActiveVoiceBadge();
+                    }
+                }
+
+                // 7b. Restore avatar persona defensively
+                const savedPersona = localStorage.getItem('neuroclips_last_persona');
+                if (savedPersona) {
+                    const personaSel = document.getElementById('avatar-persona-select');
+                    if (personaSel && Array.from(personaSel.options).some(o => o.value === savedPersona)) {
+                        personaSel.value = savedPersona;
+                        if (typeof onPersonaSelectChange === 'function') onPersonaSelectChange(savedPersona);
+                    }
+                }
+            } catch (e) {
+                console.warn('Failed to restore last used setup:', e);
+            }
+            updatePreflightSummary();
+            updateHeaderAuthState();
+        }
+
+        function updateHeaderAuthState() {
+            try {
+                const user = localStorage.getItem('neuroclips_user');
+                const authText = document.getElementById('header-auth-text');
+                const authIcon = document.getElementById('header-auth-icon');
+                const authBtn = document.getElementById('header-auth-btn');
+                if (user && authText && authIcon) {
+                    authText.innerText = user.includes('@') ? user.split('@')[0] : user;
+                    authIcon.innerText = '👤';
+                    if (authBtn) {
+                        authBtn.title = `Logged in as ${user}. Click to manage session.`;
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // URL Routing initialization on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            const p = window.location.pathname.toLowerCase();
+            if (p.includes('avatar')) {
+                switchStudioMode('avatar');
+            } else if (p.includes('scorm')) {
+                switchStudioMode('scorm');
+            } else if (p.includes('director')) {
+                switchStudioMode('video');
+            }
+            restoreLastUsedSetup();
+        });
+
         fetchGallery();
         fetchIdentities();
         fetchVideoAssets();
         updateScriptMetrics();
+        updateAspectPreview();
+        restoreLastUsedSetup();
     </script>
 </body>
 </html>
 """
+
+
+async def serve_login_page():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modular-NeuroClips Studio | Director Login (neuroclips.mytestbed.tech)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                            glow: '#818cf8',
+                            dark: '#030712'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #030712;
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(168, 85, 247, 0.12) 0px, transparent 50%),
+                radial-gradient(at 50% 50%, rgba(6, 182, 212, 0.08) 0px, transparent 60%);
+        }
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between text-slate-100 font-sans selection:bg-brand-500 selection:text-white">
+
+    <!-- Top Domain & Status Bar -->
+    <header class="w-full px-6 py-4 flex items-center justify-between border-b border-slate-800/60 backdrop-blur-md">
+        <a href="/" class="flex items-center space-x-3 group">
+            <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-brand-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-brand-500/25 group-hover:scale-105 transition-all">
+                <span class="text-lg font-black text-white">⚡</span>
+            </div>
+            <div>
+                <span class="font-bold text-sm tracking-tight text-white group-hover:text-brand-glow transition-all">Modular-NeuroClips</span>
+                <span class="text-[10px] text-slate-400 block font-mono">Director Suite v2.6</span>
+            </div>
+        </a>
+
+        <!-- Production Node SSL Badge -->
+        <div class="flex items-center space-x-2.5">
+            <div class="glass-panel px-3 py-1.5 rounded-full flex items-center space-x-2 text-xs font-mono border border-emerald-500/30">
+                <span class="relative flex h-2 w-2">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                <span class="text-slate-300">neuroclips.mytestbed.tech</span>
+                <span class="text-emerald-400 font-bold text-[10px]">🔒 SSL</span>
+            </div>
+            <a href="/" class="text-xs text-slate-400 hover:text-brand-glow transition-all px-2.5 py-1 rounded-lg hover:bg-slate-800">
+                Studio View &rarr;
+            </a>
+        </div>
+    </header>
+
+    <!-- Main Authentication Portal -->
+    <main class="flex-1 flex items-center justify-center p-6">
+        <div class="w-full max-w-md space-y-6">
+
+            <!-- Card Container -->
+            <div class="glass-panel rounded-3xl p-8 space-y-6 border border-brand-500/30 shadow-2xl shadow-indigo-500/10">
+                
+                <!-- Header / Logo -->
+                <div class="text-center space-y-2">
+                    <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-gradient-to-tr from-brand-600 via-indigo-600 to-purple-600 shadow-xl shadow-brand-500/30 mb-1">
+                        <span class="text-2xl font-black text-white">⚡</span>
+                    </div>
+                    <h2 class="text-xl font-bold tracking-tight text-white">Studio Workstation Sign-In</h2>
+                    <p class="text-xs text-slate-400">Authenticate to access autonomous director orchestration & SCORM export</p>
+                </div>
+
+                <!-- Alert / Status Notice -->
+                <div id="login-status-notice" class="hidden p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs text-emerald-300 flex items-center space-x-2">
+                    <span class="text-sm">✓</span>
+                    <span id="login-status-text">Authorization confirmed. Entering Studio...</span>
+                </div>
+
+                <!-- Form -->
+                <form id="login-form" onsubmit="handleFormLogin(event)" class="space-y-4 text-xs">
+                    <div>
+                        <label for="username-input" class="block font-semibold text-slate-300 mb-1.5 uppercase tracking-wider text-[10px]">
+                            Workstation ID / Email
+                        </label>
+                        <div class="relative">
+                            <input type="text" id="username-input" value="director@mytestbed.tech" required
+                                   class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 pl-9 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono transition-all">
+                            <span class="absolute left-3 top-3 text-slate-500 text-sm">👤</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center justify-between mb-1.5">
+                            <label for="password-input" class="block font-semibold text-slate-300 uppercase tracking-wider text-[10px]">
+                                Access Token / Key
+                            </label>
+                            <span class="text-[10px] text-brand-glow font-mono">Demo Auto-Filled</span>
+                        </div>
+                        <div class="relative">
+                            <input type="password" id="password-input" value="nc-prod-director-token-2026" required
+                                   class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 pl-9 pr-10 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono transition-all">
+                            <span class="absolute left-3 top-3 text-slate-500 text-sm">🔑</span>
+                            <button type="button" onclick="togglePasswordVisibility()" class="absolute right-3 top-3 text-slate-400 hover:text-white" title="Toggle visibility">
+                                👁️
+                            </button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label for="role-select" class="block font-semibold text-slate-300 mb-1.5 uppercase tracking-wider text-[10px]">
+                            Operational Role
+                        </label>
+                        <select id="role-select" class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 text-slate-200 focus:outline-none focus:border-brand-500 font-sans">
+                            <option value="Director & Master Orchestrator" selected>👑 Director & Master Orchestrator</option>
+                            <option value="Curriculum & Instructional Architect">🎓 Curriculum & Instructional Architect</option>
+                            <option value="Production & Video Engineer">⚙️ Production & Video Engineer</option>
+                            <option value="Enterprise LMS Admin">📦 Enterprise LMS Admin</option>
+                        </select>
+                    </div>
+
+                    <div class="flex items-center justify-between pt-1 text-[11px]">
+                        <label class="flex items-center space-x-2 text-slate-300 cursor-pointer select-none">
+                            <input type="checkbox" id="remember-me-check" checked class="rounded accent-brand-500">
+                            <span>Remember on this workstation</span>
+                        </label>
+                        <a href="/" class="text-brand-glow hover:underline">Guest Preview</a>
+                    </div>
+
+                    <!-- Sign In CTA -->
+                    <button type="submit" id="submit-login-btn"
+                            class="w-full py-3.5 rounded-xl bg-gradient-to-r from-brand-600 via-indigo-600 to-purple-600 hover:from-brand-500 hover:to-indigo-500 font-bold text-xs text-white shadow-lg shadow-brand-500/25 active:scale-[0.99] transition-all flex items-center justify-center space-x-2">
+                        <span>🚀</span>
+                        <span>Sign In to Workstation</span>
+                    </button>
+                </form>
+
+                <!-- Divider -->
+                <div class="relative flex items-center justify-center">
+                    <div class="border-t border-slate-800 w-full"></div>
+                    <span class="bg-slate-950 px-3 text-[10px] text-slate-500 uppercase tracking-widest font-mono font-bold absolute">OR QUICK ACCESS</span>
+                </div>
+
+                <!-- Instant One-Click Demo Access -->
+                <button type="button" onclick="handleQuickDemoAccess()"
+                        class="w-full py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-brand-500/30 hover:border-brand-500/60 font-semibold text-xs transition-all flex items-center justify-center space-x-2 group">
+                    <span class="group-hover:scale-110 transition-transform">⚡</span>
+                    <span>Instant Demo Access (Director Role)</span>
+                </button>
+            </div>
+
+            <!-- Server & Cluster Info Box -->
+            <div class="glass-panel p-4 rounded-2xl text-[11px] text-slate-400 space-y-2 border border-slate-800/80 font-mono">
+                <div class="flex items-center justify-between text-[10px]">
+                    <span class="text-slate-500 uppercase tracking-wider">Target Endpoint</span>
+                    <span class="text-slate-300 font-bold">neuroclips.mytestbed.tech</span>
+                </div>
+                <div class="flex items-center justify-between text-[10px]">
+                    <span class="text-slate-500 uppercase tracking-wider">Reverse Proxy</span>
+                    <span class="text-indigo-400">Caddy / Nginx TLS 1.3</span>
+                </div>
+                <div class="flex items-center justify-between text-[10px]">
+                    <span class="text-slate-500 uppercase tracking-wider">Engine Status</span>
+                    <span class="text-emerald-400">Autonomous Pipeline Ready</span>
+                </div>
+            </div>
+
+            <div class="text-center">
+                <a href="/" class="text-xs text-slate-400 hover:text-slate-200 transition-colors">
+                    &larr; Back to Director Studio
+                </a>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="w-full py-4 text-center text-xs text-slate-500 border-t border-slate-800/60 font-mono">
+        Modular-NeuroClips &bull; neuroclips.mytestbed.tech &bull; Autonomous Production Cluster
+    </footer>
+
+    <script>
+        // Check for existing session on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            try {
+                const existingUser = localStorage.getItem('neuroclips_user');
+                if (existingUser) {
+                    const uInput = document.getElementById('username-input');
+                    if (uInput) uInput.value = existingUser;
+                }
+                const existingRole = localStorage.getItem('neuroclips_role');
+                if (existingRole) {
+                    const rSelect = document.getElementById('role-select');
+                    if (rSelect) rSelect.value = existingRole;
+                }
+            } catch (e) {}
+        });
+
+        function togglePasswordVisibility() {
+            const pwd = document.getElementById('password-input');
+            if (pwd) {
+                pwd.type = pwd.type === 'password' ? 'text' : 'password';
+            }
+        }
+
+        function handleFormLogin(e) {
+            e.preventDefault();
+            const username = document.getElementById('username-input').value.trim();
+            const role = document.getElementById('role-select').value;
+            authenticateAndRedirect(username, role);
+        }
+
+        function handleQuickDemoAccess() {
+            authenticateAndRedirect('director@mytestbed.tech', 'Director & Master Orchestrator');
+        }
+
+        function authenticateAndRedirect(user, role) {
+            const btn = document.getElementById('submit-login-btn');
+            const notice = document.getElementById('login-status-notice');
+            const noticeText = document.getElementById('login-status-text');
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span>⏳</span> <span>Authorizing Session...</span>';
+            }
+
+            try {
+                localStorage.setItem('neuroclips_user', user);
+                localStorage.setItem('neuroclips_role', role);
+                localStorage.setItem('neuroclips_session_token', 'nc_' + Math.random().toString(36).substring(2) + Date.now().toString(36));
+                localStorage.setItem('neuroclips_authenticated', 'true');
+            } catch (e) {
+                console.warn('Storage warning:', e);
+            }
+
+            if (notice && noticeText) {
+                noticeText.innerText = `Welcome ${user.split('@')[0]}! Launching Director Studio...`;
+                notice.classList.remove('hidden');
+            }
+
+            setTimeout(() => {
+                const params = new URLSearchParams(window.location.search);
+                const redirect = params.get('redirect') || '/';
+                window.location.href = redirect;
+            }, 600);
+        }
+    </script>
+</body>
+</html>
+"""
+

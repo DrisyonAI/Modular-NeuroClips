@@ -249,21 +249,130 @@ class MediaGenerationEngine:
         # 3. Procedural Fallback Card
         return self._create_placeholder_image(prompt, output_path, resolution=resolution)
 
+    def generate_instructional_slide(
+        self,
+        title: str,
+        content: str,
+        output_path: Path,
+        resolution: str = "16:9_hd",
+        subtitle: Optional[str] = None,
+        badge_text: Optional[str] = None
+    ) -> bool:
+        """
+        Generates a high-contrast, professional instructional slide card for education/course content.
+        Designed as a clean background for an avatar presenter to narrate concepts, frameworks, and diagrams.
+        """
+        width, height = get_resolution_dimensions(resolution)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not PIL_AVAILABLE:
+            return False
+
+        try:
+            # Elegant deep slate-blue background
+            img = Image.new("RGB", (width, height), color=(11, 15, 25))
+            draw = ImageDraw.Draw(img)
+
+            # Subtle corporate gradient
+            for y in range(height):
+                r = int(11 + (y / height) * 12)
+                g = int(15 + (y / height) * 20)
+                b = int(25 + (y / height) * 45)
+                draw.line([(0, y), (width, y)], fill=(r, g, b))
+
+            # Outer border with accent glow
+            pad = max(16, int(min(width, height) * 0.03))
+            draw.rectangle([(pad, pad), (width - pad, height - pad)], outline=(30, 58, 138), width=2)
+
+            # Slide Header Banner
+            header_h = max(48, int(height * 0.12))
+            draw.rectangle([(pad + 2, pad + 2), (width - pad - 2, pad + header_h)], fill=(15, 23, 42))
+            draw.line([(pad + 2, pad + header_h), (width - pad - 2, pad + header_h)], fill=(56, 189, 248), width=2)
+
+            # Category pill tag
+            pill_text = (badge_text or subtitle or "INSTRUCTIONAL SLIDE  |  CORE CONCEPT").upper()
+            draw.text((pad + 16, pad + 10), pill_text, fill=(56, 189, 248))
+
+            # Slide Title
+            clean_title = (title or "Instructional Module").upper()
+            if len(clean_title) > 60:
+                clean_title = clean_title[:57] + "..."
+            draw.text((pad + 16, pad + 28), clean_title, fill=(255, 255, 255))
+
+            # Content Bullet Points
+            raw_lines = [c.strip() for c in content.replace("\r", "").split("\n") if c.strip()]
+            if not raw_lines or len(raw_lines) == 1:
+                sentences = [s.strip() for s in content.replace(". ", ".\n").split("\n") if s.strip()]
+                raw_lines = sentences[:6] if sentences else ["Key Concept Analysis"]
+
+            y_pos = pad + header_h + max(24, int(height * 0.05))
+            line_height = max(26, int(height * 0.07))
+            max_chars = max(35, int(width / 16))
+
+            for item in raw_lines[:6]:
+                # Draw bullet marker
+                draw.rectangle([(pad + 20, y_pos + 4), (pad + 28, y_pos + 12)], fill=(14, 165, 233))
+                words = item.split()
+                line_acc = []
+                for w in words:
+                    if len(" ".join(line_acc + [w])) > max_chars:
+                        draw.text((pad + 40, y_pos), " ".join(line_acc), fill=(241, 245, 249))
+                        y_pos += int(line_height * 0.85)
+                        line_acc = [w]
+                    else:
+                        line_acc.append(w)
+                if line_acc:
+                    draw.text((pad + 40, y_pos), " ".join(line_acc), fill=(241, 245, 249))
+                    y_pos += line_height
+
+            # Bottom status banner
+            draw.line([(pad, height - pad - 28), (width - pad, height - pad - 28)], fill=(30, 41, 59), width=1)
+            draw.text((pad + 16, height - pad - 22), "MODULAR-NEUROCLIPS ACADEMY", fill=(100, 116, 139))
+
+            img.save(output_path)
+            return output_path.exists() and output_path.stat().st_size > 500
+        except Exception as exc:
+            print(f"[Instructional Slide Warning] {exc}")
+            return False
+
     def generate_video(
         self,
         image_path: Path,
         motion_prompt: str,
         output_path: Path,
         duration_sec: int = 5,
-        resolution: str = "16:9_hd"
+        resolution: str = "16:9_hd",
+        motion_graphics: bool = True
     ) -> bool:
         """
         Unified video motion generator called by DirectorAgent and studios.
         Uses CogVideoX or FFmpeg Smooth Ken Burns Zoom to generate duration-matched video.
+        If motion_graphics is False, generates a clean static frame video.
         """
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         width, height = get_resolution_dimensions(resolution)
+        dur_str = str(max(1, duration_sec))
+
+        # Static video loop if motion graphics is disabled
+        if not motion_graphics:
+            try:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-i", str(Path(image_path).resolve()),
+                    "-t", dur_str,
+                    "-vf", f"scale={width}:{height}",
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "ultrafast",
+                    str(output_path)
+                ]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                return res.returncode == 0 and output_path.exists() and output_path.stat().st_size > 500
+            except Exception:
+                return False
 
         # 1. Try CogVideoX if GPU is available
         if DIFFUSERS_AVAILABLE and TORCH_AVAILABLE and torch.cuda.is_available():
@@ -294,7 +403,6 @@ class MediaGenerationEngine:
                 VRAMGuard.cleanup()
 
         # 2. Smooth Ken Burns Zoom with FFmpeg
-        dur_str = str(max(1, duration_sec))
         frames = max(30, int(duration_sec * 25))
         try:
             cmd = [
@@ -331,12 +439,43 @@ class MediaGenerationEngine:
         except Exception:
             return False
 
-
-    def generate_video_clip(self, image_path: str, motion_prompt: str, scene_id: int, job_id: str = "fresh", width: int = 1280, height: int = 720, force_refresh: bool = True, max_retries: int = 3) -> str:
-        """Generates video clip using CogVideoX or FFmpeg Smooth Ken Burns Zoom."""
+    def generate_video_clip(
+        self,
+        image_path: str,
+        motion_prompt: str,
+        scene_id: int,
+        job_id: str = "fresh",
+        width: int = 1280,
+        height: int = 720,
+        force_refresh: bool = True,
+        max_retries: int = 3,
+        motion_graphics: bool = True,
+        duration_sec: float = 4.0
+    ) -> str:
+        """Generates video clip using CogVideoX or FFmpeg Smooth Ken Burns Zoom, or static loop when motion_graphics=False."""
         clip_path = self.output_dir / f"scene_{scene_id}_{job_id}_clip.mp4"
         if not force_refresh and clip_path.exists() and clip_path.stat().st_size > 1000:
             return str(clip_path)
+
+        dur_str = str(max(1.0, float(duration_sec)))
+
+        if not motion_graphics:
+            try:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-i", str(image_path),
+                    "-t", dur_str,
+                    "-vf", f"scale={width}:{height}",
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "ultrafast",
+                    str(clip_path)
+                ]
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                return str(clip_path)
+            except Exception:
+                pass
 
         if DIFFUSERS_AVAILABLE and TORCH_AVAILABLE and torch.cuda.is_available():
             for attempt in range(1, max_retries + 1):

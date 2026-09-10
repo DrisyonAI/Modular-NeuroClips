@@ -105,16 +105,30 @@ PERSONA_CATALOG: Dict[str, PersonaIdentityContract] = {
         default_speed=1.0,
         recommended_art_style="Clean Minimalist Vector (Infographic)"
     ),
-    "rajesh_cloud": PersonaIdentityContract(
-        persona_id="rajesh_cloud",
-        display_name="Rajesh (Principal Cloud Architect)",
+    "srinivas_cloud": PersonaIdentityContract(
+        persona_id="srinivas_cloud",
+        display_name="Srinivas (Lead AI & Cloud Architect)",
         gender=GenderEnum.MALE,
         target_locale=RegionLocaleEnum.EN_IN,
         demographic_ethnicity="South Asian",
-        industry_domain="Distributed Systems & Cloud Architecture",
-        visual_continuity_anchor="40-year-old South Asian male principal cloud architect, subtle salt-and-pepper hair, formal light blue oxford shirt, modern glass whiteboard tech office background",
+        industry_domain="Distributed Systems, AI & Cloud Architecture",
+        visual_continuity_anchor="40-year-old South Asian male lead enterprise AI and cloud architect, subtle salt-and-pepper hair, formal light blue oxford shirt, modern glass whiteboard tech office and studio background",
         canonical_voice="en-IN-PrabhatNeural",
         elevenlabs_voice_id="ErXwobaYiN019PkySvjV", # Antoni
+        default_pitch="-1Hz",
+        default_speed=1.0,
+        recommended_art_style="Isometric 3D Tech (Cyberpunk / Studio)"
+    ),
+    "rajesh_cloud": PersonaIdentityContract(
+        persona_id="rajesh_cloud",
+        display_name="Srinivas (Lead AI & Cloud Architect)",
+        gender=GenderEnum.MALE,
+        target_locale=RegionLocaleEnum.EN_IN,
+        demographic_ethnicity="South Asian",
+        industry_domain="Distributed Systems, AI & Cloud Architecture",
+        visual_continuity_anchor="40-year-old South Asian male lead enterprise AI and cloud architect, subtle salt-and-pepper hair, formal light blue oxford shirt, modern glass whiteboard tech office and studio background",
+        canonical_voice="en-IN-PrabhatNeural",
+        elevenlabs_voice_id="ErXwobaYiN019PkySvjV",
         default_pitch="-1Hz",
         default_speed=1.0,
         recommended_art_style="Isometric 3D Tech (Cyberpunk / Studio)"

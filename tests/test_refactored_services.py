@@ -1,8 +1,12 @@
-﻿"""
+"""
 Unit and integration tests for refactored services and multi-agent contracts.
 """
+import sys
 import pytest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from src.services.job_manager import JobManager, MILESTONES
 from src.services.telemetry import get_system_telemetry
 from src.services.audio_service import (

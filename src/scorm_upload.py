@@ -52,6 +52,11 @@ from xml.sax.saxutils import escape as xml_escape
 from fastapi import File, Form, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 
+try:
+    from src.scorm_packager import SCORMPackager
+except ImportError:
+    from scorm_packager import SCORMPackager
+
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v"})
 
 # A single upload and the total unpacked payload. The container is memory- and
@@ -359,9 +364,14 @@ def install_scorm_upload(app, *, output_dir: Path, exports_dir: Path, quiz_engin
         file: UploadFile = File(...),
         course_title: str = Form("Untitled Course"),
         course_id: str = Form("COURSE"),
-        module_title: str = Form("Module 1"),
+        module_title: str = Form(""),
         topic: str = Form(""),
         module_id: int = Form(1),
+        module_number: Optional[str] = Form(None),
+        module_name: Optional[str] = Form(None),
+        lesson_number: Optional[str] = Form(None),
+        lesson_name: Optional[str] = Form(None),
+        intro_video_filename: Optional[str] = Form(None),
         pass_percentage: int = Form(70),
         scorm_version: str = Form("1.2"),
         include_quiz: str = Form("true"),
@@ -416,54 +426,57 @@ def install_scorm_upload(app, *, output_dir: Path, exports_dir: Path, quiz_engin
 
             video_names = [v.name for v in videos]
 
+            # --- dynamic module and lesson metadata -----------------------
+            m_num = str(module_number).strip() if module_number else (str(module_id) if module_id else "1")
+            m_name = (module_name or "").strip()
+            if not m_name:
+                if module_title:
+                    m_name = re.sub(r"^Module\s*\d+\s*:\s*", "", module_title).strip() or module_title
+                else:
+                    m_name = f"Module {m_num}"
+
+            final_module_title = f"Module {m_num}: {m_name}" if (m_num and not m_name.startswith(f"Module {m_num}")) else m_name
+
             # --- player + manifest ----------------------------------------
-            questions = quiz_engine.get_module_questions(module_id or 1) if want_quiz else []
-            item_title = f"{module_title}: {topic}" if topic else module_title
+            questions = quiz_engine.get_module_questions(int(m_num) if str(m_num).isdigit() else (module_id or 1)) if want_quiz else []
+            item_title = f"{final_module_title}: {topic}" if topic else final_module_title
             if questions:
                 item_title = f"{item_title} ({len(questions)} Questions)"
 
-            if len(videos) == 1 and want_quiz:
-                # Reuse the upstream player verbatim for the case it handles.
-                player_html = quiz_engine.generate_interactive_scorm_html(
-                    video_filename=video_names[0],
-                    module_id=module_id or 1,
-                    pass_percentage=pass_percentage or 70,
-                )
-            else:
-                quiz_html = None
-                if questions:
-                    # Embed the upstream quiz markup underneath the playlist by
-                    # reusing its generator with no video attached.
-                    quiz_html = quiz_engine.generate_interactive_scorm_html(
-                        video_filename="",
-                        module_id=module_id or 1,
-                        pass_percentage=pass_percentage or 70,
-                    )
-                    # Keep only the body of that document; it is a full page.
-                    m = re.search(r"<body[^>]*>(.*)</body>", quiz_html, re.S | re.I)
-                    quiz_html = m.group(1) if m else None
-                player_html = _playlist_player_html(
-                    video_names, course_title, module_title, topic, quiz_html
-                )
-
-            manifest_xml = _build_manifest(
-                safe_course_id, course_title, item_title, scorm_version, video_names
+            packager = SCORMPackager(
+                course_id=safe_course_id,
+                course_title=course_title,
+                course_description=f"Curriculum module: {final_module_title}",
+                version=scorm_version,
+                intro_video_path=intro_video_filename
             )
+            packager.add_module(
+                module_id=f"mod_{safe_course_id}",
+                module_title=final_module_title,
+                description="",
+                module_number=m_num,
+                module_name=m_name
+            )
+            for idx, v in enumerate(videos, start=1):
+                l_num = str(lesson_number).strip() if (lesson_number and idx == 1) else f"{m_num}.{idx}"
+                l_name = str(lesson_name).strip() if (lesson_name and idx == 1) else (
+                    f"{topic or 'Lesson'} (Part {idx})" if len(videos) > 1 else (topic or m_name or "Lesson")
+                )
+                packager.add_lesson(
+                    module_id=f"mod_{safe_course_id}",
+                    lesson_id=f"les_{safe_course_id}_{idx}",
+                    lesson_title=l_name,
+                    topic=topic or m_name,
+                    video_path=str(v),
+                    lesson_number=l_num,
+                    lesson_name=l_name
+                )
 
             # --- zip it ----------------------------------------------------
             package_name = f"SCORM_{safe_course_id}_{int(time.time())}_{uuid.uuid4().hex[:6]}.zip"
             zip_path = Path(exports_dir) / package_name
 
-            def _write_package() -> None:
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    zf.writestr("imsmanifest.xml", manifest_xml)
-                    zf.writestr("index.html", player_html)
-                    for v in videos:
-                        # Videos are already compressed; storing avoids a long,
-                        # pointless deflate pass over hundreds of MB.
-                        zf.write(v, arcname=v.name, compress_type=zipfile.ZIP_STORED)
-
-            await run_in_threadpool(_write_package)
+            await run_in_threadpool(packager.export_zip, zip_path)
 
             return {
                 "status": "ok",

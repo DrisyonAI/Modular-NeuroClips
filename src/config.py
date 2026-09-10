@@ -18,6 +18,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
+N8N_ALERT_WEBHOOK_URL = os.getenv(
+    "N8N_ALERT_WEBHOOK_URL",
+    "https://n8n.mytestbed.tech/webhook/alert-dispatch"
+)
+N8N_ALERTS_ENABLED = os.getenv("N8N_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
+
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./render_output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -37,12 +43,33 @@ DEVICE = os.getenv("DEVICE", "cuda")
 T2I_MODEL = os.getenv("T2I_MODEL", "runwayml/stable-diffusion-v1-5")
 I2V_MODEL = os.getenv("I2V_MODEL", "THUDM/CogVideoX-2b-I2V")
 
+# `use_case` and `orientation` drive the Director Studio picker, so the operator
+# chooses by where the video will be published rather than by pixel count. Every
+# entry is carried through the whole pipeline to the encoder: keyframes are
+# requested at these dimensions, motion clips are rendered at them, and the
+# compositor sizes the avatar and captions against them.
 RESOLUTION_PROFILES = {
-    "16:9_hd": {"name": "16:9 HD Broadcast (1280x720)", "width": 1280, "height": 720, "aspect": "16:9"},
-    "16:9_sd": {"name": "16:9 SD Fast Preview (576x320)", "width": 576, "height": 320, "aspect": "16:9"},
-    "16:9_fhd": {"name": "16:9 Full HD (1920x1080)", "width": 1920, "height": 1080, "aspect": "16:9"},
-    "9:16_vertical": {"name": "9:16 Mobile Shorts (720x1280)", "width": 720, "height": 1280, "aspect": "9:16"},
-    "1:1_square": {"name": "1:1 LMS Widget / Square (720x720)", "width": 720, "height": 720, "aspect": "1:1"}
+    "16:9_hd": {"name": "16:9 HD Broadcast (1280x720)", "width": 1280, "height": 720, "aspect": "16:9",
+                "use_case": "YouTube / Course Video", "orientation": "landscape"},
+    "16:9_fhd": {"name": "16:9 Full HD (1920x1080)", "width": 1920, "height": 1080, "aspect": "16:9",
+                 "use_case": "YouTube / Course Video", "orientation": "landscape"},
+    # 576x324, not the previous 576x320: that was 1.80:1 while being labelled 16:9,
+    # so draft previews were framed at a different shape from the HD render they
+    # were meant to preview. 324 is still even, as yuv420p requires.
+    "16:9_sd": {"name": "16:9 SD Fast Preview (576x324)", "width": 576, "height": 324, "aspect": "16:9",
+                "use_case": "Fast Draft Preview", "orientation": "landscape"},
+    "9:16_vertical": {"name": "9:16 Mobile Shorts (720x1280)", "width": 720, "height": 1280, "aspect": "9:16",
+                      "use_case": "Instagram Reels / YouTube Shorts", "orientation": "portrait"},
+    "9:16_fhd": {"name": "9:16 Full HD Reels (1080x1920)", "width": 1080, "height": 1920, "aspect": "9:16",
+                 "use_case": "Instagram Reels / YouTube Shorts", "orientation": "portrait"},
+    "1:1_square": {"name": "1:1 Square (720x720)", "width": 720, "height": 720, "aspect": "1:1",
+                   "use_case": "Instagram / Social Feed Post", "orientation": "square"},
+    "1:1_hd": {"name": "1:1 Square HD (1080x1080)", "width": 1080, "height": 1080, "aspect": "1:1",
+               "use_case": "Instagram / Social Feed Post", "orientation": "square"},
+    "4:5_portrait": {"name": "4:5 Portrait Feed (1080x1350)", "width": 1080, "height": 1350, "aspect": "4:5",
+                     "use_case": "Instagram / LinkedIn Portrait Post", "orientation": "portrait"},
+    "4:5_sd": {"name": "4:5 Portrait Preview (576x720)", "width": 576, "height": 720, "aspect": "4:5",
+               "use_case": "Fast Portrait Preview", "orientation": "portrait"}
 }
 
 RENDER_WIDTH = 1280
