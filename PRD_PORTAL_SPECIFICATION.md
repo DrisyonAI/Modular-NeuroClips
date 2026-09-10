@@ -530,7 +530,180 @@ Modular-NeuroClips/
 
 ---
 
-## 7. Implementation Roadmap & Milestones
+## 7. Business & Functional Requirements: Custom Voice Cloning & Universal Document Speech Engine
+
+### 7.1 Business Requirements Document (BRD)
+
+| Requirement ID | Strategic Intent | Business Metric / Outcome | Target User | Priority |
+| :--- | :--- | :--- | :--- | :---: |
+| **BRD-VOICE-01** | **User Voice Cloning & Asset Ownership** | Enables trainers, SME executives, and professors to clone their real voice from a 15-30s audio recording and save it as an immutable persona asset. Eliminates generic, synthetic-sounding narrators. | Enterprise L&D, Solo Founders, Corporate Trainers | P0 |
+| **BRD-VOICE-02** | **Zero Marginal Cost Local Cloning Option** | Provide a hybrid approach: Premium cloud voice cloning (ElevenLabs Instant Voice Clone) alongside local reference-based zero-cost cloning (Kokoro / XTTS), preventing API cost blowouts. | Budget-conscious course creators, Higher Ed | P0 |
+| **BRD-DOC-01** | **Universal Document-to-Audio Ingestion** | Ingest raw educational materials (`.txt`, `.md`, `.docx`, `.pdf`) and automatically decompose them into pedagogical narration scenes aligned to any selected voice (cloned or pre-baked). | Curriculum Designers, Content Teams | P0 |
+| **BRD-DOC-02** | **SCORM 1.2 / 2004 Audio Package Assembly** | Turn any uploaded book chapter or lecture document into a fully packaged, interactive SCORM module with synchronized subtitles and knowledge checks in under 60 seconds. | Enterprise LMS Administrators | P1 |
+| **BRD-BATCH-01** | **Automated Curriculum Batch Video & Audio Pipeline** | Ingest full multi-module curriculum definitions and automatically synthesize neural speech, timing manifests, synchronous subtitles (.srt), and high-resolution Remotion/FFmpeg composite videos across all lessons unattended. | Course Directors, Instructional Ops | P0 |
+| **BRD-CLOUD-01** | **Direct Cloud LMS Ingestion (SCORM Cloud API v2)** | Programmatically upload and register generated SCORM packages into Rustici SCORM Cloud, retrieve test preview launch links, and configure learner dispatch without manual browser exports. | Enterprise LMS Integrators, Corporate L&D | P0 |
+
+---
+
+### 7.2 Functional Requirements Document (FRD)
+
+#### 7.2.1 Workflow Architecture Diagram
+
+```mermaid
+flowchart TD
+    %% Workflow 1: Voice Cloning
+    subgraph WF1["Workflow 1: User Voice Ingestion & Library Registration"]
+        A1[Creator Records Mic or Uploads Audio .wav, .ogg, .mp3] --> A2[Audio Normalization Gate: 44.1kHz Mono WAV]
+        A2 --> A3{Duration & SNR Check: 5s to 600s}
+        A3 -->|Fail| A_Err[Reject with Duration/Noise Error]
+        A3 -->|Pass| A4{Cloud Key Available?}
+        A4 -->|Yes| A5[ElevenLabs Instant Voice Clone API /v1/voices/add]
+        A4 -->|No| A6[Compute Local Reference Embeddings]
+        A5 --> A7[Persist Metadata to custom_personas.json]
+        A6 --> A7
+        A7 --> A8[Inject into PERSONA_CATALOG]
+        A8 --> A9([⭐ Custom Voice Available in All Dropdowns])
+    end
+
+    %% Workflow 2: Document-to-Speech & SCORM
+    subgraph WF2["Workflow 2: Universal Document Ingestion & SCORM Delivery"]
+        B1[Upload Raw Document .txt, .md, .docx, .pdf] --> B2[DocumentParser: Strip Formatting & Metadata]
+        B2 --> B3[Sentence-Boundary Chunking: 40-80 Words/Scene]
+        B3 --> B4[LexiconEngine: FinTech Pronunciation Pass]
+        B4 --> B5[SSML Compiler: Tag Conversion break, prosody, emphasis]
+        B5 --> B6[Select Cloned Voice or Canonical Persona]
+        B6 --> B7[VoiceDirectorAgent Synthesis Loop]
+        B7 --> B8[EBU R128 Loudness Normalization: -14 LUFS]
+        B8 --> B9[Generate Millisecond-Aligned .srt Subtitles]
+        B9 --> B10{Export SCORM 1.2 Enabled?}
+        B10 -->|Yes| B11[SCORMPackager: Build imsmanifest.xml & HTML5 Player]
+        B10 -->|No| B12([🎵 Master MP3 & Subtitles Delivered])
+        B11 --> B13([📦 Interactive SCORM 1.2 ZIP Archive])
+    end
+```
+
+#### 7.2.2 End-to-End Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Creator as 👤 Creator / Trainer
+    participant UI as 🖥️ Voice Director Studio UI
+    participant API as ⚡ FastAPI Control Plane
+    participant Cloner as 🎙️ VoiceCloner Engine
+    participant Parser as 📄 DocumentParser
+    participant Lexicon as 📚 LexiconEngine
+    participant VoiceAgent as 👑 VoiceDirectorAgent
+    participant SCORM as 📦 SCORMPackager
+
+    %% Voice Cloning Cycle
+    Note over Creator,Cloner: Cycle 1: Custom Voice Cloning
+    Creator->>UI: Record 15-30s audio / upload sample
+    UI->>API: POST /api/v1/voice/clone
+    API->>Cloner: normalize_sample_audio()
+    Cloner->>Cloner: FFmpeg highpass filter & 44.1kHz mono conversion
+    Cloner->>Cloner: clone_voice_elevenlabs() / local profile
+    Cloner->>Cloner: register_custom_persona_contract()
+    Cloner-->>API: Return PersonaIdentityContract
+    API-->>UI: Persona registered & selectable in UI
+
+    %% Document Speech Cycle
+    Note over Creator,SCORM: Cycle 2: Universal Document-to-Speech & SCORM
+    Creator->>UI: Drop document (.txt/.md/.docx/.pdf) + select Voice
+    UI->>API: POST /api/v1/voice/synthesize-file (export_scorm=true)
+    API->>Parser: parse_file(temp_doc)
+    Parser->>Parser: extract_text() & slice_into_scenes()
+    Parser-->>API: DocumentParseResult (Scenes 1..N)
+    API->>Lexicon: apply_lexicon(narration)
+    Lexicon-->>API: Phonetically corrected text
+    API->>VoiceAgent: synthesize_voice_contract()
+    VoiceAgent->>VoiceAgent: SSML compilation & TTS synthesis
+    VoiceAgent->>VoiceAgent: EBU R128 -14 LUFS normalization
+    VoiceAgent->>VoiceAgent: generate_srt_subtitles()
+    VoiceAgent-->>API: VoiceContract (Master MP3 + .srt)
+    API->>SCORM: export_zip(manifest, HTML5 player, audio, srt)
+    SCORM-->>API: SCORM_DOC_SPEECH.zip
+    API-->>UI: Stream Master Audio + Download Links (.mp3, .srt, .zip)
+    UI-->>Creator: Audio playback active & SCORM course package ready
+```
+
+#### 7.2.3 Module 1: User Voice Recording & Library Registration (`VoiceCloner`)
+
+- **FRD-VC-01 (Audio Ingestion)**:
+  - System shall support in-browser microphone recording (`MediaRecorder` API, 16kHz/44.1kHz WAV/WebM/OGG) and file upload (`.wav`, `.mp3`, `.ogg`, `.m4a`).
+  - System shall validate that audio length is between 5 seconds and 600 seconds and minimum size > 50KB.
+- **FRD-VC-02 (Storage & Normalization)**:
+  - System shall save raw sample to `assets_library/voices/<clean_name>_<timestamp>.<ext>`.
+  - System shall use FFmpeg to normalize the sample to 44.1kHz mono WAV with highpass filtering (`highpass=f=80,lowpass=f=12000`).
+- **FRD-VC-03 (Provider Binding)**:
+  - **Cloud Path (ElevenLabs)**: System shall call `POST https://api.elevenlabs.io/v1/voices/add` passing `name`, `description`, and `files=[sample_path]`. Stores returned `voice_id`.
+  - **Local Path (Reference Speaker Profiles)**: System shall compute voice speaker conditioning profile and save it in `assets_library/voices/`.
+- **FRD-VC-04 (Dynamic Persona Catalog Registry)**:
+  - System shall persist the new voice into `src/contracts/custom_personas.json` and dynamically inject it into `PERSONA_CATALOG` (`PersonaIdentityContract`), making it instantly selectable across all Studio and SCORM tabs.
+
+#### 7.2.4 Module 2: Universal File-to-Speech Ingestion (`DocumentVoiceEngine`)
+
+- **FRD-DFS-01 (Multi-Format Document Parsing)**:
+  - System shall accept `.txt`, `.md`, `.docx`, and `.pdf` files up to 25MB via `POST /api/v1/voice/synthesize-file`.
+  - System shall strip markup syntax, table artifacts, citations, and metadata headers to extract clean narrative prose.
+- **FRD-DFS-02 (Pedagogical Scene Slicing)**:
+  - System shall decompose long text into pedagogical scenes bounded by natural sentence breaks (target: 40–80 words / 20–40 seconds per scene).
+  - Maximum scenes per document run: 50 scenes (auto-paginated for larger books/decks).
+- **FRD-DFS-03 (Lexicon & SSML Infusion)**:
+  - System shall route every scene through `LexiconEngine` (`src/lexicon.py`) to enforce correct pronunciation of enterprise acronyms (KYC, UPI, NBFC, SEBI, etc.).
+  - System shall compile prosody tags (`[pause]`, `[emphasis]`, `[tone]`) into SSML tags.
+- **FRD-DFS-04 (Universal Voice Synthesis & Packaging)**:
+  - System shall pass the sliced scenes to `VoiceDirectorAgent` with the user-selected voice (default, custom cloned, or pre-baked catalog persona).
+  - System shall generate:
+    1. Per-scene audio files with exact `ffprobe` measured durations.
+    2. Master concatenated audio track normalized to -14 LUFS.
+    3. Synchronized `.srt` and `.vtt` subtitle files.
+    4. Optional one-click ADL SCORM 1.2 zip archive for direct LMS distribution.
+
+#### 7.2.5 Module 3: Automated Curriculum Batch Synthesis & Remotion Video Rendering (`CurriculumBatchRunner`)
+
+- **FRD-BATCH-01 (Matrix Traversal & Batch Voice Synthesis)**:
+  - System shall traverse all course modules (Modules 1 to 7) and generate structured audio slides named according to canonical schema: `M{m}_T{t}_L{l}_Slide{s}.mp3`.
+  - System shall generate synchronized sentence-level `.srt` subtitles alongside each slide audio file.
+  - System shall compile `batch_manifest.json` recording slide title, audio file relative path, exact duration in seconds, subtitle path, and frame count at 30fps.
+- **FRD-BATCH-02 (Remotion React Engine & FFmpeg Video Compositing)**:
+  - System shall feed `batch_manifest.json` into Remotion composition (`FintechAgentLesson`) or the FFmpeg hardware-accelerated video pipeline.
+  - System shall render complete lesson videos (`FINTECH_AGENTS_*.mp4`) combining visual slides, audio narration, kinetic typography subtitles, and animated avatar overlays.
+
+#### 7.2.6 Module 4: Rustici SCORM Cloud Direct Deployment (`SCORMCloudClient`)
+
+- **FRD-CLOUD-01 (API v2 Basic Auth & Cloud Course Ingestion)**:
+  - System shall connect to SCORM Cloud API v2 (`https://cloud.scorm.com/api/v2`) using HTTP Basic Authentication (`SCORM_CLOUD_APP_ID` / `SCORM_CLOUD_SECRET_KEY`).
+  - System shall upload generated SCORM course packages directly using asynchronous import jobs (`POST /courses/uploadJobs`).
+- **FRD-CLOUD-02 (Course Preview & Registration Dispatch)**:
+  - System shall support generating preview launch links (`POST /courses/{course_id}/preview`) for instant verification in browser.
+  - System shall support creating learner registrations and generating tracked launch links (`POST /registrations/{registration_id}/launchLink`).
+
+```mermaid
+flowchart TD
+    %% Workflow 3: Batch Curriculum Pipeline
+    subgraph WF3["Workflow 3: Automated Batch Video Synthesis (CurriculumBatchRunner)"]
+        C1[Curriculum Course Definition] --> C2[Matrix Traversal: Modules 1..7]
+        C2 --> C3[VoiceDirector: Edge-TTS Neural Speech]
+        C3 --> C4[Per-Slide M{m}_T{t}_L{l}_Slide{s}.mp3 + .srt]
+        C4 --> C5[Compile batch_manifest.json with Millisecond Timing]
+        C5 --> C6[Remotion React Bundle / FFmpeg Compositor]
+        C6 --> C7([🎬 Production Lesson Video: FINTECH_AGENTS_*.mp4])
+    end
+
+    %% Workflow 4: SCORM Cloud Direct Deploy
+    subgraph WF4["Workflow 4: SCORM Cloud API v2 Direct Deployment"]
+        D1[SCORM 1.2 / 2004 ZIP Package] --> D2[SCORMCloudClient API v2 Ingestion]
+        D2 --> D3{POST /courses/uploadJobs}
+        D3 --> D4[Poll Job Status until Complete]
+        D4 --> D5[POST /courses/{course_id}/preview]
+        D5 --> D6([🚀 Instant Cloud LMS Launch Link])
+    end
+```
+
+---
+
+## 8. Implementation Roadmap & Milestones
 
 ### Phase 1: Backend Refactoring & API Expansion (Senior Backend Dev)
 1. **Modularize API Routers:** Split `app.py` and `dashboard.py` into clean FastAPI APIRouters under `src/routes/`.
@@ -538,7 +711,13 @@ Modular-NeuroClips/
 3. **SCORM Packager Extension:** Implement `src/scorm_builder.py` to programmatically build `imsmanifest.xml`, generate HTML5 course wrappers, zip archives, and SCORM Cloud API integration.
 4. **Enhanced Telemetry:** Extend NVML stats with CPU/RAM metrics and SSE broadcast channels.
 
-### Phase 2: Modern Frontend Portal Scaffolding (Senior Frontend Dev)
+### Phase 2: Custom Voice Cloning & Universal Document Speech Engine
+1. **Voice Registration Engine:** Implement `src/agents/voice_cloner.py` with ElevenLabs voice cloning API and local speaker embedding ingestion.
+2. **Document Parser & Scene Slicer:** Implement `src/document_parser.py` supporting `.txt`, `.md`, `.docx`, and `.pdf`.
+3. **Dynamic Persona Registry:** Implement persistent JSON catalog loader in `src/contracts/persona.py`.
+4. **Voice Lab UI Widgets:** Add microphone audio recorder and document drag-and-drop zone to the dashboard.
+
+### Phase 3: Modern Frontend Portal Scaffolding (Senior Frontend Dev)
 1. **React / Vite Setup:** Initialize modern TypeScript + Vite + Tailwind CSS portal with Lucide icons.
 2. **Telemetry Dock & Real-Time SSE:** Connect to `/api/v1/telemetry/stream` with live VRAM progress rings and pulse animations.
 3. **Studio & Storyboard Components:** Build Prompt Generator, Art Style Selector, and Drag-and-Drop Scene Cards.

@@ -1,0 +1,58 @@
+{
+  "dr_srinivas_velaga_3096": {
+    "persona_id": "dr_srinivas_velaga_3096",
+    "display_name": "Dr. Srinivas Velaga",
+    "gender": "male",
+    "target_locale": "en-IN",
+    "demographic_ethnicity": "User Cloned",
+    "industry_domain": "FinTech Architecture",
+    "visual_continuity_anchor": "Professional executive presenter Dr. Srinivas Velaga in corporate attire, modern glass office, photorealistic 8k",
+    "canonical_voice": "en-IN-PrabhatNeural",
+    "elevenlabs_voice_id": "21m00Tcm4TlvDq8ikWAM",
+    "default_pitch": "+0Hz",
+    "default_speed": 1.0,
+    "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
+  },
+  "dr_srinivas_velaga_3222": {
+    "persona_id": "dr_srinivas_velaga_3222",
+    "display_name": "Dr. Srinivas Velaga",
+    "gender": "male",
+    "target_locale": "en-IN",
+    "demographic_ethnicity": "User Cloned",
+    "industry_domain": "FinTech Architecture",
+    "visual_continuity_anchor": "Professional executive presenter Dr. Srinivas Velaga in corporate attire, modern glass office, photorealistic 8k",
+    "canonical_voice": "en-IN-PrabhatNeural",
+    "elevenlabs_voice_id": "21m00Tcm4TlvDq8ikWAM",
+    "default_pitch": "+0Hz",
+    "default_speed": 1.0,
+    "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
+  },
+  "test_presenter_14860": {
+    "persona_id": "test_presenter_14860",
+    "display_name": "Professor Ananya Sharma",
+    "gender": "female",
+    "target_locale": "en-IN",
+    "demographic_ethnicity": "South Asian",
+    "industry_domain": "FinTech Research",
+    "visual_continuity_anchor": "Professor in formal Indian attire, university lecture theater",
+    "canonical_voice": "en-IN-NeerjaNeural",
+    "elevenlabs_voice_id": "test_eleven_123",
+    "default_pitch": "+0Hz",
+    "default_speed": 1.0,
+    "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
+  },
+  "test_presenter_41484": {
+    "persona_id": "test_presenter_41484",
+    "display_name": "Professor Ananya Sharma",
+    "gender": "female",
+    "target_locale": "en-IN",
+    "demographic_ethnicity": "South Asian",
+    "industry_domain": "FinTech Research",
+    "visual_continuity_anchor": "Professor in formal Indian attire, university lecture theater",
+    "canonical_voice": "en-IN-NeerjaNeural",
+    "elevenlabs_voice_id": "test_eleven_123",
+    "default_pitch": "+0Hz",
+    "default_speed": 1.0,
+    "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
+  }
+}

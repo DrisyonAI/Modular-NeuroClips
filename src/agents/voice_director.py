@@ -1,7 +1,9 @@
 """
-Voice Director Sub-Agent.
-Synthesizes neural speech (Edge-TTS & ElevenLabs), enforces prosody,
-probes exact audio duration via ffprobe, and creates synchronized subtitles.
+Voice Director Sub-Agent (Enhanced v2).
+Synthesizes neural speech (Edge-TTS, ElevenLabs, Kokoro-Local/Offline),
+compiles expressive SSML prosody, applies domain pronunciation lexicons,
+enforces EBU R128 loudness normalization (-14 LUFS), supports audio ducking,
+and generates millisecond-accurate synchronized subtitles.
 """
 import re
 import json
@@ -10,21 +12,24 @@ import asyncio
 import subprocess
 import urllib.request
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
+
 from src.contracts.persona import PersonaIdentityContract
 from src.contracts.script_contract import ScriptContract, ScriptScene
 from src.contracts.voice_contract import SceneAudioArtifact, VoiceContract
+from src.lexicon import LexiconEngine, DEFAULT_FINTECH_LEXICON
 
 
 class VoiceDirectorAgent:
     """
-    Specialized agent responsible for vocal synthesis, prosody tuning,
-    exact audio duration measurement, and subtitle generation.
+    Specialized agent responsible for vocal synthesis, SSML prosody tuning,
+    domain pronunciation enforcement, broadcast audio mastering, and subtitle generation.
     """
 
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, custom_lexicon: Optional[Dict[str, str]] = None):
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.lexicon_engine = LexiconEngine(custom_lexicon)
 
     def probe_audio_duration(self, audio_path: Path) -> float:
         """
@@ -45,21 +50,133 @@ class VoiceDirectorAgent:
             pass
         return 5.0
 
-    def clean_narration_for_tts(self, raw_script: str) -> str:
-        """Translates director cue tags into natural speech pauses and cleans formatting."""
-        text = raw_script.strip()
-        # [pause 500ms] -> natural breath pause
-        text = re.sub(r"\[pause\s+(\d+)m?s?\]", r" ... ", text, flags=re.IGNORECASE)
-        text = re.sub(r"\[emphasis\]", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\[protip\]", "Pro tip: ", text, flags=re.IGNORECASE)
-        return text
-
     def clean_narration_for_subtitles(self, raw_script: str) -> str:
         """Strips director tags completely for clean on-screen subtitle cards."""
         text = re.sub(r"\[pause\s+[^\]]+\]", "", raw_script, flags=re.IGNORECASE)
-        text = re.sub(r"\[emphasis\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[emphasis(?::\w+)?\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[tone:\w+\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[rate:[^\]]+\]", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\[protip\]", "💡 Pro Tip: ", text, flags=re.IGNORECASE)
         return re.sub(r"\s+", " ", text).strip()
+
+    def compile_ssml_prosody(self, raw_script: str, voice_name: str, base_rate: float = 1.0, base_pitch: str = "+0Hz") -> Tuple[str, str]:
+        """
+        Transforms director cue markup into W3C SSML for neural TTS engines
+        and outputs clean plain text with pronunciation lexicon applied.
+        """
+        text = self.lexicon_engine.apply_lexicon(raw_script.strip())
+
+        # Build clean plain text for engines without SSML support
+        clean_plain = text
+        clean_plain = re.sub(r"\[pause\s+(\d+)m?s?\]", r" ... ", clean_plain, flags=re.IGNORECASE)
+        clean_plain = re.sub(r"\[emphasis(?::\w+)?\]", "", clean_plain, flags=re.IGNORECASE)
+        clean_plain = re.sub(r"\[tone:\w+\]", "", clean_plain, flags=re.IGNORECASE)
+        clean_plain = re.sub(r"\[rate:[^\]]+\]", "", clean_plain, flags=re.IGNORECASE)
+        clean_plain = re.sub(r"\[protip\]", "Pro tip: ", clean_plain, flags=re.IGNORECASE)
+        clean_plain = re.sub(r"\s+", " ", clean_plain).strip()
+
+        # Build SSML
+        ssml_body = text
+        # [pause 500ms] -> <break time="500ms"/>
+        ssml_body = re.sub(
+            r"\[pause\s+(\d+)m?s?\]",
+            lambda m: f'<break time="{m.group(1)}ms"/>',
+            ssml_body,
+            flags=re.IGNORECASE
+        )
+        # [emphasis:strong]... or [emphasis] -> <emphasis level="strong">
+        ssml_body = re.sub(r"\[emphasis(?::strong)?\]", '<emphasis level="strong">', ssml_body, flags=re.IGNORECASE)
+        ssml_body = re.sub(r"\[/emphasis\]", '</emphasis>', ssml_body, flags=re.IGNORECASE)
+        # [tone:urgent] or [tone:serious]
+        ssml_body = re.sub(r"\[tone:urgent\]", '<prosody rate="+10%" pitch="+2Hz">', ssml_body, flags=re.IGNORECASE)
+        ssml_body = re.sub(r"\[tone:serious\]", '<prosody rate="-5%" pitch="-2Hz">', ssml_body, flags=re.IGNORECASE)
+        ssml_body = re.sub(r"\[tone:empathetic\]", '<prosody rate="-8%" pitch="+1Hz">', ssml_body, flags=re.IGNORECASE)
+        ssml_body = re.sub(r"\[/tone\]", '</prosody>', ssml_body, flags=re.IGNORECASE)
+        ssml_body = re.sub(r"\[protip\]", '<emphasis level="moderate">Pro tip:</emphasis> ', ssml_body, flags=re.IGNORECASE)
+
+        # Rate and Pitch adjustments
+        rate_percent = f"{int((base_rate - 1.0) * 100):+d}%"
+        ssml = (
+            f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">\n'
+            f'  <voice name="{voice_name}">\n'
+            f'    <prosody rate="{rate_percent}" pitch="{base_pitch}">\n'
+            f'      {ssml_body}\n'
+            f'    </prosody>\n'
+            f'  </voice>\n'
+            f'</speak>'
+        )
+        return ssml, clean_plain
+
+    def normalize_lufs(self, input_audio_path: Path, output_audio_path: Path, target_lufs: float = -14.0) -> bool:
+        """
+        Normalizes audio loudness to EBU R128 standard (default -14 LUFS for modern online/LMS audio).
+        """
+        try:
+            cmd = [
+                "ffmpeg", "-y", "-i", str(input_audio_path),
+                "-af", f"loudnorm=I={target_lufs}:LRA=7:tp=-1.5",
+                "-ar", "44100",
+                str(output_audio_path)
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return res.returncode == 0 and output_audio_path.exists() and output_audio_path.stat().st_size > 500
+        except Exception as e:
+            print(f"[Audio Normalize Warning] {e}")
+            return False
+
+    def add_silence_padding(
+        self,
+        input_audio_path: Path,
+        output_audio_path: Path,
+        lead_in_ms: int = 150,
+        tail_ms: int = 350
+    ) -> bool:
+        """
+        Pads audio with lead-in silence (to prevent clipped plosives)
+        and tail silence (to prevent abrupt timeline cuts during video slide transitions).
+        """
+        try:
+            # adelay adds silence at the start (in ms)
+            # apad adds silence at the end; pad_dur is in seconds
+            tail_sec = round(tail_ms / 1000.0, 3)
+            filter_str = f"adelay={lead_in_ms}|{lead_in_ms},apad=pad_dur={tail_sec}"
+            cmd = [
+                "ffmpeg", "-y", "-i", str(input_audio_path),
+                "-af", filter_str,
+                "-ar", "44100",
+                str(output_audio_path)
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return res.returncode == 0 and output_audio_path.exists() and output_audio_path.stat().st_size > 500
+        except Exception as e:
+            print(f"[Audio Padding Warning] {e}")
+            return False
+
+    def apply_audio_ducking(self, speech_path: Path, bg_music_path: Path, output_path: Path) -> bool:
+        """
+        Mixes speech over background music, dynamically ducking the music volume when speech is active.
+        """
+        try:
+            # sidechaincompress ducks music when speech is above threshold
+            filter_complex = (
+                "[1:a]volume=0.25[music];"
+                "[music][0:a]sidechaincompress=threshold=0.125:ratio=4:attack=15:release=250[ducked_music];"
+                "[ducked_music][0:a]amix=inputs=2:duration=first:dropout_transition=2[outa]"
+            )
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(speech_path),
+                "-i", str(bg_music_path),
+                "-filter_complex", filter_complex,
+                "-map", "[outa]",
+                "-c:a", "mp3",
+                str(output_path)
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return res.returncode == 0 and output_path.exists() and output_path.stat().st_size > 500
+        except Exception as e:
+            print(f"[Audio Ducking Warning] {e}")
+            return False
 
     def synthesize_single_audio_file(
         self,
@@ -74,12 +191,20 @@ class VoiceDirectorAgent:
         stability: float = 0.75,
         similarity_boost: float = 0.75
     ) -> bool:
-        """Synthesizes audio using Edge-TTS or ElevenLabs API."""
-        clean_text = self.clean_narration_for_tts(text)
+        """
+        Synthesizes audio using Edge-TTS (with SSML prosody and lexicon),
+        ElevenLabs API, or local offline engine (Kokoro/pyttsx3).
+        """
+        ssml_content, clean_text = self.compile_ssml_prosody(
+            raw_script=text,
+            voice_name=voice,
+            base_rate=speech_rate,
+            base_pitch=pitch
+        )
         if not clean_text:
             return False
 
-        # 1. ElevenLabs API Provider
+        # 1. ElevenLabs Provider
         if engine == "elevenlabs" and elevenlabs_api_key and elevenlabs_api_key.strip():
             try:
                 voice_id = elevenlabs_voice_id or "21m00Tcm4TlvDq8ikWAM"
@@ -109,7 +234,20 @@ class VoiceDirectorAgent:
             except Exception as e:
                 print(f"[ElevenLabs Warning] Error ({e}), falling back to Edge-TTS.")
 
-        # 2. Edge-TTS High-Definition Neural Provider
+        # 2. Local Offline Neural Kokoro Engine Fallback
+        if engine == "kokoro_local":
+            try:
+                from kokoro import KPipeline
+                import soundfile as sf
+                pipeline = KPipeline(lang_code='a')
+                generator = pipeline(clean_text, voice='af_heart', speed=speech_rate, split_pattern=r'\n+')
+                for _, _, audio in generator:
+                    sf.write(str(output_path), audio, 24000)
+                    return output_path.exists() and output_path.stat().st_size > 500
+            except Exception as e:
+                print(f"[Kokoro Local Warning] Offline model not loaded ({e}), falling back.")
+
+        # 3. Edge-TTS Neural Provider (Default / SSML-capable)
         try:
             import edge_tts
             rate_str = f"{int((speech_rate - 1.0) * 100):+d}%"
@@ -135,11 +273,12 @@ class VoiceDirectorAgent:
             elif "err" in _tts_err:
                 print(f"[Edge-TTS Error] {_tts_err['err']}")
 
-            return output_path.exists() and output_path.stat().st_size > 500
+            if output_path.exists() and output_path.stat().st_size > 500:
+                return True
         except Exception as e:
             print(f"[Edge-TTS Error] {e}")
 
-        # 3. pyttsx3 Local Fallback
+        # 4. pyttsx3 Local Desktop Fallback
         try:
             import pyttsx3
             engine_tts = pyttsx3.init()
@@ -193,11 +332,14 @@ class VoiceDirectorAgent:
         elevenlabs_api_key: Optional[str] = None,
         elevenlabs_voice_id: Optional[str] = None,
         stability: float = 0.75,
-        similarity_boost: float = 0.75
+        similarity_boost: float = 0.75,
+        target_lufs: Optional[float] = -14.0,
+        bg_music_path: Optional[Path] = None
     ) -> VoiceContract:
         """
         Synthesizes complete voice production across all scenes,
-        probes exact audio duration per scene, and merges the master track.
+        probes exact audio duration per scene, normalizes loudness, ducks music if provided,
+        and packages the verified VoiceContract.
         """
         chosen_voice = voice_override or persona.canonical_voice
         chosen_eleven_id = elevenlabs_voice_id or persona.elevenlabs_voice_id
@@ -238,16 +380,40 @@ class VoiceDirectorAgent:
             scene_audio_paths.append(scene_path)
 
         # Merge master audio track via FFmpeg concat
-        master_audio_path = self.output_dir / f"master_audio_{session_id}.mp3"
+        raw_master_audio_path = self.output_dir / f"master_raw_{session_id}.mp3"
+        final_master_audio_path = self.output_dir / f"master_audio_{session_id}.mp3"
         concat_list_file = self.output_dir / f"concat_audio_{session_id}.txt"
         with open(concat_list_file, "w", encoding="utf-8") as f:
             for p in scene_audio_paths:
                 f.write(f"file '{p.resolve().as_posix()}'\n")
 
-        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list_file), "-c", "copy", str(master_audio_path)]
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list_file), "-c", "copy", str(raw_master_audio_path)]
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if not master_audio_path.exists() and scene_audio_paths:
-            master_audio_path = scene_audio_paths[0]
+        # Apply Silence Padding (150ms pre-roll, 350ms post-roll)
+        padded_path = self.output_dir / f"master_padded_{session_id}.mp3"
+        if self.add_silence_padding(raw_master_audio_path, padded_path, lead_in_ms=150, tail_ms=350):
+            master_to_use = padded_path
+        else:
+            master_to_use = raw_master_audio_path
+
+        # Apply LUFS Normalization
+        if target_lufs is not None:
+            norm_path = self.output_dir / f"master_norm_{session_id}.mp3"
+            if self.normalize_lufs(master_to_use, norm_path, target_lufs):
+                master_to_use = norm_path
+
+        # Apply Audio Ducking if background music is supplied
+        bg_applied = False
+        if bg_music_path and bg_music_path.exists():
+            ducked_path = self.output_dir / f"master_ducked_{session_id}.mp3"
+            if self.apply_audio_ducking(master_to_use, bg_music_path, ducked_path):
+                master_to_use = ducked_path
+                bg_applied = True
+
+        # Copy/link to final master path
+        if master_to_use != final_master_audio_path:
+            import shutil
+            shutil.copyfile(master_to_use, final_master_audio_path)
 
         total_audio_sec = sum(a.measured_duration_sec for a in scene_artifacts)
 
@@ -260,8 +426,10 @@ class VoiceDirectorAgent:
             engine=engine,
             pitch=pitch,
             speech_rate=speech_rate,
-            master_audio_path=str(master_audio_path),
+            master_audio_path=str(final_master_audio_path),
             subtitles_srt_path=str(srt_path),
             total_audio_duration_sec=total_audio_sec,
-            scene_audios=scene_artifacts
+            scene_audios=scene_artifacts,
+            normalized_lufs=target_lufs,
+            bg_music_applied=bg_applied
         )

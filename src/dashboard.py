@@ -742,6 +742,348 @@ async def preview_tts_voice_api(voice: str = Query("en-IN-NeerjaNeural"), rate: 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Voice preview failed: {str(e)}")
 
+# -------------------------------------------------------------------------
+# CUSTOM VOICE CLONING & UNIVERSAL DOCUMENT SPEECH APIS
+# -------------------------------------------------------------------------
+from fastapi import Form
+from src.agents.voice_cloner import VoiceCloner
+from src.document_parser import DocumentParser
+from src.contracts.persona import (
+    PERSONA_CATALOG,
+    PersonaIdentityContract,
+    GenderEnum,
+    RegionLocaleEnum,
+    get_persona_contract,
+    load_custom_personas
+)
+from src.contracts.script_contract import ScriptContract, ScriptScene
+from src.agents.voice_director import VoiceDirectorAgent
+
+VOICES_STORAGE_DIR = ASSETS_DIR / "voices"
+voice_cloner = VoiceCloner(VOICES_STORAGE_DIR)
+
+@app.get("/api/v1/voice/personas")
+async def list_all_personas_api():
+    """Lists all canonical and user-cloned personas available for narration."""
+    load_custom_personas()
+    result = []
+    for pid, p in PERSONA_CATALOG.items():
+        result.append({
+            "persona_id": p.persona_id,
+            "display_name": p.display_name,
+            "gender": p.gender.value if hasattr(p.gender, "value") else str(p.gender),
+            "target_locale": p.target_locale.value if hasattr(p.target_locale, "value") else str(p.target_locale),
+            "industry_domain": p.industry_domain,
+            "canonical_voice": p.canonical_voice,
+            "elevenlabs_voice_id": p.elevenlabs_voice_id
+        })
+    return {"status": "ok", "count": len(result), "personas": result}
+
+@app.post("/api/v1/voice/clone")
+async def clone_user_voice_api(
+    audio_file: UploadFile = File(...),
+    display_name: str = Form(...),
+    gender: str = Form("female"),
+    target_locale: str = Form("en-IN"),
+    elevenlabs_api_key: Optional[str] = Form(None)
+):
+    """
+    Ingests in-browser recorded audio or audio file upload, normalizes via FFmpeg,
+    registers voice with ElevenLabs or local profile, and creates an immutable custom persona.
+    """
+    temp_dir = OUTPUT_DIR / "temp_voice_uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_raw = temp_dir / f"raw_{uuid.uuid4().hex}_{audio_file.filename}"
+
+    try:
+        content = await audio_file.read()
+        temp_raw.write_bytes(content)
+
+        gender_enum = GenderEnum.FEMALE if gender.lower() == "female" else (
+            GenderEnum.MALE if gender.lower() == "male" else GenderEnum.NON_BINARY
+        )
+        locale_enum = RegionLocaleEnum.EN_IN
+        for loc in RegionLocaleEnum:
+            if loc.value == target_locale:
+                locale_enum = loc
+                break
+
+        persona = voice_cloner.register_user_voice(
+            display_name=display_name,
+            raw_audio_path=temp_raw,
+            gender=gender_enum,
+            target_locale=locale_enum,
+            elevenlabs_api_key=elevenlabs_api_key
+        )
+
+        return {
+            "status": "success",
+            "message": f"Voice cloned and persona '{persona.display_name}' registered successfully.",
+            "persona": {
+                "persona_id": persona.persona_id,
+                "display_name": persona.display_name,
+                "gender": persona.gender.value,
+                "target_locale": persona.target_locale.value,
+                "canonical_voice": persona.canonical_voice,
+                "elevenlabs_voice_id": persona.elevenlabs_voice_id
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Voice cloning failed: {str(e)}")
+    finally:
+        if temp_raw.exists():
+            try:
+                temp_raw.unlink()
+            except Exception:
+                pass
+
+@app.post("/api/v1/voice/synthesize-file")
+async def synthesize_document_speech_api(
+    document_file: UploadFile = File(...),
+    persona_id: str = Form("maya_fintech"),
+    speech_rate: float = Form(1.0),
+    pitch: str = Form("+0Hz"),
+    export_scorm: bool = Form(False),
+    elevenlabs_api_key: Optional[str] = Form(None)
+):
+    """
+    Ingests .txt, .md, .docx, or .pdf, decomposes into pedagogical scenes,
+    applies FinTech pronunciation lexicon and SSML, and synthesizes master audio + SRT subtitles.
+    Optionally packages as an ADL SCORM 1.2 e-learning zip.
+    """
+    temp_dir = OUTPUT_DIR / "temp_doc_uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_doc = temp_dir / f"doc_{uuid.uuid4().hex}_{document_file.filename}"
+
+    try:
+        content = await document_file.read()
+        temp_doc.write_bytes(content)
+
+        # 1. Parse document into pedagogical scenes
+        parse_result = DocumentParser.parse_file(temp_doc, target_words_per_scene=60, max_scenes=40)
+        if not parse_result.scenes:
+            raise HTTPException(status_code=400, detail="Document contains no readable text.")
+
+        # 2. Build ScriptContract for Voice Director
+        script_scenes = [
+            ScriptScene(
+                scene_id=sc.scene_id,
+                title=sc.title,
+                visual_description=f"Educational slide illustrating {sc.title}",
+                motion_prompt="Subtle camera tracking over bullet points",
+                narration=sc.narration,
+                estimated_duration_sec=float(sc.estimated_duration_sec)
+            )
+            for sc in parse_result.scenes
+        ]
+
+        script_contract = ScriptContract(
+            course_title=parse_result.document_title,
+            persona_id=persona_id,
+            target_locale=RegionLocaleEnum.EN_IN,
+            art_style_preset="Photorealistic 8K",
+            total_word_count=parse_result.total_words,
+            estimated_total_runtime_sec=sum(s.estimated_duration_sec for s in script_scenes),
+            scenes=script_scenes
+        )
+
+        # 3. Resolve Persona & Synthesize
+        persona = get_persona_contract(persona_id)
+        voice_director = VoiceDirectorAgent(output_dir=OUTPUT_DIR)
+
+        engine_to_use = "elevenlabs" if elevenlabs_api_key and elevenlabs_api_key.strip() else "edge_tts"
+        voice_contract = voice_director.synthesize_voice_contract(
+            script=script_contract,
+            persona=persona,
+            speech_rate=speech_rate,
+            pitch=pitch,
+            engine=engine_to_use,
+            elevenlabs_api_key=elevenlabs_api_key,
+            target_lufs=-14.0
+        )
+
+        master_filename = Path(voice_contract.master_audio_path).name
+        srt_filename = Path(voice_contract.subtitles_srt_path).name if voice_contract.subtitles_srt_path else None
+
+        scorm_url = None
+        if export_scorm:
+            # Package directly into SCORM 1.2 zip
+            packager = SCORMPackager(
+                course_id=f"DOC_{uuid.uuid4().hex[:6].upper()}",
+                course_title=parse_result.document_title,
+                course_description=f"Generated from {document_file.filename} with voice {persona.display_name}",
+                version="1.2"
+            )
+            packager.add_module(1, "Main Lecture", "Decomposed audio narration")
+            for sc in script_scenes:
+                packager.add_lesson(
+                    module_id=1,
+                    lesson_id=sc.scene_id,
+                    lesson_title=sc.visual_prompt[:40],
+                    topic="Document Audio",
+                    description=sc.narration[:100],
+                    video_path=voice_contract.master_audio_path,
+                    audio_path=voice_contract.master_audio_path,
+                    srt_path=voice_contract.subtitles_srt_path,
+                    runtime_seconds=float(sc.duration_seconds)
+                )
+            out_zip = packager.export_zip()
+            scorm_url = f"/static_exports/{out_zip.name}"
+
+        return {
+            "status": "success",
+            "document_title": parse_result.document_title,
+            "persona_used": persona.display_name,
+            "total_scenes": parse_result.total_scenes,
+            "total_words": parse_result.total_words,
+            "total_duration_sec": voice_contract.total_audio_duration_sec,
+            "normalized_lufs": voice_contract.normalized_lufs,
+            "master_audio_url": f"/static_renders/{master_filename}",
+            "subtitles_srt_url": f"/static_renders/{srt_filename}" if srt_filename else None,
+            "scorm_download_url": scorm_url
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Document speech synthesis failed: {str(e)}")
+    finally:
+        if temp_doc.exists():
+            try:
+                temp_doc.unlink()
+            except Exception:
+                pass
+
+# -------------------------------------------------------------------------
+# BATCH SLIDE AUDIO PROCESSING (M{m}_T{t}_L{l}_Slide{s}.mp3)
+# -------------------------------------------------------------------------
+from src.agents.slide_batch_processor import SlideBatchProcessor, SlideBatchItem
+
+@app.post("/api/v1/voice/batch-slides")
+async def batch_process_slides_endpoint(
+    deck_path: Optional[str] = Form(None),
+    excel_path: Optional[str] = Form(None),
+    module_num: Optional[int] = Form(None),
+    persona_id: str = Form("maya_fintech"),
+    speech_rate: float = Form(1.0),
+    pitch: str = Form("+0Hz"),
+    target_lufs: float = Form(-14.0),
+    slide_numbering: str = Form("deck_absolute"),  # "deck_absolute" or "lesson_relative"
+    limit_slides: Optional[int] = Form(None)
+):
+    """
+    Batch processes slide decks (.pptx) or Excel course maps (.xlsx) into audio files
+    following the standard naming convention: M{m}_T{t}_L{l}_Slide{s}.mp3
+    """
+    processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides")
+    items = []
+
+    try:
+        if deck_path:
+            p = Path(deck_path)
+            if not p.exists():
+                raise HTTPException(status_code=404, detail=f"Slide deck file not found: {deck_path}")
+            items = processor.parse_pptx_deck(p, module_num=module_num, slide_numbering=slide_numbering)
+        elif excel_path:
+            p = Path(excel_path)
+            if not p.exists():
+                raise HTTPException(status_code=404, detail=f"Excel course map not found: {excel_path}")
+            items = processor.parse_excel_course_map(p)
+        else:
+            raise HTTPException(status_code=400, detail="Must supply either deck_path or excel_path")
+
+        if not items:
+            raise HTTPException(status_code=400, detail="No valid slide narration items could be parsed.")
+
+        if limit_slides and limit_slides > 0:
+            items = items[:limit_slides]
+
+        result = processor.process_batch(
+            items=items,
+            persona_id=persona_id,
+            speech_rate=speech_rate,
+            pitch=pitch,
+            target_lufs=target_lufs
+        )
+
+        return {
+            "status": "success",
+            "total_slides": result.total_slides,
+            "successful_slides": result.successful_slides,
+            "failed_slides": result.failed_slides,
+            "output_directory": result.output_directory,
+            "manifest_url": f"/static_renders/batch_slides/batch_manifest.json",
+            "generated_files": result.generated_files
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch slide processing failed: {str(e)}")
+
+@app.post("/api/v1/voice/batch-slides-upload")
+async def batch_process_slides_upload_endpoint(
+    file: UploadFile = File(...),
+    module_num: Optional[int] = Form(None),
+    persona_id: str = Form("maya_fintech"),
+    speech_rate: float = Form(1.0),
+    pitch: str = Form("+0Hz"),
+    target_lufs: float = Form(-14.0),
+    slide_numbering: str = Form("deck_absolute"),
+    limit_slides: Optional[int] = Form(None)
+):
+    """
+    Accepts uploaded .pptx or .xlsx, extracts slide narration, and synthesizes M{m}_T{t}_L{l}_Slide{s}.mp3.
+    """
+    temp_dir = OUTPUT_DIR / "temp_batch_uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_file = temp_dir / f"batch_{uuid.uuid4().hex}_{file.filename}"
+
+    try:
+        content = await file.read()
+        temp_file.write_bytes(content)
+
+        processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides")
+        if temp_file.suffix.lower() == ".pptx":
+            items = processor.parse_pptx_deck(temp_file, module_num=module_num, slide_numbering=slide_numbering)
+        elif temp_file.suffix.lower() == ".xlsx":
+            items = processor.parse_excel_course_map(temp_file)
+        else:
+            raise HTTPException(status_code=400, detail="Uploaded file must be .pptx or .xlsx")
+
+        if not items:
+            raise HTTPException(status_code=400, detail="No readable slides or narration found in file.")
+
+        if limit_slides and limit_slides > 0:
+            items = items[:limit_slides]
+
+        result = processor.process_batch(
+            items=items,
+            persona_id=persona_id,
+            speech_rate=speech_rate,
+            pitch=pitch,
+            target_lufs=target_lufs
+        )
+
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "total_slides": result.total_slides,
+            "successful_slides": result.successful_slides,
+            "failed_slides": result.failed_slides,
+            "output_directory": result.output_directory,
+            "manifest_url": f"/static_renders/batch_slides/batch_manifest.json",
+            "generated_files": result.generated_files
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload batch slide processing failed: {str(e)}")
+    finally:
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
+
 @app.post("/api/v1/scorm/package")
 async def create_custom_scorm_package(req: SCORMPackageRequest):
     """
@@ -951,6 +1293,67 @@ async def custom_scorm_build_api(req: CustomSCORMBuildRequest):
     }
 
 
+class ScenarioGenerateRequest(BaseModel):
+    topic: str
+    domain: Optional[str] = "FinTech & Enterprise Risk"
+    presenter_persona: Optional[str] = "srinivas_cloud"
+    depth: Optional[int] = 2
+
+
+@app.post("/api/v1/scenario/generate")
+async def generate_scenario_api(req: ScenarioGenerateRequest):
+    """Generates an adaptive NeuroBranch™ branching scenario decision DAG."""
+    try:
+        from src.scenario_orchestrator import ScenarioOrchestrator
+        orchestrator = ScenarioOrchestrator()
+        dag = orchestrator.generate_scenario_dag(
+            topic=req.topic,
+            domain=req.domain or "FinTech & Enterprise Risk",
+            presenter_persona=req.presenter_persona or "srinivas_cloud",
+            depth=req.depth or 2,
+        )
+        return {
+            "status": "ok",
+            "scenario": dag.model_dump() if hasattr(dag, "model_dump") else dag.dict()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate scenario: {e}")
+
+
+class ScenarioExportRequest(BaseModel):
+    scenario_dag: Dict[str, Any]
+    pass_percentage: Optional[int] = 70
+
+
+@app.post("/api/v1/scenario/export-scorm")
+async def export_scenario_scorm_api(req: ScenarioExportRequest):
+    """Exports a generated scenario DAG into a ready-to-deploy SCORM 1.2 / 2004 ZIP package."""
+    try:
+        from src.contracts.scenario_contract import ScenarioDAGContract
+        from src.scorm_packager import SCORMPackager
+
+        dag = ScenarioDAGContract(**req.scenario_dag)
+        errors = dag.validate_graph_integrity()
+        if errors:
+            raise HTTPException(status_code=400, detail=f"Invalid DAG: {'; '.join(errors)}")
+
+        packager = SCORMPackager(course_id=dag.scenario_id, course_title=dag.title)
+        zip_path = packager.export_scenario_zip(dag, pass_percentage=req.pass_percentage or 70)
+
+        return {
+            "status": "ok",
+            "package_name": zip_path.name,
+            "download_url": f"/static_exports/{zip_path.name}",
+            "size_mb": round(zip_path.stat().st_size / (1024 ** 2), 2),
+            "title": dag.title,
+            "total_nodes": len(dag.nodes)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to export SCORM simulation: {e}")
+
+
 @app.get("/api/v1/scorm/packages")
 async def list_scorm_packages():
     """Lists all available SCORM zip packages in the exports directory."""
@@ -965,6 +1368,189 @@ async def list_scorm_packages():
             })
     packages.sort(key=lambda x: x["created_at"], reverse=True)
     return {"packages": packages}
+class BatchSlideAudioRequest(BaseModel):
+    deck_path: Optional[str] = None
+    excel_path: Optional[str] = None
+    module_num: Optional[int] = 1
+    persona_id: Optional[str] = "maya_fintech"
+    speech_rate: Optional[float] = 1.0
+    slide_numbering: Optional[str] = "lesson_relative"
+    skip_existing: Optional[bool] = True
+
+
+@app.post("/api/v1/voice/batch-slides")
+async def batch_slides_api(req: BatchSlideAudioRequest):
+    """
+    Generates batch audio files adhering strictly to M{m}_T{t}_L{l}_Slide{s}.mp3
+    from a presentation deck (.pptx) or an Excel course map (.xlsx).
+    """
+    try:
+        from src.agents.slide_batch_processor import SlideBatchProcessor
+        out_sub = f"M{req.module_num:02d}" if req.module_num else "batch_output"
+        processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides" / out_sub)
+
+        if req.deck_path:
+            p_deck = Path(req.deck_path)
+            if not p_deck.exists():
+                raise HTTPException(status_code=404, detail=f"Deck file not found: {req.deck_path}")
+            items = processor.parse_pptx_deck(p_deck, module_num=req.module_num, slide_numbering=req.slide_numbering)
+        elif req.excel_path:
+            p_excel = Path(req.excel_path)
+            if not p_excel.exists():
+                raise HTTPException(status_code=404, detail=f"Excel file not found: {req.excel_path}")
+            items = processor.parse_excel_course_map(p_excel)
+        else:
+            raise HTTPException(status_code=400, detail="Either deck_path or excel_path must be provided.")
+
+        result = processor.process_batch(
+            items,
+            persona_id=req.persona_id or "maya_fintech",
+            speech_rate=req.speech_rate or 1.0,
+            skip_existing=req.skip_existing
+        )
+        return {
+            "status": "ok",
+            "total_slides": result.total_slides,
+            "successful_slides": result.successful_slides,
+            "failed_slides": result.failed_slides,
+            "manifest_file": result.manifest_file,
+            "files": result.generated_files
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/voice/batch-slides-upload")
+async def batch_slides_upload_api(
+    file: UploadFile = File(...),
+    module_num: int = Form(1),
+    persona_id: str = Form("maya_fintech"),
+    speech_rate: float = Form(1.0),
+    slide_numbering: str = Form("lesson_relative"),
+    skip_existing: bool = Form(True)
+):
+    """
+    Accepts uploaded .pptx or .xlsx file and generates M{m}_T{t}_L{l}_Slide{s}.mp3 files in batch.
+    """
+    try:
+        from src.agents.slide_batch_processor import SlideBatchProcessor
+        filename = file.filename
+        ext = Path(filename).suffix.lower()
+        if ext not in [".pptx", ".xlsx"]:
+            raise HTTPException(status_code=400, detail="Only .pptx and .xlsx files are supported.")
+
+        temp_dir = OUTPUT_DIR / "temp_uploads"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        saved_file = temp_dir / filename
+        with open(saved_file, "wb") as f:
+            f.write(await file.read())
+
+        out_sub = f"M{module_num:02d}"
+        processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides" / out_sub)
+
+        if ext == ".pptx":
+            items = processor.parse_pptx_deck(saved_file, module_num=module_num, slide_numbering=slide_numbering)
+        else:
+            items = processor.parse_excel_course_map(saved_file)
+
+        result = processor.process_batch(
+            items,
+            persona_id=persona_id,
+            speech_rate=speech_rate,
+            skip_existing=skip_existing
+        )
+
+        return {
+            "status": "ok",
+            "filename": filename,
+            "total_slides": result.total_slides,
+            "successful_slides": result.successful_slides,
+            "failed_slides": result.failed_slides,
+            "manifest_file": result.manifest_file,
+            "files": result.generated_files
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# -------------------------------------------------------------
+# SCORM Cloud API v2 Integration (Feature 1)
+# -------------------------------------------------------------
+@app.post("/api/v1/scorm/deploy-cloud")
+async def deploy_scorm_cloud_api(req: Dict[str, Any]):
+    """
+    Dispatches a packaged SCORM zip package directly to SCORM Cloud API v2.
+    """
+    try:
+        from src.scorm_cloud_client import SCORMCloudClient
+        course_id = req.get("course_id", "COURSE_01")
+        pkg_name = req.get("package_filename") or req.get("zip_path")
+        if not pkg_name:
+            raise HTTPException(status_code=400, detail="package_filename or zip_path is required.")
+
+        p_zip = EXPORTS_DIR / pkg_name
+        if not p_zip.exists():
+            p_zip = Path(pkg_name)
+        if not p_zip.exists():
+            raise HTTPException(status_code=404, detail=f"SCORM package not found: {pkg_name}")
+
+        client = SCORMCloudClient(
+            app_id=req.get("scorm_app_id"),
+            secret_key=req.get("scorm_secret_key")
+        )
+        res = client.import_course_package(course_id, p_zip)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/scorm/cloud-job/{job_id}")
+async def get_scorm_cloud_job_api(job_id: str):
+    """Checks import status of a SCORM Cloud asynchronous job."""
+    try:
+        from src.scorm_cloud_client import SCORMCloudClient
+        client = SCORMCloudClient()
+        return client.get_job_status(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# -------------------------------------------------------------
+# Curriculum Batch Video Synthesis Pipeline (Feature 3)
+# -------------------------------------------------------------
+@app.post("/api/v1/batch/curriculum")
+async def batch_curriculum_api(req: Dict[str, Any]):
+    """
+    Queues and executes an end-to-end curriculum video synthesis batch from Excel course maps.
+    """
+    try:
+        from src.curriculum_batch_runner import CurriculumBatchRunner, CurriculumBatchRequest
+        runner = CurriculumBatchRunner()
+        batch_req = CurriculumBatchRequest(
+            excel_path=req.get("excel_path"),
+            course_id=req.get("course_id", "FINTECH_AGENTS_15HR"),
+            course_title=req.get("course_title", "AI Agents in FinTech Course"),
+            module_id=req.get("module_id"),
+            persona_id=req.get("persona_id", "maya_fintech"),
+            resolution=req.get("resolution", "16:9_hd"),
+            speech_rate=req.get("speech_rate", 1.0)
+        )
+        return runner.enqueue_curriculum(batch_req)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/batch/curriculum/status/{course_id}")
+async def batch_curriculum_status_api(course_id: str):
+    """Returns live completion status of a curriculum batch production job."""
+    try:
+        from src.curriculum_batch_runner import CurriculumBatchRunner
+        runner = CurriculumBatchRunner()
+        return runner.get_course_status(course_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 class IdentitySaveRequest(BaseModel):
     name: str
@@ -2424,7 +3010,232 @@ async def serve_dashboard():
                         </div>
                     </div>
                 </div>
-            </div>
+
+                <!-- NEW SECTION: VOICE CLONING & UNIVERSAL DOCUMENT SPEECH INGESTION -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 pt-4 border-t border-slate-800/80">
+                    <!-- Module A: Record & Clone User Voice -->
+                    <div class="glass-panel p-5 rounded-xl border border-indigo-500/30 space-y-4">
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                            <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                <span>🎙️</span> <span>Clone Real Voice into Library</span>
+                            </h4>
+                            <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono">Instant Voice Clone</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Record 15–30s of clean speech via microphone or upload an audio file (.wav, .ogg, .mp3) to register a new permanent persona.</p>
+                        
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-300 mb-1">Presenter Name</label>
+                                <input id="clone-display-name" type="text" placeholder="e.g. Dr. Srinivas Velaga" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white">
+                            </div>
+                            <div>
+                                <label class="block text-[11px] font-semibold text-slate-300 mb-1">Accent / Locale</label>
+                                <select id="clone-locale" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white">
+                                    <option value="en-IN" selected>en-IN (Indian English)</option>
+                                    <option value="te-IN">te-IN (Telugu)</option>
+                                    <option value="hi-IN">hi-IN (Hindi)</option>
+                                    <option value="en-US">en-US (North American)</option>
+                                    <option value="en-GB">en-GB (British)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Recording Controls & File Upload -->
+                        <div class="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-3">
+                            <div class="flex items-center justify-between gap-2">
+                                <button id="btn-record-mic" onclick="toggleMicRecording()" class="px-3 py-2 rounded-lg bg-red-600/80 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all">
+                                    <span id="record-indicator">🔴</span> <span id="record-text">Record from Mic</span>
+                                </button>
+                                <span class="text-[11px] text-slate-500">or upload:</span>
+                                <label for="clone-file-upload" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold cursor-pointer inline-flex items-center gap-1">
+                                    <span>📁</span> <span>Choose Audio</span>
+                                </label>
+                                <input type="file" id="clone-file-upload" accept="audio/*" class="hidden" onchange="handleAudioSampleSelected(this)">
+                            </div>
+                            <div id="clone-audio-preview-box" class="hidden pt-1">
+                                <audio id="clone-audio-preview" controls class="w-full h-8"></audio>
+                            </div>
+                        </div>
+
+                        <button onclick="submitVoiceClone()" id="btn-submit-clone" class="w-full py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition-all flex items-center justify-center gap-1.5">
+                            <span>✨</span> <span>Clone Voice & Add to Catalog</span>
+                        </button>
+                    </div>
+
+                    <!-- Module B: Universal File-to-Speech Engine -->
+                    <div class="glass-panel p-5 rounded-xl border border-emerald-500/30 space-y-4">
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                            <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                <span>📄</span> <span>Universal Document-to-Audio Ingestion</span>
+                            </h4>
+                            <span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono">Any File &bull; Any Voice</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Upload books, lecture notes, or reports (.txt, .md, .docx, .pdf). We slice into pedagogical scenes, apply FinTech pronunciation lexicons, and synthesize audio masters.</p>
+
+                        <div class="p-4 rounded-xl border-2 border-dashed border-emerald-500/40 bg-emerald-950/10 hover:bg-emerald-950/20 transition-all text-center space-y-2">
+                            <div class="text-2xl">📥</div>
+                            <div class="text-xs font-bold text-white">Drop Document Here or Browse</div>
+                            <p class="text-[10px] text-slate-400">Supports .txt, .md, .docx, .pdf &bull; up to 25MB</p>
+                            <label for="doc-speech-file-input" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer inline-flex items-center gap-1.5 shadow-md shadow-emerald-500/20">
+                                <span>📄</span> <span>Select Document</span>
+                            </label>
+                            <input type="file" id="doc-speech-file-input" class="hidden" accept=".txt,.md,.docx,.pdf" onchange="handleDocFileSelected(this)">
+                            <div id="selected-doc-name" class="text-[11px] font-mono text-emerald-300 pt-1"></div>
+                        </div>
+
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="flex items-center gap-2">
+                                <input type="checkbox" id="doc-export-scorm-chk" class="rounded accent-emerald-500 cursor-pointer">
+                                <label for="doc-export-scorm-chk" class="text-xs text-slate-300 cursor-pointer">Auto-package as SCORM 1.2 Zip</label>
+                            </div>
+                    </div>
+                </div>
+
+                <!-- MODULE C: BATCH PRESENTATION & DECK AUDIO STUDIO (M{m}_T{t}_L{l}_Slide{s}.mp3) -->
+                <div class="glass-panel p-5 rounded-xl border border-teal-500/30 space-y-4 pt-4 mt-4">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <div>
+                            <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                <span>📊</span> <span>Batch Presentation & Deck Audio Studio</span>
+                            </h4>
+                            <p class="text-[11px] text-slate-400">Upload PowerPoint deck (.pptx) or Excel course map (.xlsx) to synthesize slide audio matching <code class="text-teal-400">M{m}_T{t}_L{l}_Slide{s}.mp3</code>.</p>
+                        </div>
+                        <span class="text-[10px] px-2.5 py-1 rounded-full bg-teal-500/20 text-teal-300 font-mono border border-teal-500/30">
+                            Courseware Automation
+                        </span>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Select Presentation or Excel File</label>
+                            <label for="batch-slide-file-input" class="w-full py-2 px-3 rounded-lg bg-teal-600/20 border border-teal-500/40 text-teal-300 text-xs font-bold text-center cursor-pointer hover:bg-teal-600/30 transition-all flex items-center justify-center gap-1.5">
+                                <span>📁</span> <span id="batch-slide-file-label">Upload .pptx / .xlsx</span>
+                            </label>
+                            <input type="file" id="batch-slide-file-input" class="hidden" accept=".pptx,.xlsx" onchange="handleBatchSlideFileSelected(this)">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Module Number</label>
+                            <input type="number" id="batch-slide-module-num" value="1" min="1" max="50" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Voice Persona</label>
+                            <select id="batch-slide-persona" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="maya_fintech" selected>Maya (FinTech Senior Lead)</option>
+                                <option value="alex_ai">Alex (Enterprise AI Architect)</option>
+                                <option value="elena_compliance">Elena (Risk & Governance Director)</option>
+                                <option value="david_trainer">David (Global LMS Instructor)</option>
+                                <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Slide Numbering</label>
+                            <select id="batch-slide-numbering" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="lesson_relative" selected>Lesson-Relative (Slide 1, 2 of Lesson)</option>
+                                <option value="deck_absolute">Deck-Absolute (Slide 1–29 of Deck)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between gap-3 pt-2">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" id="batch-slide-skip-cache" class="rounded accent-teal-500 cursor-pointer" checked>
+                            <label for="batch-slide-skip-cache" class="text-xs text-slate-300 cursor-pointer select-none">
+                                Skip Already Generated Files <span class="text-[11px] text-slate-500">(Fast Resume)</span>
+                            </label>
+                        </div>
+                        <button onclick="submitBatchSlideGeneration()" id="btn-batch-slide-run" class="px-6 py-2.5 rounded-lg bg-gradient-to-r from-teal-600 to-emerald-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-teal-500/20 transition-all flex items-center gap-2">
+                            <span>⚡</span> <span>Generate Slide Audio Batch</span>
+                        </button>
+                    </div>
+
+                    <!-- Progress and Results Box -->
+                    <div id="batch-slide-status-box" class="hidden p-3 rounded-xl bg-slate-950/80 border border-teal-500/30 space-y-2">
+                        <div class="flex items-center justify-between text-xs">
+                            <span id="batch-slide-status-text" class="text-teal-300 font-mono">Synthesizing batch audio...</span>
+                            <span id="batch-slide-counts" class="font-bold text-white font-mono">0 / 0</span>
+                        </div>
+                        <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                            <div id="batch-slide-progress-bar" class="bg-teal-400 h-full w-0 transition-all duration-300"></div>
+                        </div>
+                        <div id="batch-slide-results-list" class="max-h-48 overflow-y-auto font-mono text-xs space-y-1 text-slate-300 pt-1"></div>
+                    </div>
+                </div>
+
+                <!-- MODULE D: CURRICULUM BATCH VIDEO SYNTHESIS PIPELINE (FEATURE 3) -->
+                <div class="glass-panel p-5 rounded-xl border border-indigo-500/30 space-y-4 pt-4 mt-4">
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+                        <div>
+                            <h4 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                                <span>🚀</span> <span>Curriculum Batch Video Pipeline (Excel Course Maps)</span>
+                            </h4>
+                            <p class="text-[11px] text-slate-400">Automate mass video & lesson generation across entire 15-hour curriculum spreadsheets directly into the SQLite batch worker.</p>
+                        </div>
+                        <span class="text-[10px] px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 font-mono border border-indigo-500/30">
+                            Batch Production Engine
+                        </span>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Course ID</label>
+                            <input type="text" id="curriculum-batch-course-id" value="FINTECH_AGENTS_15HR" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-white font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Select Module</label>
+                            <select id="curriculum-batch-module" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="">All Modules (Full Curriculum)</option>
+                                <option value="1">Module 1: Traditional AI vs GenAI vs Agents</option>
+                                <option value="2">Module 2: Agent Architecture & Planning</option>
+                                <option value="3">Module 3: RAG & Financial Memory</option>
+                                <option value="4">Module 4: Multi-Agent Collaboration</option>
+                                <option value="5">Module 5: Risk, Guardrails & Governance</option>
+                                <option value="6">Module 6: Enterprise Deployment & Observability</option>
+                                <option value="7">Module 7: Algorithmic Execution & Trading</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Presenter Persona</label>
+                            <select id="curriculum-batch-persona" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="maya_fintech" selected>Maya (FinTech Senior Lead)</option>
+                                <option value="alex_ai">Alex (Enterprise AI Architect)</option>
+                                <option value="elena_compliance">Elena (Risk & Governance Director)</option>
+                                <option value="david_trainer">David (Global LMS Instructor)</option>
+                                <option value="rajesh_cloud">Rajesh (Principal Cloud Architect)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[11px] font-semibold text-slate-300 mb-1">Resolution Profile</label>
+                            <select id="curriculum-batch-resolution" class="w-full rounded-lg bg-slate-900 border border-slate-700 p-2 text-xs text-slate-200">
+                                <option value="16:9_hd" selected>16:9 HD Broadcast (1280x720)</option>
+                                <option value="16:9_fhd">16:9 Full HD (1920x1080)</option>
+                                <option value="9:16_vertical">9:16 Mobile Shorts (720x1280)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between gap-3 pt-2">
+                        <span class="text-xs text-slate-400">Uses <code class="text-indigo-300">Nipuna_AI_Agents_in_FinTech_15_Hour_Course_v4.xlsx</code></span>
+                        <button onclick="startCurriculumBatchPipeline()" id="btn-curriculum-batch-start" class="px-6 py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:brightness-110 text-white text-xs font-bold shadow-md shadow-indigo-500/20 transition-all flex items-center gap-2">
+                            <span>🚀</span> <span>Launch Batch Video Queue</span>
+                        </button>
+                    </div>
+
+                    <div id="curriculum-batch-status-box" class="hidden p-3 rounded-xl bg-slate-950/80 border border-indigo-500/30 space-y-2">
+                        <div class="flex items-center justify-between text-xs">
+                            <span id="curriculum-batch-status-title" class="text-indigo-300 font-mono font-bold">Queue Initializing...</span>
+                            <span id="curriculum-batch-progress-pct" class="text-white font-mono font-bold">0%</span>
+                        </div>
+                        <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                            <div id="curriculum-batch-progress-bar" class="bg-indigo-400 h-full w-0 transition-all duration-300"></div>
+                        </div>
+                        <div class="flex items-center justify-between text-[11px] text-slate-400 font-mono pt-1">
+                            <span id="curriculum-batch-stat-completed">Completed: 0</span>
+                            <span id="curriculum-batch-stat-processing">Processing: 0</span>
+                            <span id="curriculum-batch-stat-pending">Pending: 0</span>
+                            <span id="curriculum-batch-stat-failed">Failed: 0</span>
+                        </div>
+                    </div>
+                </div>
         </div><!-- END OF MODE 2: VOICE DIRECTOR -->
 
         <!-- MODE 3: IMAGE DIRECTOR STUDIO (KEYFRAMES & PERSONAS) -->
@@ -3648,6 +4459,165 @@ async def serve_dashboard():
             }
         }
 
+        // --- Custom Voice Recording & Cloning Client Logic ---
+        let mediaRecorder = null;
+        let recordedAudioChunks = [];
+        let activeAudioBlob = null;
+        let selectedDocFile = null;
+
+        async function toggleMicRecording() {
+            const btn = document.getElementById('btn-record-mic');
+            const ind = document.getElementById('record-indicator');
+            const txt = document.getElementById('record-text');
+
+            if (mediaRecorder && mediaRecorder.state === "recording") {
+                mediaRecorder.stop();
+                ind.innerText = "🔴";
+                txt.innerText = "Record from Mic";
+                btn.className = "px-3 py-2 rounded-lg bg-red-600/80 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all";
+                return;
+            }
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                recordedAudioChunks = [];
+                mediaRecorder = new MediaRecorder(stream);
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) recordedAudioChunks.push(e.data);
+                };
+
+                mediaRecorder.onstop = () => {
+                    activeAudioBlob = new Blob(recordedAudioChunks, { type: 'audio/webm' });
+                    const previewBox = document.getElementById('clone-audio-preview-box');
+                    const previewAudio = document.getElementById('clone-audio-preview');
+                    previewAudio.src = URL.createObjectURL(activeAudioBlob);
+                    previewBox.classList.remove('hidden');
+                    stream.getTracks().forEach(track => track.stop());
+                };
+
+                mediaRecorder.start();
+                ind.innerText = "⏹️";
+                txt.innerText = "Stop Recording";
+                btn.className = "px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all animate-pulse";
+            } catch (err) {
+                alert("Microphone access error: " + err.message);
+            }
+        }
+
+        function handleAudioSampleSelected(input) {
+            if (input.files && input.files[0]) {
+                const file = input.files[0];
+                activeAudioBlob = file;
+                const previewBox = document.getElementById('clone-audio-preview-box');
+                const previewAudio = document.getElementById('clone-audio-preview');
+                previewAudio.src = URL.createObjectURL(file);
+                previewBox.classList.remove('hidden');
+            }
+        }
+
+        async function submitVoiceClone() {
+            const name = document.getElementById('clone-display-name').value.trim();
+            if (!name) return alert("Please enter a presenter name.");
+            if (!activeAudioBlob) return alert("Please record or select an audio sample first (10-30s).");
+
+            const locale = document.getElementById('clone-locale').value;
+            const btn = document.getElementById('btn-submit-clone');
+            btn.disabled = true;
+            btn.innerText = "⏳ Normalizing & Registering Persona...";
+
+            try {
+                const formData = new FormData();
+                formData.append('audio_file', activeAudioBlob, 'voice_sample.wav');
+                formData.append('display_name', name);
+                formData.append('gender', 'female');
+                formData.append('target_locale', locale);
+
+                const res = await fetch('/api/v1/voice/clone', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'success') {
+                    alert(`✨ Voice cloned successfully! Persona '${data.persona.display_name}' registered.`);
+                    // Refresh persona dropdown
+                    const sel = document.getElementById('voice-lab-voice');
+                    const opt = document.createElement('option');
+                    opt.value = data.persona.canonical_voice;
+                    opt.innerText = `⭐ ${data.persona.display_name} (Custom Cloned)`;
+                    opt.selected = true;
+                    sel.prepend(opt);
+                } else {
+                    alert("Voice cloning failed: " + (data.detail || JSON.stringify(data)));
+                }
+            } catch (e) {
+                alert("Voice cloning error: " + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>✨</span> <span>Clone Voice & Add to Catalog</span>";
+            }
+        }
+
+        // --- Document Speech Ingestion Client Logic ---
+        function handleDocFileSelected(input) {
+            if (input.files && input.files[0]) {
+                selectedDocFile = input.files[0];
+                document.getElementById('selected-doc-name').innerText = `Selected: ${selectedDocFile.name} (${(selectedDocFile.size / 1024).toFixed(1)} KB)`;
+            }
+        }
+
+        async function submitDocumentSpeech() {
+            if (!selectedDocFile) return alert("Please select a document file (.txt, .md, .docx, .pdf) first.");
+            const exportScorm = document.getElementById('doc-export-scorm-chk').checked;
+            const btn = document.getElementById('btn-synth-doc');
+            const badge = document.getElementById('voice-lab-player-badge');
+
+            btn.disabled = true;
+            btn.innerText = "⏳ Parsing Scenes & Synthesizing Audio...";
+            badge.innerText = "Synthesizing Document...";
+
+            try {
+                const formData = new FormData();
+                formData.append('document_file', selectedDocFile);
+                formData.append('persona_id', 'maya_fintech');
+                formData.append('speech_rate', '1.0');
+                formData.append('export_scorm', exportScorm ? 'true' : 'false');
+
+                const res = await fetch('/api/v1/voice/synthesize-file', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'success') {
+                    const player = document.getElementById('voice-lab-audio-player');
+                    player.src = data.master_audio_url + '?t=' + Date.now();
+                    player.play();
+                    badge.innerText = "Playing Master 🎧";
+
+                    document.getElementById('voice-lab-download-box').classList.remove('hidden');
+                    document.getElementById('voice-lab-audio-dl').href = data.master_audio_url;
+                    if (data.subtitles_srt_url) {
+                        document.getElementById('voice-lab-srt-dl').href = data.subtitles_srt_url;
+                    }
+
+                    document.getElementById('voice-lab-srt-preview').innerText = `✅ "${data.document_title}" decomposed into ${data.total_scenes} pedagogical scenes (${data.total_words} words, ${data.total_duration_sec}s total). Normalized to -14 LUFS.\n` + (data.scorm_download_url ? `📦 SCORM Package: ${data.scorm_download_url}` : '');
+
+                    if (data.scorm_download_url) {
+                        alert(`⚡ Document Synthesized & SCORM 1.2 Package Ready!\n\nScenes: ${data.total_scenes}\nAudio: ${data.total_duration_sec}s\nSCORM URL: ${data.scorm_download_url}`);
+                    } else {
+                        alert(`⚡ Document Synthesized!\nDecomposed into ${data.total_scenes} scenes (${data.total_duration_sec}s). Audio player ready.`);
+                    }
+                } else {
+                    alert("Document synthesis failed: " + (data.detail || JSON.stringify(data)));
+                }
+            } catch (e) {
+                alert("Document synthesis error: " + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = "<span>⚡</span> <span>Synthesize Document Audio</span>";
+            }
+        }
+
         // ================= IMAGE DIRECTOR STUDIO LOGIC =================
         const SAMPLE_IMAGE_PROMPTS = [
             "Modern FinTech algorithmic trading room, glowing holographic charts displaying high-frequency liquidity data, volumetric purple-blue cinematic studio lighting, photorealistic 8k.",
@@ -4391,6 +5361,10 @@ async def serve_dashboard():
                                         <span>📦</span> <span>SCORM</span>
                                     </button>
 
+                                    <button onclick="deployScormCloud('${v.filename}')" title="Deploy directly to SCORM Cloud API v2" class="px-2.5 py-0.5 rounded bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/30 text-[11px] font-bold transition-all flex items-center gap-1 shadow-sm">
+                                        <span>☁️</span> <span>Cloud</span>
+                                    </button>
+
                                     <a href="${v.url}" download title="Download MP4" class="px-2 py-0.5 rounded bg-brand-500/10 hover:bg-brand-500/20 text-brand-glow text-[11px]">
                                         MP4
                                     </a>
@@ -4515,6 +5489,38 @@ async def serve_dashboard():
                 }
             } catch (e) {
                 alert("SCORM Export error: " + e);
+            }
+        }
+
+        async function deployScormCloud(filename) {
+            const courseId = prompt("Enter SCORM Course ID to deploy/update:", `COURSE_${filename.replace(/[^a-zA-Z0-9]/g, '_')}`);
+            if (!courseId) return;
+
+            // First ensure SCORM package exists or bundle on demand
+            try {
+                const pkgRes = await fetch(`/api/v1/scorm/export/${encodeURIComponent(filename)}?module_id=1`, { method: 'POST' });
+                const pkgData = await pkgRes.json();
+                if (pkgData.status !== 'ok') {
+                    alert("Failed to create package for cloud deploy: " + pkgData.detail);
+                    return;
+                }
+
+                const deployRes = await fetch('/api/v1/scorm/deploy-cloud', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        course_id: courseId,
+                        package_filename: pkgData.package_name
+                    })
+                });
+                const deployData = await deployRes.json();
+                if (deployData.status === 'success' || deployData.status === 'mock_success') {
+                    alert(`☁️ Dispatched to SCORM Cloud API v2!\nCourse ID: ${deployData.course_id}\nJob ID: ${deployData.import_job_id}\n\n${deployData.message || 'Course imported successfully.'}`);
+                } else {
+                    alert("Cloud deployment failed: " + (deployData.detail || deployData.error || 'Check logs'));
+                }
+            } catch (e) {
+                alert("SCORM Cloud deployment network error: " + e);
             }
         }
 
@@ -5830,6 +6836,173 @@ async def serve_dashboard():
         }
         if (savedElevenVoice && document.getElementById('elevenlabs-voice-id')) {
             document.getElementById('elevenlabs-voice-id').value = savedElevenVoice;
+        }
+
+        let selectedBatchSlideFile = null;
+        function handleBatchSlideFileSelected(input) {
+            if (input.files && input.files[0]) {
+                selectedBatchSlideFile = input.files[0];
+                document.getElementById('batch-slide-file-label').innerText = selectedBatchSlideFile.name;
+            }
+        }
+
+        async function submitBatchSlideGeneration() {
+            if (!selectedBatchSlideFile) {
+                alert("Please select a PowerPoint (.pptx) or Excel (.xlsx) file first.");
+                return;
+            }
+
+            const btn = document.getElementById('btn-batch-slide-run');
+            const statusBox = document.getElementById('batch-slide-status-box');
+            const statusText = document.getElementById('batch-slide-status-text');
+            const countsText = document.getElementById('batch-slide-counts');
+            const progressBar = document.getElementById('batch-slide-progress-bar');
+            const resultsList = document.getElementById('batch-slide-results-list');
+
+            const moduleNum = parseInt(document.getElementById('batch-slide-module-num').value) || 1;
+            const personaId = document.getElementById('batch-slide-persona').value;
+            const numbering = document.getElementById('batch-slide-numbering').value;
+            const skipCache = document.getElementById('batch-slide-skip-cache').checked;
+
+            statusBox.classList.remove('hidden');
+            statusText.innerText = `Ingesting ${selectedBatchSlideFile.name}...`;
+            progressBar.style.width = '30%';
+            resultsList.innerHTML = `<div class="text-slate-500 italic">Parsing slides, speaker notes, and curriculum hierarchy...</div>`;
+            btn.disabled = true;
+            btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+            const formData = new FormData();
+            formData.append('file', selectedBatchSlideFile);
+            formData.append('module_num', moduleNum);
+            formData.append('persona_id', personaId);
+            formData.append('slide_numbering', numbering);
+            formData.append('skip_existing', skipCache);
+
+            try {
+                const res = await fetch('/api/v1/voice/batch-slides-upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    progressBar.style.width = '100%';
+                    statusText.innerText = `Batch Complete: ${data.successful_slides} of ${data.total_slides} audio files generated.`;
+                    countsText.innerText = `${data.successful_slides} / ${data.total_slides} Succeeded`;
+
+                    resultsList.innerHTML = (data.files || []).map(f => {
+                        const isSuccess = f.status === 'success' || f.status === 'cached';
+                        const badgeColor = isSuccess ? 'text-teal-400' : 'text-red-400';
+                        const tag = f.status === 'cached' ? '[CACHED]' : (isSuccess ? '[OK]' : '[ERR]');
+                        return `<div class="flex items-center justify-between py-1 border-b border-slate-900">
+                            <span class="${badgeColor} font-bold">${tag} ${f.filename}</span>
+                            <span class="text-slate-400">${f.duration_sec ? f.duration_sec.toFixed(1) + 's (' + f.duration_frames + ' frames)' : (f.error || 'error')}</span>
+                        </div>`;
+                    }).join('');
+                } else {
+                    statusText.innerText = 'Batch processing failed: ' + (data.detail || data.message || 'Unknown error');
+                    progressBar.style.width = '0%';
+                }
+            } catch(e) {
+                statusText.innerText = 'Network/API error: ' + e;
+                progressBar.style.width = '0%';
+            } finally {
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        async function startCurriculumBatchPipeline() {
+            const courseId = document.getElementById('curriculum-batch-course-id').value.trim() || 'FINTECH_AGENTS_15HR';
+            const moduleVal = document.getElementById('curriculum-batch-module').value;
+            const personaId = document.getElementById('curriculum-batch-persona').value;
+            const resolution = document.getElementById('curriculum-batch-resolution').value;
+
+            const btn = document.getElementById('btn-curriculum-batch-start');
+            const statusBox = document.getElementById('curriculum-batch-status-box');
+            const titleEl = document.getElementById('curriculum-batch-status-title');
+            const progressPctEl = document.getElementById('curriculum-batch-progress-pct');
+            const progressBarEl = document.getElementById('curriculum-batch-progress-bar');
+            const statCompleted = document.getElementById('curriculum-batch-stat-completed');
+            const statProcessing = document.getElementById('curriculum-batch-stat-processing');
+            const statPending = document.getElementById('curriculum-batch-stat-pending');
+            const statFailed = document.getElementById('curriculum-batch-stat-failed');
+
+            statusBox.classList.remove('hidden');
+            titleEl.innerText = `Submitting batch pipeline for ${courseId}...`;
+            progressBarEl.style.width = '10%';
+            progressPctEl.innerText = '10%';
+            btn.disabled = true;
+            btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+            try {
+                const res = await fetch('/api/v1/batch/curriculum', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        course_id: courseId,
+                        module_num: moduleVal ? parseInt(moduleVal) : null,
+                        persona_id: personaId,
+                        resolution: resolution
+                    })
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'ok') {
+                    titleEl.innerText = `Pipeline Active: ${data.total_lessons_queued} lessons queued across ${data.total_topics} topics.`;
+                    progressBarEl.style.width = '25%';
+                    progressPctEl.innerText = '25%';
+                    // Start polling
+                    pollCurriculumBatchStatus(courseId);
+                } else {
+                    titleEl.innerText = `Failed: ${data.detail || data.message || 'Error launching pipeline'}`;
+                    progressBarEl.style.width = '0%';
+                    progressPctEl.innerText = '0%';
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
+            } catch (e) {
+                titleEl.innerText = `Network Error: ${e}`;
+                progressBarEl.style.width = '0%';
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        let curriculumPollTimer = null;
+        async function pollCurriculumBatchStatus(courseId) {
+            if (curriculumPollTimer) clearInterval(curriculumPollTimer);
+
+            curriculumPollTimer = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/v1/batch/curriculum/status/${encodeURIComponent(courseId)}`);
+                    const data = await res.json();
+                    if (data.course_id || data.status === 'ok') {
+                        const total = data.total_lessons || data.total_tasks || 0;
+                        const comp = data.completed || 0;
+                        const proc = data.processing || 0;
+                        const pend = data.pending || 0;
+                        const fail = data.failed || 0;
+
+                        document.getElementById('curriculum-batch-stat-completed').innerText = `Completed: ${comp}`;
+                        document.getElementById('curriculum-batch-stat-processing').innerText = `Processing: ${proc}`;
+                        document.getElementById('curriculum-batch-stat-pending').innerText = `Pending: ${pend}`;
+                        document.getElementById('curriculum-batch-stat-failed').innerText = `Failed: ${fail}`;
+
+                        const pct = total > 0 ? Math.round(((comp + fail) / total) * 100) : 0;
+                        document.getElementById('curriculum-batch-progress-bar').style.width = `${Math.max(pct, 15)}%`;
+                        document.getElementById('curriculum-batch-progress-pct').innerText = `${pct}%`;
+
+                        if (total > 0 && comp + fail >= total) {
+                            clearInterval(curriculumPollTimer);
+                            document.getElementById('curriculum-batch-status-title').innerText = `Batch Complete: ${comp} of ${total} finished successfully.`;
+                            const btn = document.getElementById('btn-curriculum-batch-start');
+                            btn.disabled = false;
+                            btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                        }
+                    }
+                } catch (e) {
+                    console.error("Batch poll error:", e);
+                }
+            }, 3000);
         }
 
 

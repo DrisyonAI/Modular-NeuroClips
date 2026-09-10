@@ -13,6 +13,7 @@ import json
 import time
 import zipfile
 import tempfile
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -200,6 +201,106 @@ def test_nipuna_item_bank_integrity():
     else:
         print("  [SKIP] nipuna_item_bank.json not found in root, skipping raw file check.")
 
+def test_voice_director_enhancements():
+    """Test 4: Verify SSML prosody compiler, lexicon substitutions, and VoiceContract schema."""
+    print("\n--- [TEST 4] Voice Director Enhancements (SSML, Lexicon, LUFS Contract) ---")
+    from src.agents.voice_director import VoiceDirectorAgent
+    from src.lexicon import LexiconEngine
+    from src.contracts.voice_contract import VoiceContract, SceneAudioArtifact
+    
+    # 1. Lexicon Test
+    lexicon = LexiconEngine()
+    test_text = "The KYC and UPI compliance mandated by RBI and SEBI must be verified."
+    converted = lexicon.apply_lexicon(test_text)
+    assert "K-Y-C" in converted, f"Expected K-Y-C in {converted}"
+    assert "U-P-I" in converted, f"Expected U-P-I in {converted}"
+    assert "R-B-I" in converted, f"Expected R-B-I in {converted}"
+    assert "SEB-ee" in converted, f"Expected SEB-ee in {converted}"
+    print("  [PASS] Domain pronunciation lexicon substitutions verified.")
+
+    # 2. SSML & Prosody Compiler Test
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        agent = VoiceDirectorAgent(output_dir=Path(tmp_dir))
+        raw_script = "Welcome to FinTech. [pause 500ms] [tone:urgent]Immediate action required![/tone] [protip]Check the CIBIL score."
+        ssml, clean_plain = agent.compile_ssml_prosody(raw_script, voice_name="en-IN-NeerjaNeural")
+        
+        assert '<break time="500ms"/>' in ssml, f"Missing break tag in SSML: {ssml}"
+        assert '<prosody rate="+10%" pitch="+2Hz">' in ssml, f"Missing urgent prosody in SSML: {ssml}"
+        assert 'SIB-il' in ssml, f"Missing lexicon substitution in SSML: {ssml}"
+        assert 'Pro tip:' in clean_plain, f"Missing clean protip in plain text: {clean_plain}"
+        print("  [PASS] SSML compiler generated W3C tags and clean prosody.")
+
+    # 3. VoiceContract Contract Test
+    artifact = SceneAudioArtifact(scene_id=1, audio_path="/tmp/scene_1.mp3", measured_duration_sec=4.5)
+    contract = VoiceContract(
+        voice_profile_used="en-IN-NeerjaNeural",
+        engine="edge_tts",
+        master_audio_path="/tmp/master.mp3",
+        total_audio_duration_sec=4.5,
+        scene_audios=[artifact],
+        normalized_lufs=-14.0,
+        bg_music_applied=True
+    )
+    assert contract.normalized_lufs == -14.0
+    assert contract.bg_music_applied is True
+    print("  [PASS] Enhanced VoiceContract schema validated.")
+
+def test_document_parser_and_voice_cloner():
+    """Test 5: Verify Document Parser slicing, Voice Cloner normalization, and Dynamic Persona registration."""
+    print("\n--- [TEST 5] Document Parser, Voice Cloner & Dynamic Persona Registration ---")
+    from src.document_parser import DocumentParser
+    from src.agents.voice_cloner import VoiceCloner
+    from src.contracts.persona import PERSONA_CATALOG, get_persona_contract, GenderEnum, RegionLocaleEnum
+
+    # 1. Document Parser & Slicing Test
+    raw_document = """
+    # Executive Overview of FinTech Risk
+    Artificial intelligence is revolutionizing algorithmic market compliance across India.
+    Financial institutions utilize machine learning models to detect real-time transaction anomalies.
+    
+    ## Regulatory Architecture
+    The Reserve Bank of India mandates rigorous KYC and AML compliance audits.
+    Non-Banking Financial Companies must report credit ratings directly through verified APIs.
+    Decentralized ledgers provide tamper-proof evidentiary logs for financial transactions.
+    
+    ## Practical Implementation
+    Engineers must ensure zero data drift across high-frequency trade evaluation cycles.
+    """
+    res = DocumentParser.slice_into_scenes(raw_document, target_words_per_scene=25, max_scenes=10)
+    assert res.total_scenes >= 2, f"Expected >= 2 scenes, got {res.total_scenes}"
+    assert res.total_words > 40, f"Expected > 40 words, got {res.total_words}"
+    assert len(res.scenes) == res.total_scenes
+    print(f"  [PASS] Document Parser successfully sliced document into {res.total_scenes} pedagogical scenes ({res.total_words} words).")
+
+    # 2. Voice Cloner Normalization & Registration Test
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        raw_sample = tmp_path / "user_sample.wav"
+        
+        # Generate 6 seconds of test audio tone via ffmpeg
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=6", "-c:a", "pcm_s16le", str(raw_sample)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        assert raw_sample.exists(), "Failed to generate synthetic test audio sample"
+
+        cloner = VoiceCloner(voices_dir=tmp_path / "voices")
+        persona = cloner.register_user_voice(
+            display_name="Dr. Srinivas Velaga",
+            raw_audio_path=raw_sample,
+            gender=GenderEnum.MALE,
+            target_locale=RegionLocaleEnum.EN_IN,
+            industry_domain="FinTech Architecture"
+        )
+
+        assert persona.persona_id.startswith("dr_srinivas_velaga"), f"Unexpected persona_id: {persona.persona_id}"
+        assert persona.persona_id in PERSONA_CATALOG, "Custom persona not found in runtime PERSONA_CATALOG"
+        
+        fetched = get_persona_contract(persona.persona_id)
+        assert fetched.display_name == "Dr. Srinivas Velaga"
+        assert fetched.gender == GenderEnum.MALE
+        print(f"  [PASS] Voice Cloner audio normalization and custom persona dynamic registration verified ({persona.persona_id}).")
+
 def run_all_tests():
     print("===================================================================")
     print("Modular-NeuroClips Quality & Workflow Verification Suite")
@@ -207,6 +308,8 @@ def run_all_tests():
     test_role_division_ui()
     test_external_video_scorm_builder()
     test_nipuna_item_bank_integrity()
+    test_voice_director_enhancements()
+    test_document_parser_and_voice_cloner()
     print("\n===================================================================")
     print("ALL TESTS PASSED: Quality, role division & SCORM workflow verified!")
     print("===================================================================")

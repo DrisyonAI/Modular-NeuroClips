@@ -186,3 +186,33 @@ class SCORMPackager:
         )
 
         return builder.build_zip(out_path)
+
+    def export_scenario_zip(self, scenario_dag: Any, output_zip_path: Optional[Path] = None, pass_percentage: int = 70) -> Path:
+        """
+        Exports an interactive NeuroBranch™ adaptive scenario simulation package (SCORM 1.2 / 2004 compatible).
+        """
+        out_path = output_zip_path or EXPORTS_DIR / f"SCORM_SIM_{scenario_dag.scenario_id}.zip"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<manifest identifier="sim_{scenario_dag.scenario_id}" version="1.0" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
+  <organizations default="org_{scenario_dag.scenario_id}">
+    <organization identifier="org_{scenario_dag.scenario_id}">
+      <title>{scenario_dag.title}</title>
+    </organization>
+  </organizations>
+  <resources>
+    <resource identifier="sim_resource" type="webcontent" adlcp:scormtype="sco" href="index.html">
+      <file href="index.html"/>
+    </resource>
+  </resources>
+</manifest>
+"""
+        from src.neurobranch_player import generate_neurobranch_player_html
+        player_html = generate_neurobranch_player_html(scenario_dag, pass_percentage=pass_percentage)
+
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("imsmanifest.xml", manifest_xml)
+            zf.writestr("index.html", player_html)
+
+        return out_path
