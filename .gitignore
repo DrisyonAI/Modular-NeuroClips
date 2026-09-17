@@ -31,3 +31,4 @@ scratch_tmp/
 !scrom_reference/*.png
 !scrom_reference/*.mp4
 !src/scorm/runtime/assets/**
+!assets_library/avatars/*.mp4
