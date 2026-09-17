@@ -415,7 +415,11 @@ def compile_final_video(
 
         avatar_idx = None
         if has_avatar:
-            inputs.extend(["-loop", "1", "-i", str(Path(avatar_image_path).resolve())])
+            avatar_p = Path(avatar_image_path).resolve()
+            if avatar_p.suffix.lower() in [".mp4", ".mov", ".webm", ".mkv", ".avi"]:
+                inputs.extend(["-stream_loop", "-1", "-i", str(avatar_p)])
+            else:
+                inputs.extend(["-loop", "1", "-i", str(avatar_p)])
             avatar_idx = input_count
             input_count += 1
 
