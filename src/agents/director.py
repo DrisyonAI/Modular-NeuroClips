@@ -15,6 +15,7 @@ from src.contracts.visual_contract import ImageContract, SceneVisualArtifact
 from src.agents.scriptwriter import ScriptwriterAgent
 from src.agents.voice_director import VoiceDirectorAgent
 from src.agents.image_generator import ImageGeneratorAgent
+from src.agents.jev_advisor import audit_script_with_jev, verify_persona_compatibility
 from src.pipeline import MediaGenerationEngine
 from src.compiler import compile_final_video
 
@@ -63,7 +64,16 @@ class DirectorAgent:
             if scene.estimated_duration_sec < 2.0 or scene.estimated_duration_sec > 60.0:
                 return False, f"Scene {scene.scene_id} duration ({scene.estimated_duration_sec}s) out of bounds [2s, 60s]."
 
-        return True, "Gate 1 Passed: ScriptContract is structurally valid."
+        # Jev System One Pedagogical & Prosody Audit
+        jev_audit = audit_script_with_jev(
+            course_title=script.course_title,
+            persona_name=script.persona_id,
+            scenes=[s.model_dump() if hasattr(s, "model_dump") else s.__dict__ for s in script.scenes]
+        )
+        if not jev_audit.is_valid:
+            return False, f"Gate 1 Rejected by Jev: {jev_audit.feedback}"
+
+        return True, f"Gate 1 Passed: {jev_audit.feedback}"
 
     def validate_gate_2_av_sync(
         self,
