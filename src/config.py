@@ -43,6 +43,24 @@ ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 IDENTITIES_DIR = BASE_DIR / "identities"
 IDENTITIES_DIR.mkdir(parents=True, exist_ok=True)
 
+AVATARS_DIR = ASSETS_DIR / "avatars"
+AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_AVATAR_BASE_VIDEO = Path(os.getenv(
+    "DEFAULT_AVATAR_BASE_VIDEO",
+    str(AVATARS_DIR / "srinivas_velaga_base.mp4")
+))
+FACEFUSION_PYTHON = os.getenv(
+    "FACEFUSION_PYTHON",
+    r"C:\Users\kchar\anaconda3\envs\facefusion\python.exe" if os.path.exists(r"C:\Users\kchar\anaconda3\envs\facefusion\python.exe") else "python"
+)
+FACEFUSION_DIR = Path(os.getenv(
+    "FACEFUSION_DIR",
+    r"C:\Users\kchar\facefusion" if os.path.exists(r"C:\Users\kchar\facefusion") else "./facefusion"
+))
+FACEFUSION_MODEL = os.getenv("FACEFUSION_MODEL", "wav2lip_gan_96")
+FACEFUSION_EXECUTION_PROVIDER = os.getenv("FACEFUSION_EXECUTION_PROVIDER", "cpu")
+FACEFUSION_EXECUTION_THREADS = int(os.getenv("FACEFUSION_EXECUTION_THREADS", "4"))
+
 DEVICE = os.getenv("DEVICE", "cuda")
 T2I_MODEL = os.getenv("T2I_MODEL", "runwayml/stable-diffusion-v1-5")
 I2V_MODEL = os.getenv("I2V_MODEL", "THUDM/CogVideoX-2b-I2V")
