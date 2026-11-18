@@ -79,8 +79,9 @@ class CurriculumBatchRunner:
         Loads course lessons into the SQLite batch pipeline queue.
         """
         excel_path = Path(req.excel_path) if req.excel_path else (BASE_DIR / "docs" / "Nipuna_AI_Agents_in_FinTech_15_Hour_Course_v4.xlsx")
-        if not excel_path.exists():
-            excel_path = Path(r"C:\tt-ai-stack\temp_book_copy.xlsx")
+        fallback = os.getenv("CURRICULUM_FALLBACK_EXCEL")
+        if not excel_path.exists() and fallback:
+            excel_path = Path(fallback)
 
         if not excel_path.exists():
             raise FileNotFoundError(f"Course Excel map not found at: {excel_path}")
