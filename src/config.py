@@ -24,19 +24,23 @@ N8N_ALERT_WEBHOOK_URL = os.getenv(
 )
 N8N_ALERTS_ENABLED = os.getenv("N8N_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
 
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./render_output"))
+_output_dir = os.getenv("OUTPUT_DIR")
+OUTPUT_DIR = Path(_output_dir) if _output_dir and Path(_output_dir).is_absolute() else BASE_DIR / (_output_dir or "render_output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-CURRICULUM_OUTPUT_DIR = Path(os.getenv("CURRICULUM_OUTPUT_DIR", "./curriculum_output"))
+_curriculum_dir = os.getenv("CURRICULUM_OUTPUT_DIR")
+CURRICULUM_OUTPUT_DIR = Path(_curriculum_dir) if _curriculum_dir and Path(_curriculum_dir).is_absolute() else BASE_DIR / (_curriculum_dir or "curriculum_output")
 CURRICULUM_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "./exports"))
+_exports_dir = os.getenv("EXPORTS_DIR")
+EXPORTS_DIR = Path(_exports_dir) if _exports_dir and Path(_exports_dir).is_absolute() else BASE_DIR / (_exports_dir or "exports")
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-ASSETS_DIR = Path(os.getenv("ASSETS_DIR", "./assets_library"))
+_assets_dir = os.getenv("ASSETS_DIR")
+ASSETS_DIR = Path(_assets_dir) if _assets_dir and Path(_assets_dir).is_absolute() else BASE_DIR / (_assets_dir or "assets_library")
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
-IDENTITIES_DIR = Path("./identities")
+IDENTITIES_DIR = BASE_DIR / "identities"
 IDENTITIES_DIR.mkdir(parents=True, exist_ok=True)
 
 AVATARS_DIR = ASSETS_DIR / "avatars"

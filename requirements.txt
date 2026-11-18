@@ -17,3 +17,4 @@ pillow>=10.4.0
 sentencepiece>=0.2.0
 protobuf>=5.27.0
 python-dotenv>=1.0.1
+typesafe-sdk>=0.1.0

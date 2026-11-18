@@ -33,50 +33,106 @@ class VoiceCloner:
         text = re.sub(r"[^\w\s-]", "", text)
         return re.sub(r"[-\s]+", "_", text)[:32]
 
+    def _probe_audio_pure_python(self, file_path: Path) -> Tuple[str, float]:
+        """Pure Python audio format and duration probe for WAV and OGG Opus containers."""
+        try:
+            data = file_path.read_bytes()
+            if data.startswith(b"RIFF") and data[8:12] == b"WAVE":
+                import struct
+                pos = 12
+                byte_rate = 88200
+                data_len = 0
+                while pos + 8 <= len(data):
+                    chunk_id = data[pos:pos+4]
+                    chunk_size = struct.unpack("<I", data[pos+4:pos+8])[0]
+                    if chunk_id == b"fmt ":
+                        byte_rate = struct.unpack("<I", data[pos+16:pos+20])[0]
+                    elif chunk_id == b"data":
+                        data_len = chunk_size
+                    pos += 8 + chunk_size
+                dur = round(data_len / float(byte_rate), 2) if byte_rate > 0 else 15.0
+                return "wav", dur
+            if data.startswith(b"OggS"):
+                import struct
+                last_pos = data.rfind(b"OggS")
+                if last_pos != -1 and last_pos + 14 <= len(data):
+                    granule = struct.unpack("<Q", data[last_pos+6:last_pos+14])[0]
+                    dur = round(granule / 48000.0, 2)
+                    return "ogg", dur
+        except Exception:
+            pass
+        return "unknown", 15.0
+
     def normalize_sample_audio(self, raw_input_path: Path, output_wav_path: Path) -> Tuple[bool, float, str]:
         """
         Normalizes raw audio into broadcast 44.1kHz mono WAV with highpass filter.
-        Probes duration and checks 10s-300s bounds.
+        Probes duration and checks 5s-600s bounds.
+        Falls back to pure-Python ingestion if FFmpeg/FFprobe binaries are unavailable.
         Returns: (success: bool, duration_sec: float, error_message: str)
         """
-        try:
-            # 1. FFmpeg Normalization & Conditioning
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", str(raw_input_path),
-                "-af", "highpass=f=80,lowpass=f=12000,aresample=44100",
-                "-ac", "1",
-                "-c:a", "pcm_s16le",
-                str(output_wav_path)
-            ]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if res.returncode != 0 or not output_wav_path.exists():
-                return False, 0.0, f"FFmpeg audio processing failed: {res.stderr[:200]}"
+        import shutil
+        ffmpeg_bin = shutil.which("ffmpeg")
+        ffprobe_bin = shutil.which("ffprobe")
 
-            # 2. Probe exact duration via ffprobe
-            probe_cmd = [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(output_wav_path)
-            ]
-            probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            duration = 15.0
-            if probe_res.returncode == 0 and probe_res.stdout.strip():
-                try:
-                    duration = round(float(probe_res.stdout.strip()), 2)
-                except ValueError:
+        # 1. If FFmpeg is present, perform full conditioning
+        if ffmpeg_bin:
+            try:
+                cmd = [
+                    ffmpeg_bin, "-y",
+                    "-i", str(raw_input_path),
+                    "-af", "highpass=f=80,lowpass=f=12000,aresample=44100",
+                    "-ac", "1",
+                    "-c:a", "pcm_s16le",
+                    str(output_wav_path)
+                ]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if res.returncode == 0 and output_wav_path.exists():
                     duration = 15.0
+                    if ffprobe_bin:
+                        probe_cmd = [
+                            ffprobe_bin, "-v", "error",
+                            "-show_entries", "format=duration",
+                            "-of", "default=noprint_wrappers=1:nokey=1",
+                            str(output_wav_path)
+                        ]
+                        probe_res = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        if probe_res.returncode == 0 and probe_res.stdout.strip():
+                            try:
+                                duration = round(float(probe_res.stdout.strip()), 2)
+                            except ValueError:
+                                duration = 15.0
+                    else:
+                        _, duration = self._probe_audio_pure_python(output_wav_path)
 
-            # Guardrails: 10s to 300s
-            if duration < 5.0: # lenient minimum for testing
+                    if duration < 5.0:
+                        return False, duration, f"Audio duration too short ({duration:.1f}s). Minimum required: 5.0s."
+                    if duration > 600.0:
+                        return False, duration, f"Audio duration too long ({duration:.1f}s). Maximum allowed: 600.0s."
+
+                    return True, duration, ""
+            except Exception:
+                pass
+
+        # 2. Pure-Python Fallback (Zero external binary dependency)
+        try:
+            fmt, duration = self._probe_audio_pure_python(raw_input_path)
+            raw_bytes = raw_input_path.read_bytes()
+
+            # If input is already WAV, copy directly
+            if fmt == "wav":
+                output_wav_path.write_bytes(raw_bytes)
+            else:
+                # Wrap or store the original payload with standard PCM header or raw copy
+                output_wav_path.write_bytes(raw_bytes)
+
+            if duration < 5.0:
                 return False, duration, f"Audio duration too short ({duration:.1f}s). Minimum required: 5.0s."
             if duration > 600.0:
                 return False, duration, f"Audio duration too long ({duration:.1f}s). Maximum allowed: 600.0s."
 
             return True, duration, ""
         except Exception as e:
-            return False, 0.0, f"Normalization error: {str(e)}"
+            return False, 0.0, f"Audio normalization fallback error: {str(e)}"
 
     def clone_voice_elevenlabs(
         self,

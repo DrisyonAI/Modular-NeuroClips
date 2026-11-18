@@ -1,3 +1,11 @@
+"""
+Modular-NeuroClips Studio - Command Line Production Runner.
+Executes the full AI video generation pipeline from CLI:
+  1. Script generation via ScriptOrchestrator (Ollama / Llama 3)
+  2. Keyframe image rendering via MediaGenerationEngine
+  3. Video clip motion synthesis
+  4. FFmpeg stitching & compilation
+"""
 import sys
 import time
 import argparse

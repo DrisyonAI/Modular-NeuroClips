@@ -31,4 +31,13 @@ scratch_tmp/
 !scrom_reference/*.png
 !scrom_reference/*.mp4
 !src/scorm/runtime/assets/**
+output/
+output_temp/
+*.sqlite
+*.sqlite3
+*.db
+*.xlsx
+*.ogg
+*.visual-check.*
+remotion/node_modules/
 !assets_library/avatars/*.mp4

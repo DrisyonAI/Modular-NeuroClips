@@ -54,5 +54,19 @@
     "default_pitch": "+0Hz",
     "default_speed": 1.0,
     "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
+  },
+  "dr_srinivas_velaga_1204": {
+    "persona_id": "dr_srinivas_velaga_1204",
+    "display_name": "Dr. Srinivas Velaga",
+    "gender": "male",
+    "target_locale": "en-IN",
+    "demographic_ethnicity": "User Cloned",
+    "industry_domain": "Corporate Learning",
+    "visual_continuity_anchor": "Professional executive presenter Dr. Srinivas Velaga in corporate attire, modern glass office, photorealistic 8k",
+    "canonical_voice": "en-IN-PrabhatNeural",
+    "elevenlabs_voice_id": "21m00Tcm4TlvDq8ikWAM",
+    "default_pitch": "+0Hz",
+    "default_speed": 1.0,
+    "recommended_art_style": "Photorealistic 8K (Corporate / Tech)"
   }
 }

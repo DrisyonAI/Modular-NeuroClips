@@ -130,11 +130,13 @@ The Web Portal features 3 dedicated studio workbenches accessible via the top mo
 
 ### 🎙️ Voice Director Studio & Audio Master Exporter
 * Dedicated audio synthesis laboratory supporting:
-  * **Custom Voice Recording & Cloning (`VoiceCloner`)**:
-    * In-browser live microphone recording (`MediaRecorder` API) or audio file upload (`.wav`, `.ogg`, `.mp3`, `.m4a`).
-    * FFmpeg conditioning to 44.1kHz mono WAV with high-pass noise filtering.
+  * **Custom Voice Recording, Cloning & Saved Library (`VoiceCloner`)**:
+    * In-browser live microphone recording (`MediaRecorder` API) or audio file upload (`.mp3`, `.ogg`, `.wav`, `.m4a`).
+    * FFmpeg conditioning to 44.1kHz mono WAV with band-pass noise filtering (`80Hz`–`12kHz`).
     * Cloud cloning via ElevenLabs Instant Voice Clone API (`/v1/voices/add`) with local reference speaker fallback.
-    * Dynamic persona persistence into `src/contracts/custom_personas.json` and immediate registration in `PERSONA_CATALOG`.
+    * Dynamic persona persistence into `src/contracts/custom_personas.json` and immediate catalog registration in `PERSONA_CATALOG`.
+    * **📚 Saved Cloned Voice Library Manager**: In-browser card deck with inline audition audio player, metadata badges, and secure deletion.
+    * **1-Click Cross-Studio Reuse**: Direct injection into Voice Director (`#voice-lab-voice`), Video Studio (`#voice-select` / `#avatar-persona-select`), Batch Slide Studio (`#batch-slide-persona`), and Curriculum Batch Video Pipeline (`#curriculum-batch-persona`).
   * **Universal Document-to-Speech Engine (`DocumentParser`)**:
     * Multi-format ingestion: `.txt`, `.md`, `.docx`, and `.pdf` files up to 25MB.
     * Automatic decomposition into bounded pedagogical scenes (40–80 words / 20–40s per scene).
@@ -226,9 +228,10 @@ sequenceDiagram
 * `POST /api/v1/voice/expand-prompt`: Expands raw prompts into complete spoken scripts with directorial cues using `ScriptwriterAgent`.
 
 ### Voice Director & Document Speech Endpoints
-* `POST /api/v1/voice/clone`: Uploads/records audio sample, normalizes via FFmpeg, clones voice (ElevenLabs or local reference), and registers a custom persona.
+* `POST /api/v1/voice/clone`: Uploads/records audio sample (.mp3, .ogg, .wav), normalizes via FFmpeg, clones voice (ElevenLabs or local reference), and registers a custom persona.
 * `POST /api/v1/voice/synthesize-file`: Ingests `.txt`, `.md`, `.docx`, or `.pdf`, decomposes into scenes, applies pronunciation lexicon & SSML, and generates master audio, subtitles, and optional SCORM package.
-* `GET /api/v1/voice/personas`: Returns all active canonical and user-cloned personas.
+* `GET /api/v1/voice/personas`: Returns all active canonical and user-cloned personas with `is_custom` indicator.
+* `DELETE /api/v1/voice/personas/{persona_id}`: Deletes a custom cloned voice persona from the library and persists deletion.
 * `POST /api/v1/preview-voice`: Instant neural voice audition.
 * `POST /api/v1/voice/export`: Synthesizes and converts master audio to **MP3, WAV, M4A, OGG, FLAC** with synchronous `.srt` subtitles.
 
@@ -261,3 +264,45 @@ docker compose up -d
 * **Web Portal**: `https://neuroclips.mytestbed.tech/`
 * **Local Control Plane**: `http://localhost:8130/`
 * **Pull Request**: [PR #2 on GitHub](https://github.com/DrisyonAI/Modular-NeuroClips/pull/2)
+
+---
+
+## 10. Avatar Creation & Lip-Sync (FaceFusion Headless)
+
+Modular-NeuroClips includes a headless integration service for [FaceFusion](https://github.com/facefusion/facefusion) located at [`src/services/facefusion_service.py`](src/services/facefusion_service.py). It drives video lip synchronization without requiring a face enhancer model.
+
+### Features
+* **No Face Enhancer Dependency**: Uses `--lip-syncer-model wav2lip_gan` directly with region-based mouth masking (`--face-mask-types region`, `--face-mask-regions mouth`), avoiding blur and over-smoothing on faces.
+* **Edge Blending**: Automatically applies edge feathering (`--face-mask-blur 0.3`) for seamless seam integration.
+* **Optional Identity Swap**: Supports passing an identity portrait image to swap source avatars before applying lip synchronization.
+* **Async & Sync Execution**: Non-blocking subprocess execution suitable for FastAPI and asynchronous job queues.
+
+### Setup & Configuration
+1. Clone FaceFusion:
+   ```bash
+   git clone https://github.com/facefusion/facefusion.git
+   cd facefusion
+   python install.py --onnxruntime cuda
+   ```
+2. Configure environment variable in `.env`:
+   ```env
+   FACEFUSION_PATH=/path/to/facefusion
+   ```
+
+### Usage Example
+```python
+from pathlib import Path
+from src.services import FaceFusionLipSyncService
+
+service = FaceFusionLipSyncService()
+
+# Asynchronous call within FastAPI or pipeline worker
+result = await service.run_lipsync_async(
+    target_video_or_image=Path("assets/avatar_template.mp4"),
+    source_audio=Path("render_output/voiceover.wav"),
+    output_path=Path("render_output/synced_avatar.mp4"),
+    lip_syncer_model="wav2lip_gan",
+    face_mask_blur=0.3
+)
+print("Lip-synced video ready:", result["output_path"])
+```
