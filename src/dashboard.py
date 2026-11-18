@@ -33,6 +33,10 @@ quiz_engine = QuizEngine()
 
 app = FastAPI(title="Modular-NeuroClips Studio & VPS Control Plane", version="2.6.0")
 
+# Session auth gate. Registered first so it covers every route and static mount.
+from src.services.auth_routes import install_auth
+install_auth(app)
+
 app.mount("/static_renders", StaticFiles(directory=str(OUTPUT_DIR)), name="static_renders")
 app.mount("/static_curriculum", StaticFiles(directory=str(CURRICULUM_OUTPUT_DIR)), name="static_curriculum")
 app.mount("/static_exports", StaticFiles(directory=str(EXPORTS_DIR)), name="static_exports")
