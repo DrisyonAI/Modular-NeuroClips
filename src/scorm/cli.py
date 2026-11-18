@@ -59,12 +59,11 @@ def main():
 
         asset_map = {}
         if args.assets and args.assets.exists():
-            for root, _, files in args.assets.walk():
-                for f in files:
-                    full_p = root / f
-                    rel_p = full_p.relative_to(args.assets)
-                    target_key = f"assets/{str(rel_p).replace('\\', '/')}"
-                    asset_map[target_key] = full_p
+            # rglob + as_posix keep this working on Python < 3.12 (no Path.walk, no
+            # backslash inside f-string expressions).
+            for full_p in sorted(p for p in args.assets.rglob("*") if p.is_file()):
+                rel_p = full_p.relative_to(args.assets)
+                asset_map[f"assets/{rel_p.as_posix()}"] = full_p
 
         builder = SCORMPackageBuilder(
             course_data=course_data,
