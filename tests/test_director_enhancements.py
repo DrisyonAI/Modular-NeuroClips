@@ -130,8 +130,9 @@ def test_director_fastapi_endpoints():
 
 def test_vault_video_state_model_in_dashboard_ui():
     """Verify that Media Vault contains the 5-state video lifecycle model and guards."""
-    dashboard_path = Path(__file__).resolve().parent.parent / "src" / "dashboard.py"
-    content = dashboard_path.read_text(encoding="utf-8")
+    # The UI moved from an inline string in dashboard.py to src/templates/dashboard.html.
+    template_path = Path(__file__).resolve().parent.parent / "src" / "templates" / "dashboard.html"
+    content = template_path.read_text(encoding="utf-8")
 
     # Verify State Machine presence
     assert "setVideoCardState" in content
