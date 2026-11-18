@@ -14,6 +14,7 @@ from src.services.alert_dispatcher import (
     dispatch_threat_detection,
     dispatch_pipeline_failure,
 )
+from src.services.facefusion_service import FaceFusionLipSyncService
 
 __all__ = [
     "get_system_telemetry",
@@ -27,4 +28,5 @@ __all__ = [
     "dispatch_security_alert",
     "dispatch_threat_detection",
     "dispatch_pipeline_failure",
+    "FaceFusionLipSyncService",
 ]

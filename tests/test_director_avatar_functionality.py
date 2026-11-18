@@ -37,6 +37,9 @@ client = TestClient(app)
 
 
 def get_dashboard_html():
+    template_path = Path(__file__).resolve().parent.parent / "src" / "templates" / "dashboard.html"
+    if template_path.exists():
+        return template_path.read_text(encoding="utf-8")
     dashboard_path = Path(__file__).resolve().parent.parent / "src" / "dashboard.py"
     content = dashboard_path.read_text(encoding="utf-8")
     m = re.search(r'return r"""(.*?)"""', content, re.DOTALL)

@@ -264,3 +264,45 @@ docker compose up -d
 * **Web Portal**: `https://neuroclips.mytestbed.tech/`
 * **Local Control Plane**: `http://localhost:8130/`
 * **Pull Request**: [PR #2 on GitHub](https://github.com/DrisyonAI/Modular-NeuroClips/pull/2)
+
+---
+
+## 10. Avatar Creation & Lip-Sync (FaceFusion Headless)
+
+Modular-NeuroClips includes a headless integration service for [FaceFusion](https://github.com/facefusion/facefusion) located at [`src/services/facefusion_service.py`](src/services/facefusion_service.py). It drives video lip synchronization without requiring a face enhancer model.
+
+### Features
+* **No Face Enhancer Dependency**: Uses `--lip-syncer-model wav2lip_gan` directly with region-based mouth masking (`--face-mask-types region`, `--face-mask-regions mouth`), avoiding blur and over-smoothing on faces.
+* **Edge Blending**: Automatically applies edge feathering (`--face-mask-blur 0.3`) for seamless seam integration.
+* **Optional Identity Swap**: Supports passing an identity portrait image to swap source avatars before applying lip synchronization.
+* **Async & Sync Execution**: Non-blocking subprocess execution suitable for FastAPI and asynchronous job queues.
+
+### Setup & Configuration
+1. Clone FaceFusion:
+   ```bash
+   git clone https://github.com/facefusion/facefusion.git
+   cd facefusion
+   python install.py --onnxruntime cuda
+   ```
+2. Configure environment variable in `.env`:
+   ```env
+   FACEFUSION_PATH=/path/to/facefusion
+   ```
+
+### Usage Example
+```python
+from pathlib import Path
+from src.services import FaceFusionLipSyncService
+
+service = FaceFusionLipSyncService()
+
+# Asynchronous call within FastAPI or pipeline worker
+result = await service.run_lipsync_async(
+    target_video_or_image=Path("assets/avatar_template.mp4"),
+    source_audio=Path("render_output/voiceover.wav"),
+    output_path=Path("render_output/synced_avatar.mp4"),
+    lip_syncer_model="wav2lip_gan",
+    face_mask_blur=0.3
+)
+print("Lip-synced video ready:", result["output_path"])
+```

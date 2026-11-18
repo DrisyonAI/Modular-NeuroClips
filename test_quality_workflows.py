@@ -26,7 +26,8 @@ def test_role_division_ui():
     print("\n--- [TEST 1] Role-Based Architecture & Studio Division ---")
     dashboard_path = PROJECT_ROOT / "src" / "dashboard.py"
     assert dashboard_path.exists(), "src/dashboard.py not found"
-    content = dashboard_path.read_text(encoding="utf-8")
+    template_path = PROJECT_ROOT / "src" / "templates" / "dashboard.html"
+    content = template_path.read_text(encoding="utf-8") if template_path.exists() else dashboard_path.read_text(encoding="utf-8")
     
     # Check 4 Role Tabs
     assert 'id="mode-btn-video"' in content, "Missing Director Studio tab button"
