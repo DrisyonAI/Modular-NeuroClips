@@ -49,14 +49,9 @@ DEFAULT_AVATAR_BASE_VIDEO = Path(os.getenv(
     "DEFAULT_AVATAR_BASE_VIDEO",
     str(AVATARS_DIR / "srinivas_velaga_base.mp4")
 ))
-FACEFUSION_PYTHON = os.getenv(
-    "FACEFUSION_PYTHON",
-    r"C:\Users\kchar\anaconda3\envs\facefusion\python.exe" if os.path.exists(r"C:\Users\kchar\anaconda3\envs\facefusion\python.exe") else "python"
-)
-FACEFUSION_DIR = Path(os.getenv(
-    "FACEFUSION_DIR",
-    r"C:\Users\kchar\facefusion" if os.path.exists(r"C:\Users\kchar\facefusion") else "./facefusion"
-))
+# Machine-specific: set FACEFUSION_PYTHON / FACEFUSION_DIR in .env (see .env.example).
+FACEFUSION_PYTHON = os.getenv("FACEFUSION_PYTHON", "python")
+FACEFUSION_DIR = Path(os.getenv("FACEFUSION_DIR", str(BASE_DIR / "facefusion")))
 FACEFUSION_MODEL = os.getenv("FACEFUSION_MODEL", "wav2lip_gan_96")
 FACEFUSION_EXECUTION_PROVIDER = os.getenv("FACEFUSION_EXECUTION_PROVIDER", "cpu")
 FACEFUSION_EXECUTION_THREADS = int(os.getenv("FACEFUSION_EXECUTION_THREADS", "4"))

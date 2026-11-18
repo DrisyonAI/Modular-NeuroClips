@@ -229,7 +229,10 @@ def test_login_portal_neuroclips_mytestbed_tech():
     assert "id=\"username-input\"" in res.text
     assert "id=\"password-input\"" in res.text
     assert "id=\"role-select\"" in res.text
-    assert "Instant Demo Access" in res.text
+    # Demo bypass and pre-filled credentials must stay removed; login posts to the server.
+    assert "Instant Demo Access" not in res.text
+    assert "nc-prod-director-token" not in res.text
+    assert "/api/v1/auth/login" in res.text
 
     # Verify /signin alias
     res_alias = client.get("/signin")

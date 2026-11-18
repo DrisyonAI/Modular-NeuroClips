@@ -1,0 +1,25 @@
+# Secrets are injected at runtime via docker-compose env_file, never baked into the image.
+.env
+.env.*
+!.env.example
+
+.git
+.github
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.pytest_cache/
+node_modules/
+remotion/node_modules/
+
+# Runtime data is mounted as volumes.
+render_output/
+curriculum_output/
+exports/
+output/
+output_temp/
+*.db
+*.sqlite
+*.sqlite3
+*.log

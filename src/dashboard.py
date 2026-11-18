@@ -33,6 +33,10 @@ quiz_engine = QuizEngine()
 
 app = FastAPI(title="Modular-NeuroClips Studio & VPS Control Plane", version="2.6.0")
 
+# Session auth gate. Registered first so it covers every route and static mount.
+from src.services.auth_routes import install_auth
+install_auth(app)
+
 app.mount("/static_renders", StaticFiles(directory=str(OUTPUT_DIR)), name="static_renders")
 app.mount("/static_curriculum", StaticFiles(directory=str(CURRICULUM_OUTPUT_DIR)), name="static_curriculum")
 app.mount("/static_exports", StaticFiles(directory=str(EXPORTS_DIR)), name="static_exports")
@@ -52,6 +56,9 @@ from src.services.audio_service import (
 )
 from src.services.job_manager import job_manager, MILESTONES
 from src.services.pipeline_runner import run_production_pipeline
+from src.services.path_safety import read_upload_capped, resolve_within, resolve_under_roots
+
+MB = 1024 * 1024
 
 # Backward-compatible state proxies
 JOBS_DB: Dict[str, Dict[str, Any]] = job_manager.jobs
@@ -532,7 +539,7 @@ async def export_voiceover_api(req: VoiceExportRequest):
 @app.post("/api/v1/script/upload-document")
 async def upload_script_document(file: UploadFile = File(...)):
     """Ingests TXT, Markdown, SRT, VTT, or JSON script documents and returns cleaned narration text."""
-    contents = await file.read()
+    contents = await read_upload_capped(file, 20 * MB)
     try:
         raw_text = contents.decode("utf-8")
     except UnicodeDecodeError:
@@ -570,10 +577,11 @@ async def upload_video_asset(file: UploadFile = File(...), tag: str = Query("gen
         raise HTTPException(status_code=400, detail="Invalid video format. Supported: MP4, MOV, WebM, MKV.")
 
     asset_id = str(uuid.uuid4())[:8]
-    clean_name = f"asset_{asset_id}_{Path(file.filename).name.replace(' ', '_')}"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(file.filename).stem)[:60] or "video"
+    clean_name = f"asset_{asset_id}_{stem}{ext}"
     target_path = ASSETS_DIR / clean_name
-    
-    contents = await file.read()
+
+    contents = await read_upload_capped(file, 500 * MB)
     with open(target_path, "wb") as f:
         f.write(contents)
 
@@ -623,8 +631,8 @@ async def list_video_assets():
 @app.delete("/api/v1/assets/videos/{filename}")
 async def delete_video_asset(filename: str):
     """Deletes an uploaded video asset and its thumbnail."""
-    p = ASSETS_DIR / filename
-    if p.exists():
+    p = resolve_within(ASSETS_DIR, filename)
+    if p.is_file():
         p.unlink(missing_ok=True)
         thumb = ASSETS_DIR / f"{p.stem}_thumb.png"
         thumb.unlink(missing_ok=True)
@@ -633,8 +641,10 @@ async def delete_video_asset(filename: str):
 
 @app.post("/api/v1/avatar/upload")
 async def upload_custom_avatar(file: UploadFile = File(...)):
+    if Path(file.filename or "").suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(status_code=400, detail="Avatar must be a PNG, JPG or WebP image.")
     custom_avatar_path = OUTPUT_DIR / "custom_avatar.png"
-    contents = await file.read()
+    contents = await read_upload_capped(file, 20 * MB)
     with open(custom_avatar_path, "wb") as f:
         f.write(contents)
     return {"status": "ok", "message": "Avatar uploaded successfully", "avatar_url": "/static_renders/custom_avatar.png"}
@@ -652,7 +662,7 @@ async def upload_director_reference_media(file: UploadFile = File(...)):
     uid = uuid.uuid4().hex[:8]
     out_filename = f"director_ref_{uid}{ext}"
     out_path = OUTPUT_DIR / out_filename
-    contents = await file.read()
+    contents = await read_upload_capped(file, 500 * MB)
     with open(out_path, "wb") as f:
         f.write(contents)
 
@@ -679,7 +689,7 @@ async def upload_avatar_3d_model(file: UploadFile = File(...)):
     uid = uuid.uuid4().hex[:8]
     out_filename = f"avatar_3d_{uid}{ext}"
     out_path = OUTPUT_DIR / out_filename
-    contents = await file.read()
+    contents = await read_upload_capped(file, 200 * MB)
     with open(out_path, "wb") as f:
         f.write(contents)
 
@@ -817,10 +827,11 @@ async def clone_user_voice_api(
 
     temp_dir = OUTPUT_DIR / "temp_voice_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_raw = temp_dir / f"raw_{uuid.uuid4().hex}_{upload.filename}"
+    # Never put the client filename in the path; keep only its extension for ffmpeg.
+    temp_raw = temp_dir / f"raw_{uuid.uuid4().hex}{Path(upload.filename or '').suffix.lower()[:8]}"
 
     try:
-        content = await upload.read()
+        content = await read_upload_capped(upload, 50 * MB)
         temp_raw.write_bytes(content)
 
         gender_enum = GenderEnum.FEMALE if gender.lower() == "female" else (
@@ -890,10 +901,10 @@ async def synthesize_document_speech_api(
 
     temp_dir = OUTPUT_DIR / "temp_doc_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_doc = temp_dir / f"doc_{uuid.uuid4().hex}_{doc_upload.filename}"
+    temp_doc = temp_dir / f"doc_{uuid.uuid4().hex}{Path(doc_upload.filename or '').suffix.lower()[:8]}"
 
     try:
-        content = await doc_upload.read()
+        content = await read_upload_capped(doc_upload, 20 * MB)
         temp_doc.write_bytes(content)
 
         # 1. Parse document into pedagogical scenes
@@ -990,137 +1001,6 @@ async def synthesize_document_speech_api(
             except Exception:
                 pass
 
-# -------------------------------------------------------------------------
-# BATCH SLIDE AUDIO PROCESSING (M{m}_T{t}_L{l}_Slide{s}.mp3)
-# -------------------------------------------------------------------------
-from src.agents.slide_batch_processor import SlideBatchProcessor, SlideBatchItem
-
-@app.post("/api/v1/voice/batch-slides")
-async def batch_process_slides_endpoint(
-    deck_path: Optional[str] = Form(None),
-    excel_path: Optional[str] = Form(None),
-    module_num: Optional[int] = Form(None),
-    persona_id: str = Form("maya_fintech"),
-    speech_rate: float = Form(1.0),
-    pitch: str = Form("+0Hz"),
-    target_lufs: float = Form(-14.0),
-    slide_numbering: str = Form("deck_absolute"),  # "deck_absolute" or "lesson_relative"
-    limit_slides: Optional[int] = Form(None)
-):
-    """
-    Batch processes slide decks (.pptx) or Excel course maps (.xlsx) into audio files
-    following the standard naming convention: M{m}_T{t}_L{l}_Slide{s}.mp3
-    """
-    processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides")
-    items = []
-
-    try:
-        if deck_path:
-            p = Path(deck_path)
-            if not p.exists():
-                raise HTTPException(status_code=404, detail=f"Slide deck file not found: {deck_path}")
-            items = processor.parse_pptx_deck(p, module_num=module_num, slide_numbering=slide_numbering)
-        elif excel_path:
-            p = Path(excel_path)
-            if not p.exists():
-                raise HTTPException(status_code=404, detail=f"Excel course map not found: {excel_path}")
-            items = processor.parse_excel_course_map(p)
-        else:
-            raise HTTPException(status_code=400, detail="Must supply either deck_path or excel_path")
-
-        if not items:
-            raise HTTPException(status_code=400, detail="No valid slide narration items could be parsed.")
-
-        if limit_slides and limit_slides > 0:
-            items = items[:limit_slides]
-
-        result = processor.process_batch(
-            items=items,
-            persona_id=persona_id,
-            speech_rate=speech_rate,
-            pitch=pitch,
-            target_lufs=target_lufs
-        )
-
-        return {
-            "status": "success",
-            "total_slides": result.total_slides,
-            "successful_slides": result.successful_slides,
-            "failed_slides": result.failed_slides,
-            "output_directory": result.output_directory,
-            "manifest_url": f"/static_renders/batch_slides/batch_manifest.json",
-            "generated_files": result.generated_files
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Batch slide processing failed: {str(e)}")
-
-@app.post("/api/v1/voice/batch-slides-upload")
-async def batch_process_slides_upload_endpoint(
-    file: UploadFile = File(...),
-    module_num: Optional[int] = Form(None),
-    persona_id: str = Form("maya_fintech"),
-    speech_rate: float = Form(1.0),
-    pitch: str = Form("+0Hz"),
-    target_lufs: float = Form(-14.0),
-    slide_numbering: str = Form("deck_absolute"),
-    limit_slides: Optional[int] = Form(None)
-):
-    """
-    Accepts uploaded .pptx or .xlsx, extracts slide narration, and synthesizes M{m}_T{t}_L{l}_Slide{s}.mp3.
-    """
-    temp_dir = OUTPUT_DIR / "temp_batch_uploads"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file = temp_dir / f"batch_{uuid.uuid4().hex}_{file.filename}"
-
-    try:
-        content = await file.read()
-        temp_file.write_bytes(content)
-
-        processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides")
-        if temp_file.suffix.lower() == ".pptx":
-            items = processor.parse_pptx_deck(temp_file, module_num=module_num, slide_numbering=slide_numbering)
-        elif temp_file.suffix.lower() == ".xlsx":
-            items = processor.parse_excel_course_map(temp_file)
-        else:
-            raise HTTPException(status_code=400, detail="Uploaded file must be .pptx or .xlsx")
-
-        if not items:
-            raise HTTPException(status_code=400, detail="No readable slides or narration found in file.")
-
-        if limit_slides and limit_slides > 0:
-            items = items[:limit_slides]
-
-        result = processor.process_batch(
-            items=items,
-            persona_id=persona_id,
-            speech_rate=speech_rate,
-            pitch=pitch,
-            target_lufs=target_lufs
-        )
-
-        return {
-            "status": "success",
-            "filename": file.filename,
-            "total_slides": result.total_slides,
-            "successful_slides": result.successful_slides,
-            "failed_slides": result.failed_slides,
-            "output_directory": result.output_directory,
-            "manifest_url": f"/static_renders/batch_slides/batch_manifest.json",
-            "generated_files": result.generated_files
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload batch slide processing failed: {str(e)}")
-    finally:
-        if temp_file.exists():
-            try:
-                temp_file.unlink()
-            except Exception:
-                pass
-
 @app.post("/api/v1/scorm/package")
 async def create_custom_scorm_package(req: SCORMPackageRequest):
     """
@@ -1188,10 +1068,10 @@ async def export_scorm_package(
     """
     1-click SCORM exporter bundling the rendered video with the module's interactive 32-question assessment from Nipuna curriculum.
     """
-    video_path = OUTPUT_DIR / filename
-    if not video_path.exists():
-        video_path = ASSETS_DIR / filename
-    if not video_path.exists():
+    video_path = resolve_within(OUTPUT_DIR, filename)
+    if not video_path.is_file():
+        video_path = resolve_within(ASSETS_DIR, filename)
+    if not video_path.is_file():
         raise HTTPException(status_code=404, detail="Video file not found")
         
     c_title = course_title or video_path.stem.replace('_', ' ').title()
@@ -1405,56 +1285,102 @@ async def list_scorm_packages():
             })
     packages.sort(key=lambda x: x["created_at"], reverse=True)
     return {"packages": packages}
+# -------------------------------------------------------------------------
+# BATCH SLIDE AUDIO PROCESSING (M{m}_T{t}_L{l}_Slide{s}.mp3)
+# Single definition per route. The Voice Director UI posts multipart to
+# /batch-slides-upload and expects {"status": "ok", "files": [...]}.
+# -------------------------------------------------------------------------
+BATCH_SLIDE_SUFFIXES = (".pptx", ".xlsx")
+
+
 class BatchSlideAudioRequest(BaseModel):
     deck_path: Optional[str] = None
     excel_path: Optional[str] = None
     module_num: Optional[int] = 1
     persona_id: Optional[str] = "maya_fintech"
     speech_rate: Optional[float] = 1.0
+    pitch: Optional[str] = "+0Hz"
+    target_lufs: Optional[float] = -14.0
     slide_numbering: Optional[str] = "lesson_relative"
     skip_existing: Optional[bool] = True
+    limit_slides: Optional[int] = None
+
+
+def _batch_slide_response(result: Any, **extra: Any) -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        **extra,
+        "total_slides": result.total_slides,
+        "successful_slides": result.successful_slides,
+        "failed_slides": result.failed_slides,
+        "output_directory": result.output_directory,
+        "manifest_file": result.manifest_file,
+        "files": result.generated_files,
+        # Kept for API clients written against the earlier response shape.
+        "generated_files": result.generated_files,
+    }
+
+
+def _run_slide_batch(
+    source: Path,
+    module_num: Optional[int],
+    persona_id: str,
+    speech_rate: float,
+    pitch: str,
+    target_lufs: float,
+    slide_numbering: str,
+    skip_existing: bool,
+    limit_slides: Optional[int],
+):
+    from src.agents.slide_batch_processor import SlideBatchProcessor
+    out_sub = f"M{module_num:02d}" if module_num else "batch_output"
+    processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides" / out_sub)
+    if source.suffix.lower() == ".pptx":
+        items = processor.parse_pptx_deck(source, module_num=module_num, slide_numbering=slide_numbering)
+    else:
+        items = processor.parse_excel_course_map(source)
+    if not items:
+        raise HTTPException(status_code=400, detail="No readable slides or narration found in file.")
+    if limit_slides and limit_slides > 0:
+        items = items[:limit_slides]
+    return processor.process_batch(
+        items,
+        persona_id=persona_id,
+        speech_rate=speech_rate,
+        pitch=pitch,
+        target_lufs=target_lufs,
+        skip_existing=skip_existing,
+    )
 
 
 @app.post("/api/v1/voice/batch-slides")
 async def batch_slides_api(req: BatchSlideAudioRequest):
     """
     Generates batch audio files adhering strictly to M{m}_T{t}_L{l}_Slide{s}.mp3
-    from a presentation deck (.pptx) or an Excel course map (.xlsx).
+    from a server-side deck (.pptx) or Excel course map (.xlsx) inside the app directories.
     """
+    from src.config import BASE_DIR
+    from src.services.path_safety import resolve_under_roots
+
+    raw = req.deck_path or req.excel_path
+    if not raw:
+        raise HTTPException(status_code=400, detail="Either deck_path or excel_path must be provided.")
+    source = resolve_under_roots(raw, [BASE_DIR, OUTPUT_DIR, ASSETS_DIR])
+    if source.suffix.lower() not in BATCH_SLIDE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Only .pptx and .xlsx files are supported.")
+    if not source.is_file():
+        raise HTTPException(status_code=404, detail="Source file not found.")
     try:
-        from src.agents.slide_batch_processor import SlideBatchProcessor
-        out_sub = f"M{req.module_num:02d}" if req.module_num else "batch_output"
-        processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides" / out_sub)
-
-        if req.deck_path:
-            p_deck = Path(req.deck_path)
-            if not p_deck.exists():
-                raise HTTPException(status_code=404, detail=f"Deck file not found: {req.deck_path}")
-            items = processor.parse_pptx_deck(p_deck, module_num=req.module_num, slide_numbering=req.slide_numbering)
-        elif req.excel_path:
-            p_excel = Path(req.excel_path)
-            if not p_excel.exists():
-                raise HTTPException(status_code=404, detail=f"Excel file not found: {req.excel_path}")
-            items = processor.parse_excel_course_map(p_excel)
-        else:
-            raise HTTPException(status_code=400, detail="Either deck_path or excel_path must be provided.")
-
-        result = processor.process_batch(
-            items,
-            persona_id=req.persona_id or "maya_fintech",
-            speech_rate=req.speech_rate or 1.0,
-            skip_existing=req.skip_existing
+        result = _run_slide_batch(
+            source, req.module_num, req.persona_id or "maya_fintech", req.speech_rate or 1.0,
+            req.pitch or "+0Hz", req.target_lufs if req.target_lufs is not None else -14.0,
+            req.slide_numbering or "lesson_relative", bool(req.skip_existing), req.limit_slides,
         )
-        return {
-            "status": "ok",
-            "total_slides": result.total_slides,
-            "successful_slides": result.successful_slides,
-            "failed_slides": result.failed_slides,
-            "manifest_file": result.manifest_file,
-            "files": result.generated_files
-        }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Batch slide processing failed: {e}")
+    return _batch_slide_response(result)
 
 
 @app.post("/api/v1/voice/batch-slides-upload")
@@ -1463,51 +1389,33 @@ async def batch_slides_upload_api(
     module_num: int = Form(1),
     persona_id: str = Form("maya_fintech"),
     speech_rate: float = Form(1.0),
+    pitch: str = Form("+0Hz"),
+    target_lufs: float = Form(-14.0),
     slide_numbering: str = Form("lesson_relative"),
-    skip_existing: bool = Form(True)
+    skip_existing: bool = Form(True),
+    limit_slides: Optional[int] = Form(None),
 ):
     """
-    Accepts uploaded .pptx or .xlsx file and generates M{m}_T{t}_L{l}_Slide{s}.mp3 files in batch.
+    Accepts an uploaded .pptx or .xlsx file and generates M{m}_T{t}_L{l}_Slide{s}.mp3 files in batch.
     """
+    from src.services.path_safety import read_upload_capped, safe_upload_name
+
+    temp_dir = OUTPUT_DIR / "temp_uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    saved_file = temp_dir / safe_upload_name(file.filename, BATCH_SLIDE_SUFFIXES)
     try:
-        from src.agents.slide_batch_processor import SlideBatchProcessor
-        filename = file.filename
-        ext = Path(filename).suffix.lower()
-        if ext not in [".pptx", ".xlsx"]:
-            raise HTTPException(status_code=400, detail="Only .pptx and .xlsx files are supported.")
-
-        temp_dir = OUTPUT_DIR / "temp_uploads"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        saved_file = temp_dir / filename
-        with open(saved_file, "wb") as f:
-            f.write(await file.read())
-
-        out_sub = f"M{module_num:02d}"
-        processor = SlideBatchProcessor(output_dir=OUTPUT_DIR / "batch_slides" / out_sub)
-
-        if ext == ".pptx":
-            items = processor.parse_pptx_deck(saved_file, module_num=module_num, slide_numbering=slide_numbering)
-        else:
-            items = processor.parse_excel_course_map(saved_file)
-
-        result = processor.process_batch(
-            items,
-            persona_id=persona_id,
-            speech_rate=speech_rate,
-            skip_existing=skip_existing
+        saved_file.write_bytes(await read_upload_capped(file, 100 * 1024 * 1024))
+        result = _run_slide_batch(
+            saved_file, module_num, persona_id, speech_rate, pitch, target_lufs,
+            slide_numbering, skip_existing, limit_slides,
         )
-
-        return {
-            "status": "ok",
-            "filename": filename,
-            "total_slides": result.total_slides,
-            "successful_slides": result.successful_slides,
-            "failed_slides": result.failed_slides,
-            "manifest_file": result.manifest_file,
-            "files": result.generated_files
-        }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Upload batch slide processing failed: {e}")
+    finally:
+        saved_file.unlink(missing_ok=True)
+    return _batch_slide_response(result, filename=file.filename)
 
 
 # -------------------------------------------------------------
@@ -1562,9 +1470,13 @@ async def batch_curriculum_api(req: Dict[str, Any]):
     """
     try:
         from src.curriculum_batch_runner import CurriculumBatchRunner, CurriculumBatchRequest
+        from src.config import BASE_DIR
         runner = CurriculumBatchRunner()
+        excel_path = req.get("excel_path")
+        if excel_path:
+            excel_path = str(resolve_under_roots(excel_path, [BASE_DIR, OUTPUT_DIR, ASSETS_DIR]))
         batch_req = CurriculumBatchRequest(
-            excel_path=req.get("excel_path"),
+            excel_path=excel_path,
             course_id=req.get("course_id", "FINTECH_AGENTS_15HR"),
             course_title=req.get("course_title", "AI Agents in FinTech Course"),
             module_id=req.get("module_id"),
@@ -1573,6 +1485,8 @@ async def batch_curriculum_api(req: Dict[str, Any]):
             speech_rate=req.get("speech_rate", 1.0)
         )
         return runner.enqueue_curriculum(batch_req)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1600,7 +1514,9 @@ class IdentitySaveRequest(BaseModel):
 @app.post("/api/v1/identity/save")
 async def save_identity_profile(req: IdentitySaveRequest):
     safe_name = "".join(c for c in req.name if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
-    file_path = IDENTITIES_DIR / f"{safe_name}.json"
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Identity name must contain letters or digits.")
+    file_path = resolve_within(IDENTITIES_DIR, f"{safe_name[:80]}.json")
     payload = {
         "name": req.name,
         "avatar_persona": req.avatar_persona,
@@ -1629,7 +1545,7 @@ async def list_identities():
 @app.get("/api/v1/identity/load/{name}")
 async def load_identity_profile(name: str):
     safe_name = name.replace(' ', '_')
-    file_path = IDENTITIES_DIR / f"{safe_name}.json"
+    file_path = resolve_within(IDENTITIES_DIR, f"{safe_name}.json")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Identity not found")
     with open(file_path, "r", encoding="utf-8") as f:
@@ -1765,8 +1681,8 @@ async def clear_gallery_api():
 
 @app.delete("/api/v1/gallery/{filename}")
 async def delete_gallery_item_api(filename: str):
-    target = OUTPUT_DIR / filename
-    if not target.exists():
+    target = resolve_within(OUTPUT_DIR, filename)
+    if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
         
     try:

@@ -19,8 +19,9 @@ def get_typesafe_client() -> Optional["TypeSafeClient"]:
     if not _SDK_AVAILABLE:
         return None
     api_key = os.getenv("TYPESAFE_API_KEY")
-    if not api_key:
-        secrets_env = r"C:\tt-ai-stack\04_internal\secrets\.env"
+    # Optional external secrets file (e.g. a shared secrets .env outside the repo).
+    secrets_env = os.getenv("TYPESAFE_SECRETS_FILE", "")
+    if not api_key and secrets_env:
         if os.path.exists(secrets_env):
             try:
                 with open(secrets_env, "r", encoding="utf-8") as f:

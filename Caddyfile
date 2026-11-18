@@ -1,5 +1,6 @@
 # Caddy Reverse Proxy Configuration for mnc.mytestbed.tech
-# Place in /etc/caddy/Caddyfile or append to your Caddy config:
+# Place in /etc/caddy/Caddyfile or append to your Caddy config.
+# Upstream is the docker compose port (docker-compose.yml: 127.0.0.1:8130 -> 8000).
 
 mnc.mytestbed.tech {
     # Automatic HTTPS with Let's Encrypt
@@ -10,13 +11,13 @@ mnc.mytestbed.tech {
         path /api/v1/telemetry/stream
     }
     handle @sse {
-        reverse_proxy 127.0.0.1:8000 {
+        reverse_proxy 127.0.0.1:8130 {
             flush_interval -1
         }
     }
 
     # Main Application
     handle {
-        reverse_proxy 127.0.0.1:8000
+        reverse_proxy 127.0.0.1:8130
     }
 }

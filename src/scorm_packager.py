@@ -4,7 +4,9 @@ Creates compliant e-learning archives with imsmanifest.xml, single-SCO data-driv
 interactive knowledge assessments, and LMS tracking conforming to the NeuroClips SCORM Framework.
 """
 import os
+import zipfile
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, Field
 
@@ -194,11 +196,18 @@ class SCORMPackager:
         out_path = output_zip_path or EXPORTS_DIR / f"SCORM_SIM_{scenario_dag.scenario_id}.zip"
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
+        sid = _xml_escape(str(scenario_dag.scenario_id), {'"': "&quot;"})
+        title = _xml_escape(str(scenario_dag.title))
         manifest_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<manifest identifier="sim_{scenario_dag.scenario_id}" version="1.0" xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2">
-  <organizations default="org_{scenario_dag.scenario_id}">
-    <organization identifier="org_{scenario_dag.scenario_id}">
-      <title>{scenario_dag.title}</title>
+<manifest identifier="sim_{sid}" version="1.0"
+          xmlns="http://www.imsproject.org/xsd/imscp_rootv1p1p2"
+          xmlns:adlcp="http://www.adlnet.org/xsd/adlcp_rootv1p2">
+  <organizations default="org_{sid}">
+    <organization identifier="org_{sid}">
+      <title>{title}</title>
+      <item identifier="item_{sid}" identifierref="sim_resource">
+        <title>{title}</title>
+      </item>
     </organization>
   </organizations>
   <resources>

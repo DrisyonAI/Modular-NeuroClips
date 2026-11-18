@@ -92,6 +92,10 @@
                     <span class="text-sm">✓</span>
                     <span id="login-status-text">Authorization confirmed. Entering Studio...</span>
                 </div>
+                <div id="login-error-notice" role="alert" class="hidden p-3 rounded-xl bg-red-500/15 border border-red-500/30 text-xs text-red-300 flex items-center space-x-2">
+                    <span class="text-sm">⚠️</span>
+                    <span id="login-error-text">Invalid credentials.</span>
+                </div>
 
                 <!-- Form -->
                 <form id="login-form" onsubmit="handleFormLogin(event)" class="space-y-4 text-xs">
@@ -100,7 +104,7 @@
                             Workstation ID / Email
                         </label>
                         <div class="relative">
-                            <input type="text" id="username-input" value="director@mytestbed.tech" required
+                            <input type="text" id="username-input" placeholder="director" autocomplete="username" required
                                    class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 pl-9 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono transition-all">
                             <span class="absolute left-3 top-3 text-slate-500 text-sm">👤</span>
                         </div>
@@ -111,10 +115,9 @@
                             <label for="password-input" class="block font-semibold text-slate-300 uppercase tracking-wider text-[10px]">
                                 Access Token / Key
                             </label>
-                            <span class="text-[10px] text-brand-glow font-mono">Demo Auto-Filled</span>
                         </div>
                         <div class="relative">
-                            <input type="password" id="password-input" value="nc-prod-director-token-2026" required
+                            <input type="password" id="password-input" autocomplete="current-password" required
                                    class="w-full rounded-xl bg-slate-900/90 border border-slate-700/80 p-3 pl-9 pr-10 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono transition-all">
                             <span class="absolute left-3 top-3 text-slate-500 text-sm">🔑</span>
                             <button type="button" onclick="togglePasswordVisibility()" class="absolute right-3 top-3 text-slate-400 hover:text-white" title="Toggle visibility">
@@ -140,7 +143,6 @@
                             <input type="checkbox" id="remember-me-check" checked class="rounded accent-brand-500">
                             <span>Remember on this workstation</span>
                         </label>
-                        <a href="/" class="text-brand-glow hover:underline">Guest Preview</a>
                     </div>
 
                     <!-- Sign In CTA -->
@@ -150,19 +152,6 @@
                         <span>Sign In to Workstation</span>
                     </button>
                 </form>
-
-                <!-- Divider -->
-                <div class="relative flex items-center justify-center">
-                    <div class="border-t border-slate-800 w-full"></div>
-                    <span class="bg-slate-950 px-3 text-[10px] text-slate-500 uppercase tracking-widest font-mono font-bold absolute">OR QUICK ACCESS</span>
-                </div>
-
-                <!-- Instant One-Click Demo Access -->
-                <button type="button" onclick="handleQuickDemoAccess()"
-                        class="w-full py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-brand-500/30 hover:border-brand-500/60 font-semibold text-xs transition-all flex items-center justify-center space-x-2 group">
-                    <span class="group-hover:scale-110 transition-transform">⚡</span>
-                    <span>Instant Demo Access (Director Role)</span>
-                </button>
             </div>
 
             <!-- Server & Cluster Info Box -->
@@ -221,29 +210,60 @@
         function handleFormLogin(e) {
             e.preventDefault();
             const username = document.getElementById('username-input').value.trim();
+            const password = document.getElementById('password-input').value;
             const role = document.getElementById('role-select').value;
-            authenticateAndRedirect(username, role);
+            authenticateAndRedirect(username, password, role);
         }
 
-        function handleQuickDemoAccess() {
-            authenticateAndRedirect('director@mytestbed.tech', 'Director & Master Orchestrator');
+        function showLoginError(message) {
+            const box = document.getElementById('login-error-notice');
+            const text = document.getElementById('login-error-text');
+            if (box && text) {
+                text.innerText = message;
+                box.classList.remove('hidden');
+            }
         }
 
-        function authenticateAndRedirect(user, role) {
+        async function authenticateAndRedirect(user, password, role) {
             const btn = document.getElementById('submit-login-btn');
             const notice = document.getElementById('login-status-notice');
             const noticeText = document.getElementById('login-status-text');
+            const errorBox = document.getElementById('login-error-notice');
+            const originalBtn = btn ? btn.innerHTML : '';
+            if (errorBox) errorBox.classList.add('hidden');
 
             if (btn) {
                 btn.disabled = true;
                 btn.innerHTML = '<span>⏳</span> <span>Authorizing Session...</span>';
             }
 
+            const params = new URLSearchParams(window.location.search);
+            let result;
+            try {
+                const res = await fetch('/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ username: user, password: password, redirect: params.get('redirect') || '/' })
+                });
+                result = { ok: res.ok, body: await res.json().catch(() => ({})) };
+            } catch (err) {
+                result = { ok: false, body: { detail: 'Server unreachable. Try again.' } };
+            }
+
+            if (!result.ok) {
+                showLoginError(result.body.detail || 'Invalid credentials.');
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = originalBtn;
+                }
+                return;
+            }
+
+            // Display-only preferences; the session itself is an HttpOnly cookie.
             try {
                 localStorage.setItem('neuroclips_user', user);
                 localStorage.setItem('neuroclips_role', role);
-                localStorage.setItem('neuroclips_session_token', 'nc_' + Math.random().toString(36).substring(2) + Date.now().toString(36));
-                localStorage.setItem('neuroclips_authenticated', 'true');
             } catch (e) {
                 console.warn('Storage warning:', e);
             }
@@ -252,12 +272,7 @@
                 noticeText.innerText = `Welcome ${user.split('@')[0]}! Launching Director Studio...`;
                 notice.classList.remove('hidden');
             }
-
-            setTimeout(() => {
-                const params = new URLSearchParams(window.location.search);
-                const redirect = params.get('redirect') || '/';
-                window.location.href = redirect;
-            }, 600);
+            window.location.href = result.body.redirect || '/';
         }
     </script>
 </body>
