@@ -56,6 +56,9 @@ from src.services.audio_service import (
 )
 from src.services.job_manager import job_manager, MILESTONES
 from src.services.pipeline_runner import run_production_pipeline
+from src.services.path_safety import read_upload_capped, resolve_within, resolve_under_roots
+
+MB = 1024 * 1024
 
 # Backward-compatible state proxies
 JOBS_DB: Dict[str, Dict[str, Any]] = job_manager.jobs
@@ -536,7 +539,7 @@ async def export_voiceover_api(req: VoiceExportRequest):
 @app.post("/api/v1/script/upload-document")
 async def upload_script_document(file: UploadFile = File(...)):
     """Ingests TXT, Markdown, SRT, VTT, or JSON script documents and returns cleaned narration text."""
-    contents = await file.read()
+    contents = await read_upload_capped(file, 20 * MB)
     try:
         raw_text = contents.decode("utf-8")
     except UnicodeDecodeError:
@@ -574,10 +577,11 @@ async def upload_video_asset(file: UploadFile = File(...), tag: str = Query("gen
         raise HTTPException(status_code=400, detail="Invalid video format. Supported: MP4, MOV, WebM, MKV.")
 
     asset_id = str(uuid.uuid4())[:8]
-    clean_name = f"asset_{asset_id}_{Path(file.filename).name.replace(' ', '_')}"
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(file.filename).stem)[:60] or "video"
+    clean_name = f"asset_{asset_id}_{stem}{ext}"
     target_path = ASSETS_DIR / clean_name
-    
-    contents = await file.read()
+
+    contents = await read_upload_capped(file, 500 * MB)
     with open(target_path, "wb") as f:
         f.write(contents)
 
@@ -627,8 +631,8 @@ async def list_video_assets():
 @app.delete("/api/v1/assets/videos/{filename}")
 async def delete_video_asset(filename: str):
     """Deletes an uploaded video asset and its thumbnail."""
-    p = ASSETS_DIR / filename
-    if p.exists():
+    p = resolve_within(ASSETS_DIR, filename)
+    if p.is_file():
         p.unlink(missing_ok=True)
         thumb = ASSETS_DIR / f"{p.stem}_thumb.png"
         thumb.unlink(missing_ok=True)
@@ -637,8 +641,10 @@ async def delete_video_asset(filename: str):
 
 @app.post("/api/v1/avatar/upload")
 async def upload_custom_avatar(file: UploadFile = File(...)):
+    if Path(file.filename or "").suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(status_code=400, detail="Avatar must be a PNG, JPG or WebP image.")
     custom_avatar_path = OUTPUT_DIR / "custom_avatar.png"
-    contents = await file.read()
+    contents = await read_upload_capped(file, 20 * MB)
     with open(custom_avatar_path, "wb") as f:
         f.write(contents)
     return {"status": "ok", "message": "Avatar uploaded successfully", "avatar_url": "/static_renders/custom_avatar.png"}
@@ -656,7 +662,7 @@ async def upload_director_reference_media(file: UploadFile = File(...)):
     uid = uuid.uuid4().hex[:8]
     out_filename = f"director_ref_{uid}{ext}"
     out_path = OUTPUT_DIR / out_filename
-    contents = await file.read()
+    contents = await read_upload_capped(file, 500 * MB)
     with open(out_path, "wb") as f:
         f.write(contents)
 
@@ -683,7 +689,7 @@ async def upload_avatar_3d_model(file: UploadFile = File(...)):
     uid = uuid.uuid4().hex[:8]
     out_filename = f"avatar_3d_{uid}{ext}"
     out_path = OUTPUT_DIR / out_filename
-    contents = await file.read()
+    contents = await read_upload_capped(file, 200 * MB)
     with open(out_path, "wb") as f:
         f.write(contents)
 
@@ -821,10 +827,11 @@ async def clone_user_voice_api(
 
     temp_dir = OUTPUT_DIR / "temp_voice_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_raw = temp_dir / f"raw_{uuid.uuid4().hex}_{upload.filename}"
+    # Never put the client filename in the path; keep only its extension for ffmpeg.
+    temp_raw = temp_dir / f"raw_{uuid.uuid4().hex}{Path(upload.filename or '').suffix.lower()[:8]}"
 
     try:
-        content = await upload.read()
+        content = await read_upload_capped(upload, 50 * MB)
         temp_raw.write_bytes(content)
 
         gender_enum = GenderEnum.FEMALE if gender.lower() == "female" else (
@@ -894,10 +901,10 @@ async def synthesize_document_speech_api(
 
     temp_dir = OUTPUT_DIR / "temp_doc_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_doc = temp_dir / f"doc_{uuid.uuid4().hex}_{doc_upload.filename}"
+    temp_doc = temp_dir / f"doc_{uuid.uuid4().hex}{Path(doc_upload.filename or '').suffix.lower()[:8]}"
 
     try:
-        content = await doc_upload.read()
+        content = await read_upload_capped(doc_upload, 20 * MB)
         temp_doc.write_bytes(content)
 
         # 1. Parse document into pedagogical scenes
@@ -1061,10 +1068,10 @@ async def export_scorm_package(
     """
     1-click SCORM exporter bundling the rendered video with the module's interactive 32-question assessment from Nipuna curriculum.
     """
-    video_path = OUTPUT_DIR / filename
-    if not video_path.exists():
-        video_path = ASSETS_DIR / filename
-    if not video_path.exists():
+    video_path = resolve_within(OUTPUT_DIR, filename)
+    if not video_path.is_file():
+        video_path = resolve_within(ASSETS_DIR, filename)
+    if not video_path.is_file():
         raise HTTPException(status_code=404, detail="Video file not found")
         
     c_title = course_title or video_path.stem.replace('_', ' ').title()
@@ -1463,9 +1470,13 @@ async def batch_curriculum_api(req: Dict[str, Any]):
     """
     try:
         from src.curriculum_batch_runner import CurriculumBatchRunner, CurriculumBatchRequest
+        from src.config import BASE_DIR
         runner = CurriculumBatchRunner()
+        excel_path = req.get("excel_path")
+        if excel_path:
+            excel_path = str(resolve_under_roots(excel_path, [BASE_DIR, OUTPUT_DIR, ASSETS_DIR]))
         batch_req = CurriculumBatchRequest(
-            excel_path=req.get("excel_path"),
+            excel_path=excel_path,
             course_id=req.get("course_id", "FINTECH_AGENTS_15HR"),
             course_title=req.get("course_title", "AI Agents in FinTech Course"),
             module_id=req.get("module_id"),
@@ -1474,6 +1485,8 @@ async def batch_curriculum_api(req: Dict[str, Any]):
             speech_rate=req.get("speech_rate", 1.0)
         )
         return runner.enqueue_curriculum(batch_req)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1501,7 +1514,9 @@ class IdentitySaveRequest(BaseModel):
 @app.post("/api/v1/identity/save")
 async def save_identity_profile(req: IdentitySaveRequest):
     safe_name = "".join(c for c in req.name if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
-    file_path = IDENTITIES_DIR / f"{safe_name}.json"
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Identity name must contain letters or digits.")
+    file_path = resolve_within(IDENTITIES_DIR, f"{safe_name[:80]}.json")
     payload = {
         "name": req.name,
         "avatar_persona": req.avatar_persona,
@@ -1530,7 +1545,7 @@ async def list_identities():
 @app.get("/api/v1/identity/load/{name}")
 async def load_identity_profile(name: str):
     safe_name = name.replace(' ', '_')
-    file_path = IDENTITIES_DIR / f"{safe_name}.json"
+    file_path = resolve_within(IDENTITIES_DIR, f"{safe_name}.json")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Identity not found")
     with open(file_path, "r", encoding="utf-8") as f:
@@ -1666,8 +1681,8 @@ async def clear_gallery_api():
 
 @app.delete("/api/v1/gallery/{filename}")
 async def delete_gallery_item_api(filename: str):
-    target = OUTPUT_DIR / filename
-    if not target.exists():
+    target = resolve_within(OUTPUT_DIR, filename)
+    if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
         
     try:
