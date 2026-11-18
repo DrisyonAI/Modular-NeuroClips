@@ -252,13 +252,22 @@ sequenceDiagram
 git clone https://github.com/DrisyonAI/Modular-NeuroClips.git
 cd Modular-NeuroClips
 
-# Switch to multi-agent branch
-git checkout feature/multi-agent-orchestration
+# Configure secrets (required: the app rejects every request until auth is set)
+cp .env.example .env
+python -m src.services.auth hash     # -> NEUROCLIPS_ADMIN_PASSWORD_HASH (min 12 chars)
+python -m src.services.auth secret   # -> NEUROCLIPS_SESSION_SECRET
 
-# Build & launch container
+# Build & launch container (binds 127.0.0.1:8130; Caddyfile / nginx.conf proxy to it)
 docker compose build
 docker compose up -d
 ```
+
+### Authentication
+* Sign in at `/login` with `NEUROCLIPS_ADMIN_USER` and the password you hashed.
+* Sessions are HttpOnly, HMAC-signed cookies (`NEUROCLIPS_SESSION_TTL_HOURS`, default 12).
+* `/api/*` returns `401` without a session; pages redirect to `/login`. `/health` stays public.
+* Five failed logins from one IP lock that IP out for five minutes.
+* Local development only: `NEUROCLIPS_AUTH_DISABLED=1` turns the gate off.
 
 ### Live Environment
 * **Web Portal**: `https://neuroclips.mytestbed.tech/`
